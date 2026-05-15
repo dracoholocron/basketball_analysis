@@ -4,8 +4,8 @@ version: "3.9"
 # Basketball Analytics Platform — Docker Compose
 #
 # Profiles:
-#   dev   — api, worker-gpu, db, redis, minio (no proxy/frontend)
-#   prod  — all services including frontend + caddy reverse proxy
+#   dev   — api, worker-gpu, db, redis, minio, frontend (localhost:3000)
+#   prod  — all services including caddy reverse proxy (TLS)
 #
 # Usage:
 #   dev:   docker compose --profile dev up -d --build
@@ -150,13 +150,20 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    profiles: ["prod"]
+    profiles: ["dev", "prod"]
     restart: unless-stopped
+    ports:
+      - "4000:3000"
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
     logging: *default-logging
 
   # ── Caddy Reverse Proxy ──────────────────────────────────────────────────────

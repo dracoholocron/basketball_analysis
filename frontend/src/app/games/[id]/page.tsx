@@ -56,6 +56,7 @@ export default function GameDetailPage() {
     current_stage: string;
     id?: string;
     output_s3_key?: string;
+    error_message?: string | null;
   } | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -75,6 +76,8 @@ export default function GameDetailPage() {
       setJobStatus({ status: job.status, progress_pct: 0, current_stage: job.current_stage, id: job.id });
       await pollJobUntilDone(job.id, (j) => {
         setJobStatus({ ...j, id: job.id });
+      }).catch((err: Error) => {
+        setJobStatus((prev) => prev ? { ...prev, status: "failed", error_message: err.message } : prev);
       });
       const m = await getGameMetrics(id);
       setMetrics(m);
@@ -160,6 +163,11 @@ export default function GameDetailPage() {
                     >
                       Download annotated video →
                     </a>
+                  )}
+                  {jobStatus.status === "failed" && jobStatus.error_message && (
+                    <p className="mt-2 text-xs text-red-600 bg-red-50 rounded px-2 py-1 ring-1 ring-red-200">
+                      Error: {jobStatus.error_message}
+                    </p>
                   )}
                 </div>
               )}

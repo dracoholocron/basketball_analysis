@@ -22,34 +22,67 @@ User → Caddy/Nginx → Next.js Frontend
 ### Prerequisites
 - Docker Desktop with WSL2 backend
 - NVIDIA driver ≥ 591 + `nvidia-container-toolkit`
-- Git
+- Git, Python 3.12, ffmpeg (optional, for video pre-processing)
 
-```bash
+```powershell
 # 1. Clone
-git clone https://github.com/your-org/basketball_analytics.git
-cd basketball_analytics
+git clone https://github.com/dracoholocron/basketball_analysis.git
+cd basketball_analysis
 
 # 2. Configure secrets
-cp .env.example .env
-# Edit .env with your passwords / JWT secret
+Copy-Item .env.example .env
+# Edit .env: set POSTGRES_PASSWORD, JWT_SECRET, MINIO_SECRET_KEY
 
-# 3. Start dev stack (no frontend / proxy)
+# 3. Start dev stack (api + worker-gpu + db + redis + minio + frontend)
 docker compose --profile dev up -d --build
 
-# 4. Run migrations
+# 4. Run migrations + seed (creates admin user, org, season, teams)
 docker compose exec api alembic upgrade head
+docker compose exec api python seed.py
 
-# 5. Smoke tests
+# 5. Open the UI
+# http://localhost:3000  →  login: admin@test.com / Test1234!
+# http://localhost:8000/docs  →  Swagger API docs
+
+# 6. Smoke tests
 docker compose exec api python -m pytest tests/smoke -v
-
-# 6. Open API docs
-# http://localhost:8000/docs
 ```
 
 ### GPU verification inside container
-```bash
+```powershell
 docker compose exec worker-gpu nvidia-smi
 docker compose exec worker-gpu python -c "import torch; print(torch.cuda.get_device_name(0))"
+```
+
+### Step-by-step: from zero to first real video analysis
+
+```powershell
+# STEP 1 — Train real models (requires Roboflow API key, ~3-4 hrs on RTX 5070)
+.\.venv\Scripts\Activate.ps1
+$env:ROBOFLOW_API_KEY = "your_key_here"
+.\scripts\train_models.ps1
+
+# STEP 2 — Deploy trained models into running worker
+.\scripts\deploy_models.ps1 -DisableDummyMode
+
+# STEP 3 — Pre-process your videos (downscale from 2400x1080 → 1280x576)
+python scripts\downscale_video.py `
+  --folder "C:\path\to\your\videos" `
+  --out-dir "C:\path\to\your\videos\scaled" `
+  --height 576
+
+# STEP 4a — Upload via UI: http://localhost:3000
+#   → Admin → create Season → Games → New Game → upload video → Analyze
+
+# STEP 4b — Or batch ingest via CLI:
+python scripts\ingest_folder.py `
+  --folder "C:\path\to\your\videos\scaled" `
+  --season-id <UUID from seed output or Admin page> `
+  --court-level fiba_juvenil `
+  --poll
+
+# STEP 5 — Monitor jobs at http://localhost:3000/jobs
+# STEP 6 — View analytics at http://localhost:3000/games/<id>
 ```
 
 ## Models
@@ -105,10 +138,9 @@ Once training is done, unset dummy mode:
 Remove-Item Env:\BA_DUMMY_MODELS -ErrorAction SilentlyContinue
 ```
 
-Use the helper script to copy models into the Docker volume:
+After training, deploy models into the running Docker volume:
 ```powershell
-$env:BA_MODELS_SOURCE = "basketball_analysis\models"
-.\scripts\fetch_models.ps1
+.\scripts\deploy_models.ps1 -DisableDummyMode
 ```
 
 ## Court Profiles
@@ -217,7 +249,8 @@ The RTX 5070 uses Blackwell architecture (sm_120) and requires:
 │   ├── integration/        # Synthetic video pipeline regression
 │   └── e2e/                # HTTP full-flow tests
 ├── bench/                  # GPU FPS benchmark
-├── scripts/                # deploy.ps1, fetch_models.ps1, build_dummy_models.ps1, train_models.ps1, seed.py
+├── scripts/                # seed.py, build_dummy_models.ps1, train_models.ps1, deploy_models.ps1
+│                           # ingest_folder.py, downscale_video.py, preprocess_video.ps1, e2e_manual.py
 ├── docker-compose.yml      # Multi-service stack (dev + prod profiles)
 ├── Caddyfile               # Reverse proxy config
 └── .env.example

@@ -60,7 +60,45 @@ export async function getGameMetrics(gameId: string) {
   return data;
 }
 
+// ── Seasons ───────────────────────────────────────────────────────────────────
+export async function listSeasons(skip = 0, limit = 50) {
+  const { data } = await api.get("/seasons", { params: { skip, limit } });
+  return data;
+}
+
+export async function createSeason(payload: Record<string, unknown>) {
+  const { data } = await api.post("/seasons", payload);
+  return data;
+}
+
+// ── Organizations ─────────────────────────────────────────────────────────────
+export async function listOrganizations(skip = 0, limit = 50) {
+  const { data } = await api.get("/organizations", { params: { skip, limit } });
+  return data;
+}
+
+export async function createOrganization(payload: Record<string, unknown>) {
+  const { data } = await api.post("/organizations", payload);
+  return data;
+}
+
+// ── Teams ─────────────────────────────────────────────────────────────────────
+export async function listTeams(skip = 0, limit = 50) {
+  const { data } = await api.get("/teams", { params: { skip, limit } });
+  return data;
+}
+
+export async function createTeam(payload: Record<string, unknown>) {
+  const { data } = await api.post("/teams", payload);
+  return data;
+}
+
 // ── Jobs ──────────────────────────────────────────────────────────────────────
+export async function listJobs(skip = 0, limit = 30) {
+  const { data } = await api.get("/jobs", { params: { skip, limit } });
+  return data;
+}
+
 export async function getJob(jobId: string) {
   const { data } = await api.get(`/jobs/${jobId}`);
   return data;

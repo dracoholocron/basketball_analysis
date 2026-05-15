@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import uuid
+from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_db
@@ -15,6 +17,20 @@ from ..schemas.job import JobRead
 from ..services.storage import get_storage
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+@router.get("", response_model=List[JobRead])
+async def list_jobs(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """List all jobs ordered by creation time descending."""
+    result = await db.execute(
+        select(Job).order_by(desc(Job.created_at)).offset(skip).limit(limit)
+    )
+    return result.scalars().all()
 
 
 @router.get("/{job_id}", response_model=JobRead)
