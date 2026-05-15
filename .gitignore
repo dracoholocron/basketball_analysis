@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+*.env.local
+
+# Trained model weights (large binaries — store in MinIO / external storage)
+*.pt
+*.onnx
+*.engine
+*.trt
+!basketball_analysis/models/put_models_here.txt
+
+# Training artifacts
+runs/
+wandb/
+*.yaml.bak
+
+# Videos and large media (store in MinIO)
+samples/*.mp4
+samples/*.avi
+samples/*.mov
+!samples/.gitkeep
+
+# Build artifacts
+node_modules/
+.next/
+out/
+.turbo/
+
+# Docker / OS
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.idea/
+*.suo
+*.user
+
+# Benchmark results (keep baseline, ignore per-run reports)
+bench/report.json
+bench/*.json
+!bench/baseline.json
+
+# Stubs (runtime cache)
+stubs/
+basketball_analysis/stubs/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

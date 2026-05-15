@@ -1,0 +1,17 @@
+{
+  "player_detector": {
+    "fps": 539.9477654482946,
+    "ms_per_frame": 1.8520310000167228,
+    "n_frames": 100
+  },
+  "ball_detector": {
+    "fps": 480.4403139582394,
+    "ms_per_frame": 2.0814239999162965,
+    "n_frames": 100
+  },
+  "court_keypoint_detector": {
+    "fps": 446.11290671343653,
+    "ms_per_frame": 2.241585000010673,
+    "n_frames": 100
+  }
+}

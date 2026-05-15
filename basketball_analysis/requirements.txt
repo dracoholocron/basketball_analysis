@@ -1,0 +1,33 @@
+# Core CV / ML — install PyTorch separately with CUDA 12.8 for RTX 5070 (Blackwell sm_120):
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.7
+torchvision>=0.22
+
+# Computer vision — headless only (no GUI deps conflict)
+opencv-python-headless>=4.9.0
+
+numpy>=1.24,<2.0
+pandas>=2.0
+Pillow>=10.0
+supervision>=0.25
+ultralytics>=8.3
+transformers>=4.46
+roboflow>=1.1
+
+# Config / validation
+pydantic>=2.0
+pydantic-settings>=2.0
+
+# Storage / API (for worker)
+boto3>=1.34
+redis>=5.0
+celery>=5.4
+sqlalchemy>=2.0
+alembic>=1.13
+asyncpg>=0.29
+psycopg2-binary>=2.9
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.27

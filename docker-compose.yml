@@ -1,0 +1,186 @@
+version: "3.9"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Basketball Analytics Platform — Docker Compose
+#
+# Profiles:
+#   dev   — api, worker-gpu, db, redis, minio (no proxy/frontend)
+#   prod  — all services including frontend + caddy reverse proxy
+#
+# Usage:
+#   dev:   docker compose --profile dev up -d --build
+#   prod:  docker compose --profile prod up -d --build
+# ────────────────────────────────────────────────────────────────────────────
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-basketball}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-basketball}
+      POSTGRES_DB: ${POSTGRES_DB:-basketball}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-basketball}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── Redis (Celery broker + result backend) ──────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── MinIO (S3-compatible object storage) ────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9001:9001"   # MinIO console (dev only)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    logging: *default-logging
+
+  # ── FastAPI ─────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      BA_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-basketball}:${POSTGRES_PASSWORD:-basketball}@db:5432/${POSTGRES_DB:-basketball}
+      BA_REDIS_URL: redis://redis:6379/0
+      BA_MINIO_ENDPOINT: minio:9000
+      BA_MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      BA_MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      BA_SECRET_KEY: ${JWT_SECRET:-CHANGE_ME}
+      BA_DEBUG: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    logging: *default-logging
+
+  # ── GPU Worker (Celery + CUDA) ───────────────────────────────────────────────
+  worker-gpu:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    profiles: ["dev", "prod"]
+    restart: unless-stopped
+    runtime: nvidia           # requires nvidia-container-toolkit on host
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      BA_DUMMY_MODELS: ${BA_DUMMY_MODELS:-false}
+      BA_PLAYER_DETECTOR_PATH: /app/engine/models/player_detector.pt
+      BA_BALL_DETECTOR_PATH: /app/engine/models/ball_detector_model.pt
+      BA_COURT_KEYPOINT_DETECTOR_PATH: /app/engine/models/court_keypoint_detector.pt
+      BA_COURT_IMAGE_PATH: /app/engine/images/basketball_court.png
+      BA_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-basketball}:${POSTGRES_PASSWORD:-basketball}@db:5432/${POSTGRES_DB:-basketball}
+      BA_REDIS_URL: redis://redis:6379/0
+      BA_MINIO_ENDPOINT: minio:9000
+      BA_MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      BA_MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      ENGINE_PATH: /app/engine
+    volumes:
+      - models_data:/app/engine/models     # persist downloaded .pt models
+      - stubs_data:/app/engine/stubs
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery worker' > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging: *default-logging
+
+  # ── Next.js Frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    profiles: ["prod"]
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+
+  # ── Caddy Reverse Proxy ──────────────────────────────────────────────────────
+  proxy:
+    image: caddy:2-alpine
+    profiles: ["prod"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+    logging: *default-logging
+
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:
+  models_data:
+  stubs_data:
+  caddy_data:
+  caddy_config:

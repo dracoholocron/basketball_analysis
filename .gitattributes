@@ -1,0 +1,14 @@
+# Normalize line endings to LF in the repo, checkout with CRLF on Windows
+* text=auto eol=lf
+
+# Binaries - don't mangle
+*.pt binary
+*.onnx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.mp4 binary
+*.avi binary
+*.mov binary
+*.zip binary

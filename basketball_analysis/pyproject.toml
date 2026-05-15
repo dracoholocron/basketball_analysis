@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basketball_analysis"
+version = "0.1.0"
+description = "Basketball video analysis engine – player/ball tracking, tactics, speed & distance"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24,<2.0",
+    "opencv-python-headless>=4.9",
+    "pandas>=2.0",
+    "Pillow>=10.0",
+    "roboflow>=1.1",
+    "supervision>=0.25",
+    # PyTorch 2.7 with CUDA 12.8 (Blackwell sm_120 – RTX 5070)
+    # Install separately: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+    "torch>=2.7",
+    "torchvision>=0.22",
+    "transformers>=4.46",
+    "ultralytics>=8.3",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "ball_aquisition*",
+    "configs*",
+    "court_keypoint_detector*",
+    "drawers*",
+    "pass_and_interception_detector*",
+    "speed_and_distance_calculator*",
+    "tactical_view_converter*",
+    "team_assigner*",
+    "trackers*",
+    "utils*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

@@ -1,0 +1,31 @@
+# Replace {$DOMAIN} with your actual domain or set the DOMAIN env variable
+{$DOMAIN:localhost} {
+
+    # Frontend (Next.js)
+    handle / {
+        reverse_proxy frontend:3000
+    }
+    handle /games* {
+        reverse_proxy frontend:3000
+    }
+    handle /login* {
+        reverse_proxy frontend:3000
+    }
+    handle /_next/* {
+        reverse_proxy frontend:3000
+    }
+
+    # API
+    handle /api/* {
+        reverse_proxy api:8000
+    }
+    handle /health {
+        reverse_proxy api:8000
+    }
+    handle /docs* {
+        reverse_proxy api:8000
+    }
+    handle /redoc* {
+        reverse_proxy api:8000
+    }
+}
