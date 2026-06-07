@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 const ADMIN_EMAIL = process.env.TEST_EMAIL ?? "admin@test.com";
-const ADMIN_PASS = process.env.TEST_PASSWORD ?? "admin123";
+const ADMIN_PASS = process.env.TEST_PASSWORD ?? "Test1234!";
 
 test.describe("Authentication", () => {
   test("login page renders", async ({ page }) => {

@@ -10,7 +10,7 @@ import path from "path";
 
 const SCREENSHOTS_DIR = path.join(__dirname, "../../docs/user-manual/screenshots");
 const EMAIL = process.env.TEST_EMAIL ?? "admin@test.com";
-const PASS = process.env.TEST_PASSWORD ?? "admin123";
+const PASS = process.env.TEST_PASSWORD ?? "Test1234!";
 
 async function shot(page: Page, slug: string, selector?: string) {
   const filepath = path.join(SCREENSHOTS_DIR, `${slug}.png`);

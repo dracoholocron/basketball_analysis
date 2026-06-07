@@ -4,7 +4,7 @@
 import { Page } from "@playwright/test";
 
 const ADMIN_EMAIL = process.env.TEST_EMAIL ?? "admin@test.com";
-const ADMIN_PASS = process.env.TEST_PASSWORD ?? "admin123";
+const ADMIN_PASS = process.env.TEST_PASSWORD ?? "Test1234!";
 
 export async function loginAs(page: Page, email = ADMIN_EMAIL, password = ADMIN_PASS) {
   await page.goto("/login");

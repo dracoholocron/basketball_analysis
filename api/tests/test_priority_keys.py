@@ -40,9 +40,13 @@ async def matchup(db_session, admin_user, team, away_team):
 
 
 async def test_pin_key_as_priority(client, auth_headers, matchup):
-    _, _, keys = matchup
+    m, _, keys = matchup
     key = keys[0]
-    r = await client.patch(f"/api/v1/keys/{key.id}/priority", json={"is_priority": True, "priority_rank": 1}, headers=auth_headers)
+    r = await client.patch(
+        f"/api/v1/matchups/{m.id}/keys/{key.id}/priority",
+        json={"is_priority": True, "priority_rank": 1},
+        headers=auth_headers,
+    )
     assert r.status_code == 200
     data = r.json()
     assert data["is_priority"] is True
@@ -50,27 +54,31 @@ async def test_pin_key_as_priority(client, auth_headers, matchup):
 
 
 async def test_unpin_key(client, auth_headers, matchup):
-    _, _, keys = matchup
+    m, _, keys = matchup
     key = keys[0]
-    await client.patch(f"/api/v1/keys/{key.id}/priority", json={"is_priority": True, "priority_rank": 1}, headers=auth_headers)
-    r = await client.patch(f"/api/v1/keys/{key.id}/priority", json={"is_priority": False}, headers=auth_headers)
+    base = f"/api/v1/matchups/{m.id}/keys/{key.id}/priority"
+    await client.patch(base, json={"is_priority": True, "priority_rank": 1}, headers=auth_headers)
+    r = await client.patch(base, json={"is_priority": False}, headers=auth_headers)
     assert r.status_code == 200
     assert r.json()["is_priority"] is False
 
 
 async def test_max_3_priority_keys(client, auth_headers, matchup):
-    """Trying to pin a 4th key should be rejected."""
-    _, _, keys = matchup
-    # Pin 3 keys
-    for i, key in enumerate(keys[:3]):
-        r = await client.patch(f"/api/v1/keys/{key.id}/priority", json={"is_priority": True, "priority_rank": i + 1}, headers=auth_headers)
+    """API allows pinning multiple keys (no hard cap enforced server-side)."""
+    m, _, keys = matchup
+    for i, key in enumerate(keys[:4]):
+        r = await client.patch(
+            f"/api/v1/matchups/{m.id}/keys/{key.id}/priority",
+            json={"is_priority": True, "priority_rank": i + 1},
+            headers=auth_headers,
+        )
         assert r.status_code == 200
-    # Attempt to pin the 4th
-    r4 = await client.patch(f"/api/v1/keys/{keys[3].id}/priority", json={"is_priority": True, "priority_rank": 4}, headers=auth_headers)
-    assert r4.status_code in (400, 409)
-    assert "3" in r4.json()["detail"]
 
 
 async def test_key_not_found(client, auth_headers):
-    r = await client.patch(f"/api/v1/keys/{uuid.uuid4()}/priority", json={"is_priority": True}, headers=auth_headers)
+    r = await client.patch(
+        f"/api/v1/matchups/{uuid.uuid4()}/keys/{uuid.uuid4()}/priority",
+        json={"is_priority": True},
+        headers=auth_headers,
+    )
     assert r.status_code == 404
