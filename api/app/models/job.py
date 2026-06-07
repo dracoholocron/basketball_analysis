@@ -4,6 +4,7 @@ from enum import Enum
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from ..core.types import JsonB
 
 from ..core.database import Base
 
@@ -51,6 +52,11 @@ class Job(Base):
     progress_pct: Mapped[int] = mapped_column(Integer, default=0)
     celery_task_id: Mapped[str | None] = mapped_column(String(255))
     output_s3_key: Mapped[str | None] = mapped_column(String(500))
+    track_data_s3_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_video_s3_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    cv_events_json: Mapped[list | None] = mapped_column(JsonB, nullable=True)
+    highlights_s3_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    highlights_manifest_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

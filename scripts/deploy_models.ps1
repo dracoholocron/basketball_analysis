@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Copy trained .pt models from basketball_analysis/models/ into the running
     worker-gpu container volume and restart the worker.
@@ -43,11 +43,11 @@ $success = 0
 foreach ($modelName in $Models) {
     $srcPath = Join-Path $ModelsDir "${modelName}.pt"
     if (-not (Test-Path $srcPath)) {
-        Write-Warning "  Not found: $srcPath — skipping"
+        Write-Warning "  Not found: $srcPath  -  skipping"
         continue
     }
     $sizeMB = [math]::Round((Get-Item $srcPath).Length / 1MB, 1)
-    Write-Host "  Copying ${modelName}.pt (${sizeMB} MB)..."
+    Write-Host "  Copying ${modelName}.pt ($sizeMB MB)..."
     docker cp $srcPath "${ContainerName}:/app/engine/models/${modelName}.pt" 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "    OK"

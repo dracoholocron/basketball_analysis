@@ -1,17 +1,17 @@
 {
   "player_detector": {
-    "fps": 539.9477654482946,
-    "ms_per_frame": 1.8520310000167228,
-    "n_frames": 100
+    "fps": 73.98728424934721,
+    "ms_per_frame": 13.515836000005947,
+    "n_frames": 200
   },
   "ball_detector": {
-    "fps": 480.4403139582394,
-    "ms_per_frame": 2.0814239999162965,
-    "n_frames": 100
+    "fps": 70.12454540056154,
+    "ms_per_frame": 14.260341999906814,
+    "n_frames": 200
   },
   "court_keypoint_detector": {
-    "fps": 446.11290671343653,
-    "ms_per_frame": 2.241585000010673,
-    "n_frames": 100
+    "fps": 43.80885966719345,
+    "ms_per_frame": 22.826433000009274,
+    "n_frames": 200
   }
 }

@@ -96,7 +96,7 @@ async def seed() -> None:
                 Season.organization_id == org.id, Season.year == "2026"
             )
         )
-        season = result.scalar_one_or_none()
+        season = result.scalars().first()
         if season is None:
             season = Season(
                 organization_id=org.id,

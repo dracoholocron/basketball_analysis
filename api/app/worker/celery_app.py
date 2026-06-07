@@ -6,7 +6,7 @@ celery_app = Celery(
     "basketball_analytics",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.worker.tasks"],
+    include=["app.worker.tasks", "app.worker.cpu_tasks", "app.worker.gpu_tasks"],
 )
 
 celery_app.conf.update(
@@ -17,8 +17,10 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,
-    worker_prefetch_multiplier=1,  # GPU worker: one task at a time
+    worker_prefetch_multiplier=1,
     task_routes={
         "app.worker.tasks.run_analysis": {"queue": "gpu"},
+        "app.worker.cpu_tasks.run_simulation_task": {"queue": "cpu"},
+        "app.worker.gpu_tasks.run_pose_analysis_task": {"queue": "gpu"},
     },
 )

@@ -18,6 +18,11 @@ _admin = require_role("admin")
 _staff = require_role("admin", "coach")
 
 
+class OrganizationUpdate(OrganizationCreate):
+    name: str | None = None  # type: ignore[assignment]
+    slug: str | None = None  # type: ignore[assignment]
+
+
 @router.get("", response_model=list[OrganizationRead])
 async def list_organizations(
     db: AsyncSession = Depends(get_db),
@@ -58,3 +63,33 @@ async def create_organization(
     await db.commit()
     await db.refresh(org)
     return org
+
+
+@router.put("/{org_id}", response_model=OrganizationRead)
+async def update_organization(
+    org_id: uuid.UUID,
+    payload: OrganizationUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_admin),
+):
+    org = await db.get(Organization, org_id)
+    if org is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    for field, value in payload.model_dump(exclude_unset=True, exclude_none=True).items():
+        setattr(org, field, value)
+    await db.commit()
+    await db.refresh(org)
+    return org
+
+
+@router.delete("/{org_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_organization(
+    org_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_admin),
+):
+    org = await db.get(Organization, org_id)
+    if org is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    await db.delete(org)
+    await db.commit()

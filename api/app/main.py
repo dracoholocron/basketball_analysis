@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .core.config import settings
 from .routers import auth, games, jobs, metrics
 from .routers import organizations, seasons, teams, players
+from .routers import box_scores, game_events, matchups, plays, training
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -46,6 +47,11 @@ app.include_router(organizations.router, prefix=_prefix)
 app.include_router(seasons.router, prefix=_prefix)
 app.include_router(teams.router, prefix=_prefix)
 app.include_router(players.router, prefix=_prefix)
+app.include_router(box_scores.router, prefix=_prefix)
+app.include_router(game_events.router, prefix=_prefix)
+app.include_router(matchups.router, prefix=_prefix)
+app.include_router(plays.router, prefix=_prefix)
+app.include_router(training.router, prefix=_prefix)
 
 
 @app.get("/health", tags=["health"])

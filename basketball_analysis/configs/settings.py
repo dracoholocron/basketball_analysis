@@ -107,17 +107,25 @@ class EngineSettings(BaseSettings):
     )
 
     # ── Model paths ────────────────────────────────────────────────────────────
+    # YOLO11 multi-class model (Ball, Clock, Hoop, Overlay, Player, Ref, Scoreboard).
+    # When set, both PlayerTracker and BallTracker share this single model file,
+    # each filtering their respective class.  Falls back to the legacy separate models
+    # when the file does not exist.
+    multiclass_detector_path: str = Field(
+        default="models/yolo11_multiclass.pt",
+        description="Path to the YOLO11 multi-class detector (players + ball + hoop)",
+    )
     player_detector_path: str = Field(
         default="models/player_detector.pt",
-        description="Path to the YOLO player detection model",
+        description="Path to the legacy YOLO player detection model (fallback)",
     )
     ball_detector_path: str = Field(
         default="models/ball_detector.pt",
-        description="Path to the YOLO ball detection model",
+        description="Path to the legacy YOLO ball detection model (fallback)",
     )
     court_keypoint_detector_path: str = Field(
         default="models/court_keypoint_detector.pt",
-        description="Path to the YOLOv8-pose court keypoint model",
+        description="Path to the YOLOv8/YOLO11-pose court keypoint model",
     )
     court_image_path: str = Field(
         default="images/basketball_court.png",

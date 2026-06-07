@@ -46,3 +46,21 @@ def require_role(*roles: str):
             )
         return current_user
     return _check
+
+
+async def get_current_org_id(
+    user: User = Depends(get_current_user),
+) -> uuid.UUID | None:
+    """Return the org_id from JWT user.
+
+    Returns None for admin users without an org (acts as super-admin, sees all).
+    Raises 403 if a non-admin user has no org.
+    """
+    if user.organization_id is not None:
+        return user.organization_id
+    if user.role == "admin":
+        return None  # Super-admin bypass
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="User has no organization assigned",
+    )

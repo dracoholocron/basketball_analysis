@@ -1,12 +1,15 @@
 "use client";
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { login } from "@/lib/api";
+import { AlertCircle, Loader2, Eye, EyeOff } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -16,25 +19,32 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await login(email, password);
-      router.replace("/games");
+      router.replace("/");
     } catch {
-      setError("Invalid email or password");
+      setError("Invalid email or password. Please try again.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-gradient-to-br from-primary-700 to-primary-500 p-4">
-      <div className="w-full max-w-md">
-        <div className="card">
-          {/* Logo / Header */}
+    <main className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-primary-900 to-slate-900 p-4">
+      {/* Background pattern */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute -top-40 -right-40 h-96 w-96 rounded-full bg-primary-600/10 blur-3xl" />
+        <div className="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-violet-600/10 blur-3xl" />
+      </div>
+
+      <div className="relative w-full max-w-md">
+        {/* Card */}
+        <div className="rounded-2xl bg-white shadow-2xl p-8">
+          {/* Logo */}
           <div className="mb-8 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-primary-600 text-2xl text-white font-bold shadow">
-              🏀
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary-600 to-violet-600 text-white font-bold text-xl shadow-lg">
+              IQ
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">Basketball Analytics</h1>
-            <p className="mt-1 text-sm text-gray-500">Sign in to your account</p>
+            <h1 className="font-display text-2xl font-bold text-slate-900">Basketball IQ</h1>
+            <p className="mt-1.5 text-sm text-slate-500">Sign in to your analytics platform</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -48,32 +58,58 @@ export default function LoginPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                autoComplete="email"
               />
             </div>
+
             <div>
               <label htmlFor="password" className="label">Password</label>
-              <input
-                id="password"
-                type="password"
-                className="input"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
+              <div className="relative">
+                <input
+                  id="password"
+                  type={showPwd ? "text" : "password"}
+                  className="input pr-10"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  aria-label={showPwd ? "Hide password" : "Show password"}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  onClick={() => setShowPwd((v) => !v)}
+                  tabIndex={-1}
+                >
+                  {showPwd ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </div>
 
             {error && (
-              <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600 ring-1 ring-red-200">
+              <div className="flex items-center gap-2 rounded-xl bg-danger-50 px-4 py-3 text-sm text-danger-600 ring-1 ring-danger-100">
+                <AlertCircle size={15} className="flex-shrink-0" />
                 {error}
-              </p>
+              </div>
             )}
 
-            <button type="submit" className="btn-primary w-full justify-center" disabled={loading}>
-              {loading ? "Signing in…" : "Sign In"}
+            <button type="submit" className="btn-primary w-full mt-2" disabled={loading}>
+              {loading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Signing in…
+                </>
+              ) : (
+                "Sign In"
+              )}
             </button>
           </form>
         </div>
+
+        <p className="mt-6 text-center text-xs text-slate-400">
+          Basketball IQ · AI-Powered Analytics
+        </p>
       </div>
     </main>
   );

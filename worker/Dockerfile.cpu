@@ -1,0 +1,23 @@
+# CPU worker — lightweight, no CUDA required
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY api/requirements.txt /tmp/api_requirements.txt
+RUN pip install --no-cache-dir -r /tmp/api_requirements.txt
+
+COPY api/ /app/api/
+
+ENV PYTHONPATH=/app/api
+ENV PYTHONUNBUFFERED=1
+
+# Celery worker — CPU queue, concurrency 2
+CMD ["celery", "-A", "app.worker.celery_app", "worker", \
+     "--loglevel=info", \
+     "--queues=cpu", \
+     "--concurrency=2"]

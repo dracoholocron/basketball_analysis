@@ -1,82 +1,74 @@
+"""
+Player detection and tracking using YOLO + ByteTrack.
+
+Supports both the legacy single-class player model and the new YOLO11
+multi-class model (Ball, Clock, Hoop, Overlay, Player, Ref, Scoreboard).
+The class name 'Player' is accepted from both.
+"""
+from __future__ import annotations
+
+import os
+
 from ultralytics import YOLO
 import supervision as sv
 from utils import read_stub, save_stub
 
+_PLAYER_CLASS_NAMES: tuple[str, ...] = ("Player",)
+
+
 class PlayerTracker:
     """
-    A class that handles player detection and tracking using YOLO and ByteTrack.
+    Player detection and tracking using YOLO and ByteTrack.
 
-    This class combines YOLO object detection with ByteTrack tracking to maintain consistent
-    player identities across frames while processing detections in batches.
+    Works with:
+    - Legacy single-class player model (class "Player")
+    - New YOLO11 multi-class model (also exposes class "Player")
     """
-    def __init__(self, model_path):
-        """
-        Initialize the PlayerTracker with YOLO model and ByteTrack tracker.
 
-        Args:
-            model_path (str): Path to the YOLO model weights.
-        """
-        self.model = YOLO(model_path) 
+    def __init__(self, model_path: str, conf: float = 0.5) -> None:
+        self.model = YOLO(model_path)
         self.tracker = sv.ByteTrack()
+        self.conf = conf
 
-    def detect_frames(self, frames):
-        """
-        Detect players in a sequence of frames using batch processing.
-
-        Args:
-            frames (list): List of video frames to process.
-
-        Returns:
-            list: YOLO detection results for each frame.
-        """
-        batch_size=20 
-        detections = [] 
-        for i in range(0,len(frames),batch_size):
-            detections_batch = self.model.predict(frames[i:i+batch_size],conf=0.5)
-            detections += detections_batch
+    def detect_frames(self, frames: list) -> list:
+        batch_size = 20
+        detections: list = []
+        for i in range(0, len(frames), batch_size):
+            batch = self.model.predict(frames[i : i + batch_size], conf=self.conf, verbose=False)
+            detections += batch
         return detections
 
-    def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
-        """
-        Get player tracking results for a sequence of frames with optional caching.
-
-        Args:
-            frames (list): List of video frames to process.
-            read_from_stub (bool): Whether to attempt reading cached results.
-            stub_path (str): Path to the cache file.
-
-        Returns:
-            list: List of dictionaries containing player tracking information for each frame,
-                where each dictionary maps player IDs to their bounding box coordinates.
-        """
-        tracks = read_stub(read_from_stub,stub_path)
-        if tracks is not None:
-            if len(tracks) == len(frames):
-                return tracks
+    def get_object_tracks(
+        self,
+        frames: list,
+        read_from_stub: bool = False,
+        stub_path: str | None = None,
+    ) -> list[dict]:
+        tracks = read_stub(read_from_stub, stub_path)
+        if tracks is not None and len(tracks) == len(frames):
+            return tracks
 
         detections = self.detect_frames(frames)
-
-        tracks=[]
+        tracks = []
 
         for frame_num, detection in enumerate(detections):
             cls_names = detection.names
-            cls_names_inv = {v:k for k,v in cls_names.items()}
+            cls_names_inv = {v: k for k, v in cls_names.items()}
 
-            # Covert to supervision Detection format
-            detection_supervision = sv.Detections.from_ultralytics(detection)
-
-            # Track Objects
-            detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
+            det_sv = sv.Detections.from_ultralytics(detection)
+            det_with_tracks = self.tracker.update_with_detections(det_sv)
 
             tracks.append({})
-
-            for frame_detection in detection_with_tracks:
+            for frame_detection in det_with_tracks:
                 bbox = frame_detection[0].tolist()
                 cls_id = frame_detection[3]
                 track_id = frame_detection[4]
 
-                if cls_id == cls_names_inv['Player']:
-                    tracks[frame_num][track_id] = {"bbox":bbox}
-        
-        save_stub(stub_path,tracks)
+                if any(
+                    name in cls_names_inv and cls_id == cls_names_inv[name]
+                    for name in _PLAYER_CLASS_NAMES
+                ):
+                    tracks[frame_num][track_id] = {"bbox": bbox}
+
+        save_stub(stub_path, tracks)
         return tracks

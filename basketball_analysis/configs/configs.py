@@ -5,6 +5,7 @@ New code should import from configs.settings instead.
 from .settings import settings
 
 STUBS_DEFAULT_PATH = settings.stubs_default_path
+MULTICLASS_DETECTOR_PATH = settings.multiclass_detector_path
 PLAYER_DETECTOR_PATH = settings.player_detector_path
 BALL_DETECTOR_PATH = settings.ball_detector_path
 COURT_KEYPOINT_DETECTOR_PATH = settings.court_keypoint_detector_path

@@ -22,6 +22,7 @@ from drawers import (
 )
 from configs import (
     STUBS_DEFAULT_PATH,
+    MULTICLASS_DETECTOR_PATH,
     PLAYER_DETECTOR_PATH,
     BALL_DETECTOR_PATH,
     COURT_KEYPOINT_DETECTOR_PATH,
@@ -72,6 +73,11 @@ def parse_args():
     return parser.parse_args()
 
 
+def _resolve_detector_path(multiclass: str, legacy: str) -> str:
+    """Return multi-class model path if it exists, else fall back to the legacy model."""
+    return multiclass if os.path.exists(multiclass) else legacy
+
+
 def run_pipeline(
     input_video: str,
     output_video: str = OUTPUT_VIDEO_PATH,
@@ -80,8 +86,8 @@ def run_pipeline(
     team1_jersey: str = "white shirt",
     team2_jersey: str = "dark blue shirt",
     court_image_path: str = "./images/basketball_court.png",
-    player_detector_path: str = PLAYER_DETECTOR_PATH,
-    ball_detector_path: str = BALL_DETECTOR_PATH,
+    player_detector_path: str | None = None,
+    ball_detector_path: str | None = None,
     court_kp_detector_path: str = COURT_KEYPOINT_DETECTOR_PATH,
     court_profile: CourtProfile | None = None,
 ):
@@ -91,12 +97,22 @@ def run_pipeline(
     Returns a dict with computed metrics (passes, interceptions, ball acquisition per team,
     player distances and speeds) plus the path to the annotated output video.
     """
+    # Resolve model paths: prefer YOLO11 multi-class model when available
+    _player_path = player_detector_path or _resolve_detector_path(
+        MULTICLASS_DETECTOR_PATH, PLAYER_DETECTOR_PATH
+    )
+    _ball_path = ball_detector_path or _resolve_detector_path(
+        MULTICLASS_DETECTOR_PATH, BALL_DETECTOR_PATH
+    )
+    logger.info("Player detector: %s", _player_path)
+    logger.info("Ball detector:   %s", _ball_path)
+
     logger.info("Reading video: %s", input_video)
     video_frames = read_video(input_video)
     logger.info("Loaded %d frames", len(video_frames))
 
-    player_tracker = PlayerTracker(player_detector_path)
-    ball_tracker = BallTracker(ball_detector_path)
+    player_tracker = PlayerTracker(_player_path)
+    ball_tracker = BallTracker(_ball_path)
     court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path)
 
     player_tracks = player_tracker.get_object_tracks(

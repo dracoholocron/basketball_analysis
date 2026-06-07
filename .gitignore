@@ -72,3 +72,14 @@ coverage.xml
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# Test results and reports
+frontend/playwright-report/
+frontend/test-results/
+frontend/tsconfig.tsbuildinfo
+
+# Training workspace (large artifacts)
+train_workspace/
+
+# RTMPose data files (large binary)
+*.data

@@ -93,6 +93,26 @@ export async function createTeam(payload: Record<string, unknown>) {
   return data;
 }
 
+// ── Players ───────────────────────────────────────────────────────────────────
+export async function listPlayers(teamId?: string, skip = 0, limit = 100) {
+  const { data } = await api.get("/players", { params: { team_id: teamId, skip, limit } });
+  return data;
+}
+
+export async function createPlayer(payload: Record<string, unknown>) {
+  const { data } = await api.post("/players", payload);
+  return data;
+}
+
+export async function updatePlayer(playerId: string, payload: Record<string, unknown>) {
+  const { data } = await api.put(`/players/${playerId}`, payload);
+  return data;
+}
+
+export async function deletePlayer(playerId: string) {
+  await api.delete(`/players/${playerId}`);
+}
+
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 export async function listJobs(skip = 0, limit = 30) {
   const { data } = await api.get("/jobs", { params: { skip, limit } });
@@ -104,11 +124,234 @@ export async function getJob(jobId: string) {
   return data;
 }
 
+// ── Matchups ──────────────────────────────────────────────────────────────────
+export async function listMatchups(skip = 0, limit = 50) {
+  const { data } = await api.get("/matchups", { params: { skip, limit } });
+  return data;
+}
+
+export async function getUpcomingMatchups(limit = 5) {
+  const { data } = await api.get("/matchups/upcoming", { params: { limit } });
+  return data;
+}
+
+export async function getMatchup(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}`);
+  return data;
+}
+
+export async function createMatchup(payload: Record<string, unknown>) {
+  const { data } = await api.post("/matchups", payload);
+  return data;
+}
+
+export async function updateMatchup(matchupId: string, payload: Record<string, unknown>) {
+  const { data } = await api.put(`/matchups/${matchupId}`, payload);
+  return data;
+}
+
+export async function updateMatchupNotes(matchupId: string, notes: Record<string, unknown>) {
+  const { data } = await api.patch(`/matchups/${matchupId}/notes`, notes);
+  return data;
+}
+
+export async function deleteMatchup(matchupId: string) {
+  await api.delete(`/matchups/${matchupId}`);
+}
+
+export async function updateMatchupClock(matchupId: string, payload: Record<string, unknown>) {
+  const { data } = await api.patch(`/matchups/${matchupId}/clock`, payload);
+  return data;
+}
+
+export async function getPrepStatus(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}/prep-status`);
+  return data;
+}
+
+// ── Scouting Reports ──────────────────────────────────────────────────────────
+// NOTE: Backend endpoints for scouting reports are planned; these call the
+// matchup-scoped sub-resources. Pages degrade gracefully on 404.
+export async function getScoutingReport(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}/scouting-report`);
+  return data;
+}
+
+export async function generateScoutingReport(matchupId: string) {
+  const { data } = await api.post(`/matchups/${matchupId}/scouting-report/generate`);
+  return data;
+}
+
+export async function updateScoutingNotes(reportId: string, notes: string) {
+  const { data } = await api.patch(`/scouting-reports/${reportId}/notes`, { coach_notes: notes });
+  return data;
+}
+
+export async function getVideoInsights(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}/video-insights`);
+  return data;
+}
+
+// ── Simulation ────────────────────────────────────────────────────────────────
+export async function getSimulation(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}/prep-status`);
+  return data;
+}
+
+export async function runSimulation(matchupId: string, payload?: Record<string, unknown>) {
+  const { data } = await api.post(`/matchups/${matchupId}/simulate`, payload ?? {});
+  return data;
+}
+
+// ── Game Events (live tracker) ────────────────────────────────────────────────
+export async function listGameEvents(matchupId: string, skip = 0, limit = 200) {
+  const { data } = await api.get(`/matchups/${matchupId}/events`, { params: { skip, limit } });
+  return data;
+}
+
+export async function createGameEvent(matchupId: string, payload: Record<string, unknown>) {
+  const { data } = await api.post(`/matchups/${matchupId}/events`, payload);
+  return data;
+}
+
+export async function deleteGameEvent(matchupId: string, eventId: string) {
+  await api.delete(`/matchups/${matchupId}/events/${eventId}`);
+}
+
+export async function getLiveKeysStatus(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}/live-keys-status`);
+  return data;
+}
+
+export async function getEventHeatmap(matchupId: string) {
+  const { data } = await api.get(`/matchups/${matchupId}/event-heatmap`);
+  return data;
+}
+
+export async function setPriorityKey(
+  matchupId: string,
+  keyId: string,
+  isPriority: boolean,
+  priorityRank?: number,
+) {
+  const { data } = await api.patch(`/matchups/${matchupId}/keys/${keyId}/priority`, {
+    is_priority: isPriority,
+    priority_rank: priorityRank,
+  });
+  return data;
+}
+
+export async function triggerHalftimeResim(matchupId: string) {
+  const { data } = await api.post(`/matchups/${matchupId}/halftime-resim`);
+  return data;
+}
+
+// ── Plays ─────────────────────────────────────────────────────────────────────
+export async function listPlays(matchupId?: string, skip = 0, limit = 100) {
+  const { data } = await api.get("/plays", { params: { matchup_id: matchupId, skip, limit } });
+  return data;
+}
+
+export async function getPlay(playId: string) {
+  const { data } = await api.get(`/plays/${playId}`);
+  return data;
+}
+
+export async function createPlay(payload: Record<string, unknown>) {
+  const { data } = await api.post("/plays", payload);
+  return data;
+}
+
+export async function updatePlay(playId: string, payload: Record<string, unknown>) {
+  const { data } = await api.put(`/plays/${playId}`, payload);
+  return data;
+}
+
+export async function deletePlay(playId: string) {
+  await api.delete(`/plays/${playId}`);
+}
+
+// ── Box Scores ────────────────────────────────────────────────────────────────
+export async function listBoxScores(params?: {
+  game_id?: string;
+  team_id?: string;
+  season_id?: string;
+  skip?: number;
+  limit?: number;
+}) {
+  const { data } = await api.get("/box-scores", { params });
+  return data;
+}
+
+export async function createBoxScore(payload: Record<string, unknown>) {
+  const { data } = await api.post("/box-scores", payload);
+  return data;
+}
+
+export async function deleteBoxScore(boxScoreId: string) {
+  await api.delete(`/box-scores/${boxScoreId}`);
+}
+
+export async function importBoxScores(gameId: string) {
+  const { data } = await api.post(`/box-scores/import`, { game_id: gameId });
+  return data;
+}
+
+export async function getTeamAverages(teamId: string, seasonId?: string) {
+  const { data } = await api.get(`/box-scores/team-averages`, {
+    params: { team_id: teamId, season_id: seasonId },
+  });
+  return data;
+}
+
+// ── Training Sessions ─────────────────────────────────────────────────────────
+export async function listTrainingSessions(skip = 0, limit = 20) {
+  const { data } = await api.get("/training", { params: { skip, limit } });
+  return data;
+}
+
+export async function createTrainingSession(payload: { sport_drill?: string }) {
+  const { data } = await api.post("/training", payload);
+  return data;
+}
+
+export async function getTrainingSession(id: string) {
+  const { data } = await api.get(`/training/${id}`);
+  return data;
+}
+
+export async function uploadTrainingVideo(sessionId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post(`/training/${sessionId}/upload-video`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+}
+
+export async function triggerTrainingAnalysis(sessionId: string, poseEnabled = true) {
+  const { data } = await api.post(`/training/${sessionId}/analyze`, null, {
+    params: { pose_enabled: poseEnabled },
+  });
+  return data;
+}
+
+export async function getTrainingHighlights(sessionId: string) {
+  const { data } = await api.get(`/training/${sessionId}/highlights`);
+  return data;
+}
+
+export async function getTrainingCvEvents(sessionId: string) {
+  const { data } = await api.get(`/training/${sessionId}/cv-events`);
+  return data;
+}
+
+// ── Polling ───────────────────────────────────────────────────────────────────
 export async function pollJobUntilDone(
   jobId: string,
   onProgress?: (job: { status: string; progress_pct: number; current_stage: string }) => void,
   intervalMs = 3000,
-  timeoutMs = 3600_000,
+  timeoutMs = 3_600_000,
 ): Promise<unknown> {
   const start = Date.now();
   return new Promise((resolve, reject) => {
