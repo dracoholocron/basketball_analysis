@@ -2,7 +2,7 @@ import os
 import argparse
 import logging
 
-from utils import read_video, save_video, get_video_properties, CourtModeDetector
+from utils import read_video, save_video, iter_video_frames, get_video_properties, CourtModeDetector
 from trackers import PlayerTracker, BallTracker
 from team_assigner import TeamAssigner
 from court_keypoint_detector import CourtKeypointDetector
@@ -245,53 +245,125 @@ def run_pipeline(
     logger.info("Speed/distance done")
 
     _progress("drawing", 78)
-    player_tracks_drawer = PlayerTracksDrawer()
-    ball_tracks_drawer = BallTracksDrawer()
-    court_keypoint_drawer = CourtKeypointDrawer()
+    player_tracks_drawer    = PlayerTracksDrawer()
+    ball_tracks_drawer      = BallTracksDrawer()
+    court_keypoint_drawer   = CourtKeypointDrawer()
     team_ball_control_drawer = TeamBallControlDrawer()
-    frame_number_drawer = FrameNumberDrawer()
+    frame_number_drawer     = FrameNumberDrawer()
     pass_and_interceptions_drawer = PassInterceptionDrawer()
-    tactical_view_drawer = TacticalViewDrawer()
+    tactical_view_drawer    = TacticalViewDrawer()
     speed_and_distance_drawer = SpeedAndDistanceDrawer()
 
-    # The first drawer creates output_video_frames from video_frames.
-    # We delete video_frames immediately after so only ONE full frame list exists at a time.
     total_frames = len(video_frames)  # save count before deleting
-    output_video_frames = player_tracks_drawer.draw(
-        video_frames, player_tracks, player_assignment, ball_aquisition
-    )
-    del video_frames  # free ~5-10 GB before continuing with remaining drawers
 
-    output_video_frames = ball_tracks_drawer.draw(output_video_frames, ball_tracks)
-    output_video_frames = court_keypoint_drawer.draw(
-        output_video_frames, court_keypoints_per_frame
-    )
-    output_video_frames = frame_number_drawer.draw(output_video_frames)
-    output_video_frames = team_ball_control_drawer.draw(
-        output_video_frames, player_assignment, ball_aquisition
-    )
-    output_video_frames = pass_and_interceptions_drawer.draw(
-        output_video_frames, passes, interceptions
-    )
-    output_video_frames = speed_and_distance_drawer.draw(
-        output_video_frames,
-        player_tracks,
-        player_distances_per_frame,
-        player_speed_per_frame,
-    )
-    output_video_frames = tactical_view_drawer.draw(
-        output_video_frames,
-        tactical_view_converter.court_image_path,
-        tactical_view_converter.width,
-        tactical_view_converter.height,
-        tactical_view_converter.key_points,
-        tactical_player_positions,
-        player_assignment,
-        ball_aquisition,
+    # Pre-compute team_ball_control array (cheap — just ints, no images)
+    team_ball_control = team_ball_control_drawer.get_team_ball_control(
+        player_assignment, ball_aquisition
     )
 
-    save_video(output_video_frames, output_video, fps=actual_fps)
-    del output_video_frames  # free memory before uploading/persisting
+    # Pre-load court image once so tactical drawer doesn't re-read it per frame
+    import numpy as _np
+    import cv2 as _cv2
+    _court_path = tactical_view_converter.court_image_path
+    _tac_w = tactical_view_converter.width
+    _tac_h = tactical_view_converter.height
+    court_image_loaded = _cv2.imread(_court_path) if _court_path else None
+    if court_image_loaded is None or court_image_loaded.size == 0:
+        court_image_loaded = _np.zeros((_tac_h, _tac_w, 3), dtype=_np.uint8)
+        court_image_loaded[:] = (40, 80, 40)
+    else:
+        court_image_loaded = _cv2.resize(court_image_loaded, (_tac_w, _tac_h))
+
+    # ── Streaming draw pass ──────────────────────────────────────────────────
+    # Free the large video_frames list FIRST so only one frame is in memory
+    # at a time during the drawing loop.  We re-read the source video with the
+    # same downscaling parameters that were used to load it originally.
+    del video_frames  # free ~5-16 GB of RAM
+
+    import shutil as _shutil
+    import subprocess as _subprocess
+    _is_mp4 = output_video.lower().endswith(".mp4")
+    _use_ffmpeg = _is_mp4 and bool(_shutil.which("ffmpeg"))
+    _tmp_video = output_video + ".raw.mp4" if _use_ffmpeg else None
+
+    # Determine output frame size from first frame (after potential downscaling)
+    _first_frame = None
+    for _f in iter_video_frames(input_video):
+        if _f.shape[0] > 720:
+            _scale = 720 / _f.shape[0]
+            _f = _cv2.resize(_f, (int(_f.shape[1] * _scale), 720), interpolation=_cv2.INTER_AREA)
+        _first_frame = _f
+        break
+
+    if _first_frame is None:
+        raise RuntimeError("Could not read any frame from source video for drawing")
+
+    _out_h, _out_w = _first_frame.shape[:2]
+    _fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
+    _writer_path = _tmp_video if _use_ffmpeg else output_video
+    _writer = _cv2.VideoWriter(_writer_path, _fourcc, actual_fps, (_out_w, _out_h))
+
+    _streaming_distances: dict = {}  # accumulated for SpeedAndDistanceDrawer
+
+    for _frame_idx, _frame in enumerate(iter_video_frames(input_video)):
+        if _frame_idx >= total_frames:
+            break
+
+        # Apply same downscaling as read_video
+        if _frame.shape[0] > 720:
+            _scale = 720 / _frame.shape[0]
+            _frame = _cv2.resize(
+                _frame, (int(_frame.shape[1] * _scale), 720),
+                interpolation=_cv2.INTER_AREA,
+            )
+
+        # Apply all drawers in sequence (each modifies a single frame)
+        _frame = player_tracks_drawer.draw_frame(
+            _frame, _frame_idx, player_tracks, player_assignment, ball_aquisition
+        )
+        _frame = ball_tracks_drawer.draw_frame(_frame, _frame_idx, ball_tracks)
+        _frame = court_keypoint_drawer.draw_frame(_frame, _frame_idx, court_keypoints_per_frame)
+        _frame = frame_number_drawer.draw_frame(_frame, _frame_idx)
+        _frame = team_ball_control_drawer.draw_frame(_frame, _frame_idx, team_ball_control)
+        _frame = pass_and_interceptions_drawer.draw_frame(
+            _frame, _frame_idx, passes, interceptions
+        )
+        _frame = speed_and_distance_drawer.draw_frame(
+            _frame, _frame_idx,
+            player_tracks, player_distances_per_frame, player_speed_per_frame,
+            _streaming_distances,
+        )
+        _frame = tactical_view_drawer.draw_frame(
+            _frame, _frame_idx,
+            court_image_loaded, _tac_w, _tac_h,
+            tactical_view_converter.key_points,
+            tactical_player_positions,
+            player_assignment,
+            ball_aquisition,
+        )
+
+        _writer.write(_frame)
+
+    _writer.release()
+    logger.info("Streaming draw complete: %d frames written", _frame_idx + 1)
+
+    # Re-encode to H.264 for browser compatibility
+    if _use_ffmpeg and _tmp_video and os.path.exists(_tmp_video):
+        _cmd = [
+            "ffmpeg", "-y", "-i", _tmp_video,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-movflags", "+faststart",
+            output_video,
+        ]
+        _result = _subprocess.run(_cmd, capture_output=True)
+        try:
+            os.remove(_tmp_video)
+        except OSError:
+            pass
+        if _result.returncode != 0:
+            logger.warning("ffmpeg re-encode failed: %s", _result.stderr.decode())
+            if os.path.exists(_tmp_video):
+                os.rename(_tmp_video, output_video)
     logger.info("Saved annotated video to %s", output_video)
 
     # Build summary metrics
