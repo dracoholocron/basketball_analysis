@@ -12,6 +12,7 @@ import os
 from ultralytics import YOLO
 import supervision as sv
 from utils import read_stub, save_stub
+from configs.settings import settings
 
 _PLAYER_CLASS_NAMES: tuple[str, ...] = ("Player",)
 
@@ -31,7 +32,7 @@ class PlayerTracker:
         self.conf = conf
 
     def detect_frames(self, frames: list) -> list:
-        batch_size = 20
+        batch_size = settings.yolo_batch_size
         detections: list = []
         for i in range(0, len(frames), batch_size):
             batch = self.model.predict(frames[i : i + batch_size], conf=self.conf, verbose=False)

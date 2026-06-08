@@ -150,8 +150,8 @@ class EngineSettings(BaseSettings):
         description="Max pixel distance from ball center to player for possession (fallback)",
     )
     min_possession_frames: int = Field(
-        default=13,
-        description="Minimum consecutive frames before possession is confirmed",
+        default=6,
+        description="Minimum consecutive frames before possession is confirmed (~0.25s at 24fps)",
     )
 
     # ── Ball detector tuning ───────────────────────────────────────────────────
@@ -180,8 +180,22 @@ class EngineSettings(BaseSettings):
 
     # ── Speed / distance ───────────────────────────────────────────────────────
     speed_window_frames: int = Field(
-        default=5,
-        description="Window size (frames) used to compute speed rolling average",
+        default=25,
+        description="Window size (frames) used to compute speed rolling average (~1s at 24fps)",
+    )
+    speed_max_kmh: float = Field(
+        default=40.0,
+        description="Hard cap on per-frame speed (km/h) to filter homography noise",
+    )
+
+    # ── Batch sizes ────────────────────────────────────────────────────────────
+    yolo_batch_size: int = Field(
+        default=16,
+        description="Batch size for YOLO inference (increase for higher VRAM GPUs). Env: BA_YOLO_BATCH_SIZE",
+    )
+    clip_batch_size: int = Field(
+        default=8,
+        description="Batch size for CLIP team assigner inference. Env: BA_CLIP_BATCH_SIZE",
     )
     fps: float = Field(
         default=24.0,

@@ -61,6 +61,43 @@ def test_import_configs():
     assert profile.width_m == 24.0
 
 
+def test_settings_new_fields():
+    """Smoke: new settings fields added in the plan must exist and have sane defaults."""
+    from configs.settings import settings
+
+    assert hasattr(settings, "yolo_batch_size"), "yolo_batch_size must be in settings"
+    assert hasattr(settings, "clip_batch_size"), "clip_batch_size must be in settings"
+    assert hasattr(settings, "speed_max_kmh"), "speed_max_kmh must be in settings"
+    assert settings.yolo_batch_size > 0
+    assert settings.clip_batch_size > 0
+    assert settings.speed_max_kmh > 0
+    assert settings.speed_window_frames == 25, (
+        f"Expected speed_window_frames=25, got {settings.speed_window_frames}"
+    )
+    assert settings.min_possession_frames == 6, (
+        f"Expected min_possession_frames=6, got {settings.min_possession_frames}"
+    )
+
+
+def test_speed_clamp_import():
+    """Smoke: SpeedAndDistanceCalculator must import and accept max_speed_kmh kwarg."""
+    from speed_and_distance_calculator.speed_and_distance_calculator import (
+        SpeedAndDistanceCalculator,
+    )
+    calc = SpeedAndDistanceCalculator(
+        300, 161, 28.0, 15.0, max_speed_kmh=40.0
+    )
+    assert calc.max_speed_kmh == 40.0
+
+
+def test_ball_aquisition_frame_width():
+    """Smoke: BallAquisitionDetector must accept frame_width and scale threshold."""
+    from ball_aquisition.ball_aquisition_detector import BallAquisitionDetector
+
+    det = BallAquisitionDetector(possession_threshold=50.0, frame_width=1280)
+    assert det.possession_threshold == 50.0  # 1280/1280 * 50 = 50
+
+
 def test_import_homography():
     import numpy as np
     from tactical_view_converter.homography import Homography

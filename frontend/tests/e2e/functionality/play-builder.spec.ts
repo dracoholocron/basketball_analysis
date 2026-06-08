@@ -3,6 +3,13 @@ import { loginAs } from "../helpers";
 
 test.describe("Play Builder", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/plays*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      })
+    );
     await loginAs(page);
     await page.goto("/play-builder");
     await page.waitForLoadState("networkidle");

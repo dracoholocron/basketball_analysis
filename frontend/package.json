@@ -9,6 +9,7 @@
     "lint": "next lint",
     "test:e2e": "playwright test --config tests/e2e/playwright.config.ts",
     "test:e2e:ui": "playwright test --config tests/e2e/playwright.config.ts --ui",
+    "test:e2e:screenshots": "cross-env INCLUDE_SCREENSHOTS=1 playwright test --config tests/e2e/playwright.config.ts tests/e2e/screenshots/",
     "test:a11y": "playwright test --config tests/e2e/playwright.config.ts tests/e2e/a11y/",
     "docs:screenshots": "playwright test --config tests/e2e/playwright.config.ts --project=chromium tests/screenshots/capture-manual.spec.ts"
   },

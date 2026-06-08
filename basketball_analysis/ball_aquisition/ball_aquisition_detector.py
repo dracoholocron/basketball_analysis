@@ -17,12 +17,17 @@ class BallAquisitionDetector:
         possession_threshold: float | None = None,
         min_frames: int | None = None,
         containment_threshold: float | None = None,
+        frame_width: int | None = None,
     ):
-        self.possession_threshold = (
+        base_threshold = (
             possession_threshold
             if possession_threshold is not None
             else settings.possession_threshold
         )
+        # Scale threshold proportionally to frame resolution
+        # calibrated at 1280px wide; doubles at 2K (3840px), etc.
+        scale = (frame_width / 1280.0) if frame_width else 1.0
+        self.possession_threshold = base_threshold * scale
         self.min_frames = (
             min_frames if min_frames is not None else settings.min_possession_frames
         )
@@ -195,10 +200,12 @@ class BallAquisitionDetector:
         for frame_num in range(num_frames):
             ball_info = ball_tracks[frame_num].get(1, {})
             if not ball_info:
+                consecutive_possession_count = {}
                 continue
                 
             ball_bbox = ball_info.get('bbox', [])
             if not ball_bbox:
+                consecutive_possession_count = {}
                 continue
                 
             ball_center = get_center_of_bbox(ball_bbox)
@@ -216,6 +223,6 @@ class BallAquisitionDetector:
                 if consecutive_possession_count[best_player_id] >= self.min_frames:
                     possession_list[frame_num] = best_player_id
             else:
-                consecutive_possession_count ={}
+                consecutive_possession_count = {}
     
         return possession_list

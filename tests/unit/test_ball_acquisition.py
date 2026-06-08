@@ -88,3 +88,35 @@ class TestBallAquisitionDetector:
         # With min_frames=3, the 2+2 pattern should not confirm possession
         assert result[1] == -1  # only 2 frames, not 3
         assert result[4] == -1  # reset + only 2 frames again
+
+    def test_possession_threshold_scales_with_resolution(self):
+        """Detector instantiated with frame_width=3840 should double its possession_threshold vs 1920."""
+        from ball_aquisition.ball_aquisition_detector import BallAquisitionDetector
+
+        det_hd = BallAquisitionDetector(possession_threshold=50.0, frame_width=1280)
+        det_4k = BallAquisitionDetector(possession_threshold=50.0, frame_width=2560)
+
+        assert det_4k.possession_threshold > det_hd.possession_threshold
+        ratio = det_4k.possession_threshold / det_hd.possession_threshold
+        assert abs(ratio - 2.0) < 0.01, f"Expected 2.0 ratio, got {ratio}"
+
+    def test_min_possession_frames_6(self):
+        """Default min_frames from settings should now be 6 (was 13)."""
+        from configs.settings import settings
+
+        assert settings.min_possession_frames == 6, (
+            f"Expected 6, got {settings.min_possession_frames}"
+        )
+
+    def test_min_possession_frames_6_confirms_possession(self):
+        """6 consecutive frames of possession should be confirmed."""
+        from ball_aquisition.ball_aquisition_detector import BallAquisitionDetector
+
+        det = BallAquisitionDetector(min_frames=6, possession_threshold=60, containment_threshold=0.8)
+        player_tracks = _make_player_tracks([{1: (100, 100, 80, 120)}] * 8)
+        ball_tracks = _make_ball_tracks([(100, 100, 20, 20)] * 8)
+        result = det.detect_ball_possession(player_tracks, ball_tracks)
+        # Should confirm at frame 5 (0-indexed), i.e. 6th frame
+        assert result[5] == 1 or result[6] == 1 or result[7] == 1, (
+            f"Expected possession confirmed by frame 7, got {result}"
+        )

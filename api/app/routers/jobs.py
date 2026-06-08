@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_db
 from ..core.deps import get_current_user
 from ..core.config import settings as api_settings
-from ..models.job import Job
+from ..models.job import Job, JobStatus
 from ..models.user import User
 from ..schemas.job import JobRead
 from ..services.storage import get_storage
@@ -23,13 +23,19 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 async def list_jobs(
     skip: int = Query(0, ge=0),
     limit: int = Query(30, ge=1, le=100),
+    game_id: Optional[uuid.UUID] = Query(None, description="Filter jobs by game ID"),
+    status: Optional[JobStatus] = Query(None, description="Filter jobs by status"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """List all jobs ordered by creation time descending."""
-    result = await db.execute(
-        select(Job).order_by(desc(Job.created_at)).offset(skip).limit(limit)
-    )
+    """List jobs ordered by creation time descending. Optionally filter by game_id and/or status."""
+    query = select(Job)
+    if game_id is not None:
+        query = query.where(Job.game_id == game_id)
+    if status is not None:
+        query = query.where(Job.status == status)
+    query = query.order_by(desc(Job.created_at)).offset(skip).limit(limit)
+    result = await db.execute(query)
     return result.scalars().all()
 
 

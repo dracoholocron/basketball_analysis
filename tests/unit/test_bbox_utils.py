@@ -31,6 +31,12 @@ def test_get_foot_position():
 
 def test_measure_xy_distance():
     from utils.bbox_utils import measure_xy_distance
+    # measure_xy_distance(p1, p2) returns (p1.x - p2.x, p1.y - p2.y)
     dx, dy = measure_xy_distance((3, 4), (6, 8))
-    assert dx == 3
-    assert dy == 4
+    assert dx == -3  # 3 - 6 = -3
+    assert dy == -4  # 4 - 8 = -4
+
+    # Reversed order
+    dx2, dy2 = measure_xy_distance((6, 8), (3, 4))
+    assert dx2 == 3
+    assert dy2 == 4

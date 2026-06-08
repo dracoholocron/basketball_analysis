@@ -1,6 +1,7 @@
 from ultralytics import YOLO
 import supervision as sv
 from utils import read_stub, save_stub
+from configs.settings import settings
 
 
 class CourtKeypointDetector:
@@ -31,7 +32,7 @@ class CourtKeypointDetector:
             if len(court_keypoints) == len(frames):
                 return court_keypoints
         
-        batch_size=20
+        batch_size = settings.yolo_batch_size
         court_keypoints = []
         for i in range(0,len(frames),batch_size):
             detections_batch = self.model.predict(frames[i:i+batch_size],conf=0.5)

@@ -11,6 +11,13 @@ test.describe("Authentication", () => {
   });
 
   test("login with correct credentials redirects to dashboard", async ({ page }) => {
+    await page.route("**/api/v1/auth/token", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ access_token: "fake-e2e-token", token_type: "bearer" }),
+      })
+    );
     await page.goto("/login");
     await page.fill("input[type=email], input[name=email]", ADMIN_EMAIL);
     await page.fill("input[type=password], input[name=password]", ADMIN_PASS);

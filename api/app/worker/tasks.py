@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from celery import Task
 from sqlalchemy import create_engine
@@ -148,6 +150,14 @@ def run_analysis(
         storage.upload_local_file(output_video, api_settings.minio_bucket_outputs, output_key)
         logger.info("Uploaded annotated video: %s", output_key)
 
+        # ── 5b. Copy to host-mounted output directory (if available) ──────
+        host_outputs = Path("/app/host_outputs")
+        if host_outputs.exists():
+            host_dir = host_outputs / str(game_id)
+            host_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(output_video, host_dir / f"{job_id}.avi")
+            logger.info("Saved local copy: %s", host_dir / f"{job_id}.avi")
+
         with Session(engine) as db:
             _update_job(
                 db, job_id, current_stage=JobStage.PERSISTING_METRICS, progress_pct=90
@@ -185,6 +195,7 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
     # Scalar summaries from run_pipeline
     player_distances: dict = metrics.get("player_total_distance_m", {})
     player_avg_speeds: dict = metrics.get("player_avg_speed_kmh", {})
+    player_max_speeds: dict = metrics.get("player_max_speed_kmh", {})
 
     # Collect all track_ids seen in player_assignment or distance data
     all_track_ids: set[int] = set()
@@ -236,16 +247,28 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
             if interceptor_id != -1:
                 interceptions_made[int(interceptor_id)] += 1
 
+    # Generate display labels: sort by first frame of appearance → #1, #2, …
+    ordered_tracks = sorted(
+        all_track_ids,
+        key=lambda tid: next(
+            (i for i, pa in enumerate(player_assignment) if tid in pa), 999999
+        ),
+    )
+    display_labels: dict[int, str] = {
+        tid: f"#{i + 1}" for i, tid in enumerate(ordered_tracks)
+    }
+
     # Build PlayerMetric rows
     player_rows: list[PlayerMetric] = []
     for track_id in all_track_ids:
         row = PlayerMetric(
             job_id=j_uuid,
             track_id=track_id,
+            display_label=display_labels.get(track_id),
             team_id=majority_team(track_id),
             total_distance_m=float(player_distances.get(track_id, 0.0)),
             avg_speed_kmh=float(player_avg_speeds.get(track_id, 0.0)),
-            max_speed_kmh=0.0,  # not tracked per-frame in current engine
+            max_speed_kmh=float(player_max_speeds.get(track_id, 0.0)),
             possession_frames=possession_frames.get(track_id, 0),
             passes_made=passes_made.get(track_id, 0),
             interceptions_made=interceptions_made.get(track_id, 0),

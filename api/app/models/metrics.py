@@ -17,6 +17,7 @@ class PlayerMetric(Base):
         ForeignKey("players.id"), nullable=True
     )
     track_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    display_label: Mapped[str | None] = mapped_column(String(20), nullable=True)
     team_id: Mapped[int | None] = mapped_column(Integer)
 
     total_distance_m: Mapped[float] = mapped_column(Float, default=0.0)

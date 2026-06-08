@@ -8,8 +8,12 @@ import {
   uploadVideo,
   getGameMetrics,
   pollJobUntilDone,
+  getLatestDoneJobForGame,
+  getLatestActiveJobForGame,
   api,
 } from "@/lib/api";
+
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000") + "/api/v1";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -21,6 +25,7 @@ import { clsx } from "clsx";
 
 interface PlayerMetric {
   track_id: number;
+  display_label?: string | null;
   team_id: number | null;
   total_distance_m: number;
   avg_speed_kmh: number;
@@ -72,6 +77,7 @@ export default function GameDetailPage() {
     error_message?: string | null;
   } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [hasActiveJob, setHasActiveJob] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -79,6 +85,27 @@ export default function GameDetailPage() {
     getGame(id).then(setGame);
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
+  }, [id]);
+
+  // Auto-load the last completed job so the video player shows on page load
+  useEffect(() => {
+    if (!id) return;
+    getLatestDoneJobForGame(id)
+      .then(j => {
+        if (j) {
+          setJobStatus({
+            id: (j as { id: string }).id,
+            status: "done",
+            progress_pct: 100,
+            current_stage: (j as { current_stage: string }).current_stage,
+          });
+        }
+      })
+      .catch(() => null);
+    // Also check for an in-flight job to disable the Analizar button
+    getLatestActiveJobForGame(id)
+      .then(j => setHasActiveJob(!!j))
+      .catch(() => null);
   }, [id]);
 
   async function handleUpload() {
@@ -157,25 +184,29 @@ export default function GameDetailPage() {
                 <button
                   className="flex items-center gap-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium disabled:opacity-50"
                   onClick={handleUpload}
-                  disabled={uploading}
+                  disabled={uploading || hasActiveJob}
+                  title={hasActiveJob ? "Ya hay un análisis en progreso para este partido" : undefined}
                 >
                   {uploading ? <Loader2 size={14} className="animate-spin" /> : <Activity size={14} />}
-                  {uploading ? "Procesando…" : "Analizar"}
+                  {uploading ? "Procesando…" : jobStatus?.status === "done" ? "Re-analizar" : "Analizar"}
                 </button>
               </div>
+              {hasActiveJob && !uploading && (
+                <p className="text-xs text-amber-400">Análisis en progreso…</p>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Job progress */}
+        {/* Job progress / video player */}
         {jobStatus && (
           <div className="bg-slate-800 rounded-xl border border-slate-700 px-5 py-4 text-sm">
             <div className="flex items-center justify-between mb-2">
               <span className="font-medium text-white capitalize flex items-center gap-2">
-                {jobStatus.status === "done"   && <CheckCircle2 size={16} className="text-green-400" />}
-                {jobStatus.status === "failed" && <AlertCircle size={16} className="text-red-400" />}
+                {jobStatus.status === "done"    && <CheckCircle2 size={16} className="text-green-400" />}
+                {jobStatus.status === "failed"  && <AlertCircle  size={16} className="text-red-400" />}
                 {jobStatus.status === "running" && <Loader2 size={16} className="text-blue-400 animate-spin" />}
-                {jobStatus.status}
+                {jobStatus.status === "done" ? "Análisis completado" : jobStatus.status}
               </span>
               <span className="text-slate-400">{jobStatus.progress_pct}%</span>
             </div>
@@ -192,6 +223,26 @@ export default function GameDetailPage() {
               <p className="mt-2 text-xs text-red-400 bg-red-900/20 rounded px-2 py-1">
                 {jobStatus.error_message}
               </p>
+            )}
+            {/* Inline video player — shown when analysis is complete */}
+            {jobStatus.status === "done" && jobStatus.id && (
+              <div className="mt-4">
+                <video
+                  controls
+                  className="w-full rounded-lg bg-black"
+                  src={`${API_BASE}/jobs/${jobStatus.id}/annotated-video`}
+                >
+                  Tu navegador no soporta la reproducción de video.
+                </video>
+                <a
+                  href={`${API_BASE}/jobs/${jobStatus.id}/annotated-video`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2 inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+                >
+                  <Film size={12} /> Descargar video anotado
+                </a>
+              </div>
             )}
           </div>
         )}
@@ -304,7 +355,9 @@ export default function GameDetailPage() {
                     </span>
                     <span className="text-white font-medium">{cfg?.label ?? ev.type.replace("_", " ")}</span>
                     {ev.track_id != null && (
-                      <span className="text-xs text-slate-500">jugador #{ev.track_id}</span>
+                      <span className="text-xs text-slate-500">
+                        jugador {metrics?.players.find(p => p.track_id === ev.track_id)?.display_label ?? `#${ev.track_id}`}
+                      </span>
                     )}
                     {ev.confidence != null && (
                       <span className="text-xs text-slate-500">{(ev.confidence * 100).toFixed(0)}%</span>
@@ -323,28 +376,36 @@ export default function GameDetailPage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-700 text-left text-xs text-slate-400">
-                  {["#ID", "Equipo", "Distancia (m)", "Vel. máx. (km/h)", "Posesión", "Pases", "Intercep."].map(h => (
+                  {["Jugador", "Equipo", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep."].map(h => (
                     <th key={h} className="px-4 py-3 font-medium">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-700">
-                {metrics.players.sort((a, b) => b.total_distance_m - a.total_distance_m).map(p => (
-                  <tr key={p.track_id} className="hover:bg-slate-700/50 transition-colors">
-                    <td className="px-4 py-3 font-mono font-semibold text-white">#{p.track_id}</td>
-                    <td className="px-4 py-3">
-                      <span className="inline-block rounded-full px-2 py-0.5 text-xs font-semibold text-white"
-                        style={{ backgroundColor: TEAM_COLORS[(p.team_id ?? 1) - 1] ?? "#6b7280" }}>
-                        T{p.team_id ?? "?"}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-200">{p.total_distance_m.toFixed(1)}</td>
-                    <td className="px-4 py-3 text-slate-200">{p.max_speed_kmh.toFixed(1)}</td>
-                    <td className="px-4 py-3 text-slate-200">{p.possession_frames}</td>
-                    <td className="px-4 py-3 text-slate-200">{p.passes_made}</td>
-                    <td className="px-4 py-3 text-slate-200">{p.interceptions_made}</td>
-                  </tr>
-                ))}
+                {metrics.players.sort((a, b) => b.total_distance_m - a.total_distance_m).map(p => {
+                  const maxSpd = p.max_speed_kmh;
+                  const spdColor = maxSpd > 25 ? "text-red-400" : maxSpd > 15 ? "text-amber-400" : "text-green-400";
+                  const avgSpd = p.avg_speed_kmh;
+                  const avgColor = avgSpd > 20 ? "text-red-400" : avgSpd > 10 ? "text-amber-400" : "text-green-400";
+                  const label = p.display_label ?? `#${p.track_id}`;
+                  return (
+                    <tr key={p.track_id} className="hover:bg-slate-700/50 transition-colors">
+                      <td className="px-4 py-3 font-mono font-semibold text-white">{label}</td>
+                      <td className="px-4 py-3">
+                        <span className="inline-block rounded-full px-2 py-0.5 text-xs font-semibold text-white"
+                          style={{ backgroundColor: TEAM_COLORS[(p.team_id ?? 1) - 1] ?? "#6b7280" }}>
+                          T{p.team_id ?? "?"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-200">{p.total_distance_m.toFixed(1)}</td>
+                      <td className={`px-4 py-3 font-medium ${avgColor}`}>{avgSpd.toFixed(1)} km/h</td>
+                      <td className={`px-4 py-3 font-medium ${spdColor}`}>{maxSpd.toFixed(1)} km/h</td>
+                      <td className="px-4 py-3 text-slate-200">{p.possession_frames}</td>
+                      <td className="px-4 py-3 text-slate-200">{p.passes_made}</td>
+                      <td className="px-4 py-3 text-slate-200">{p.interceptions_made}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

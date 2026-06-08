@@ -110,6 +110,7 @@ def run_pipeline(
     logger.info("Reading video: %s", input_video)
     video_frames = read_video(input_video)
     logger.info("Loaded %d frames", len(video_frames))
+    frame_width = video_frames[0].shape[1] if video_frames else 1280
 
     player_tracker = PlayerTracker(_player_path)
     ball_tracker = BallTracker(_ball_path)
@@ -151,7 +152,7 @@ def run_pipeline(
     )
     logger.info("Team assignment done")
 
-    ball_aquisition_detector = BallAquisitionDetector()
+    ball_aquisition_detector = BallAquisitionDetector(frame_width=frame_width)
     ball_aquisition = ball_aquisition_detector.detect_ball_possession(
         player_tracks, ball_tracks
     )
@@ -298,6 +299,12 @@ def run_pipeline(
         if samples
     }
 
+    player_max_speed: dict[int, float] = {
+        pid: max(samples)
+        for pid, samples in player_speed_samples.items()
+        if samples
+    }
+
     metrics = {
         # Summary scalars
         "total_frames": total_frames,
@@ -309,6 +316,7 @@ def run_pipeline(
         "team2_interceptions": team2_interceptions,
         "player_total_distance_m": player_total_distances,
         "player_avg_speed_kmh": player_avg_speed,
+        "player_max_speed_kmh": player_max_speed,
         "output_video_path": output_video,
         # Raw per-frame sequences needed by _persist_metrics in the worker
         "ball_acquisition": ball_aquisition,          # list[int] — track_id holding ball, -1 if none

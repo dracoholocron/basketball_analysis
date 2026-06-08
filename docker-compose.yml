@@ -129,6 +129,7 @@ services:
     volumes:
       - models_data:/app/engine/models     # persist downloaded .pt models
       - stubs_data:/app/engine/stubs
+      - ./basketball_analysis/output_videos:/app/host_outputs:rw
     depends_on:
       db:
         condition: service_healthy

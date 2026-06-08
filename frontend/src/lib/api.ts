@@ -124,6 +124,21 @@ export async function getJob(jobId: string) {
   return data;
 }
 
+export async function getLatestDoneJobForGame(gameId: string) {
+  const { data } = await api.get("/jobs", {
+    params: { game_id: gameId, status: "done", limit: 1 },
+  });
+  return Array.isArray(data) ? data[0] : (data as { items?: unknown[] }).items?.[0];
+}
+
+export async function getLatestActiveJobForGame(gameId: string) {
+  const [running, pending] = await Promise.all([
+    api.get("/jobs", { params: { game_id: gameId, status: "running", limit: 1 } }).then(r => Array.isArray(r.data) ? r.data[0] : null).catch(() => null),
+    api.get("/jobs", { params: { game_id: gameId, status: "pending", limit: 1 } }).then(r => Array.isArray(r.data) ? r.data[0] : null).catch(() => null),
+  ]);
+  return running ?? pending ?? null;
+}
+
 // ── Matchups ──────────────────────────────────────────────────────────────────
 export async function listMatchups(skip = 0, limit = 50) {
   const { data } = await api.get("/matchups", { params: { skip, limit } });

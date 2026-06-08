@@ -3,6 +3,13 @@ import { loginAs } from "../helpers";
 
 test.describe("Game Tracker", () => {
   test.beforeEach(async ({ page }) => {
+    await page.route("**/api/v1/matchups*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      })
+    );
     await loginAs(page);
     await page.goto("/game-tracker");
     await page.waitForLoadState("networkidle");

@@ -52,7 +52,7 @@ class BallTracker:
         Returns:
             YOLO results list, one entry per frame.
         """
-        batch_size = 20
+        batch_size = settings.yolo_batch_size
         detections: list = []
         for i in range(0, len(frames), batch_size):
             batch_results = self.model.predict(

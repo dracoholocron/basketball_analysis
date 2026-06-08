@@ -8,6 +8,7 @@ class PlayerMetricRead(BaseModel):
     id: uuid.UUID
     job_id: uuid.UUID
     track_id: int
+    display_label: Optional[str] = None
     team_id: Optional[int]
     total_distance_m: float
     avg_speed_kmh: float

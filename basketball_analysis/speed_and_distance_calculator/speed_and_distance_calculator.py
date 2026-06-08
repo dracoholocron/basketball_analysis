@@ -12,6 +12,7 @@ class SpeedAndDistanceCalculator:
         fps: float | None = None,
         calibration_factor: float | None = None,
         window_size: int | None = None,
+        max_speed_kmh: float | None = None,
     ):
         self.width_in_pixels = width_in_pixels
         self.height_in_pixels = height_in_pixels
@@ -23,6 +24,9 @@ class SpeedAndDistanceCalculator:
         )
         self.window_size = (
             window_size if window_size is not None else settings.speed_window_frames
+        )
+        self.max_speed_kmh = (
+            max_speed_kmh if max_speed_kmh is not None else settings.speed_max_kmh
         )
 
     def calculate_distance(self, tactical_player_positions: list) -> list:
@@ -103,6 +107,7 @@ class SpeedAndDistanceCalculator:
                     time_in_hours = time_in_seconds / 3600
                     if time_in_hours > 0:
                         speed_kmh = (total_distance / 1000) / time_in_hours
+                        speed_kmh = min(speed_kmh, self.max_speed_kmh)
                         speeds[frame_idx][player_id] = speed_kmh
                     else:
                         speeds[frame_idx][player_id] = 0.0
