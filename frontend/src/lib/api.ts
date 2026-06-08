@@ -301,6 +301,16 @@ export async function importBoxScores(gameId: string) {
   return data;
 }
 
+export async function importBoxScoresCsv(gameId: string, teamId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/box-scores/import-csv", form, {
+    params: { game_id: gameId, team_id: teamId },
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+}
+
 export async function getTeamAverages(teamId: string, seasonId?: string) {
   const { data } = await api.get(`/box-scores/team-averages`, {
     params: { team_id: teamId, season_id: seasonId },

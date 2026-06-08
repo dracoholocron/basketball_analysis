@@ -1,6 +1,13 @@
 """
-PoseEstimator — wraps RTMPose (ONNX, 133-keypoint Wholebody) or falls back to
+PoseEstimator — wraps RTMPose (ONNX, SimCC) or falls back to
 YOLO-pose (17-keypoint COCO) when the ONNX model is unavailable.
+
+Bundled RTMPose ONNX (``rtmpose_body2d.onnx``) is an RTMPose Wholebody-133
+top-down SimCC model (input NCHW ``1×3×256×192``; outputs ``pred_x``/``pred_y``
+with 133 keypoints). Keypoint count is inferred from the output shapes, so
+COCO-17 checkpoints work too. The first 17 indices of Wholebody-133 are the
+COCO body joints, and only those 17 ``(x, y, conf)`` are returned to keep
+downstream consumers (skeleton_utils, event detectors) unchanged.
 
 RTMPose model expected at:
     basketball_analysis/models/rtmpose_body2d.onnx
@@ -11,13 +18,14 @@ Environment variables
 BA_DUMMY_MODELS=1   Force dummy mode (synthetic sine-wave keypoints, no GPU needed).
 BA_POSE_BACKEND     'rtmpose' | 'yolo' | 'auto' (default: 'auto')
                     'auto' tries RTMPose first, then YOLO, then dummy.
+BA_POSE_ORT_CPU=1   Force onnxruntime CPUExecutionProvider only (e.g. validation).
 """
 from __future__ import annotations
 
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -27,11 +35,12 @@ log = logging.getLogger(__name__)
 
 _DUMMY_MODE: bool = os.environ.get("BA_DUMMY_MODELS", "").lower() in ("1", "true", "yes")
 _POSE_BACKEND: str = os.environ.get("BA_POSE_BACKEND", "auto").lower()
+_POSE_ORT_CPU: bool = os.environ.get("BA_POSE_ORT_CPU", "").lower() in ("1", "true", "yes")
 
-# ── RTMPose 133-keypoint → COCO-17 index mapping ──────────────────────────────
-# The Wholebody-133 model outputs 133 keypoints per person.
-# The first 17 indices correspond 1-to-1 with COCO-17.
-_RTM133_TO_COCO17 = list(range(17))   # identity mapping for body keypoints
+_COCO17_COUNT = 17
+_RTMPOSE_PADDING = 1.25
+_RTMPOSE_RGB_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
+_RTMPOSE_RGB_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -49,6 +58,15 @@ def _find_model_path(filename: str) -> Optional[Path]:
     return None
 
 
+def _rtm_input_size_from_session(session: object) -> tuple[int, int]:
+    """Return model (width, height) from ONNX input NCHW."""
+    shape = session.get_inputs()[0].shape
+    # dynamic dims may be strings
+    h = int(shape[2]) if isinstance(shape[2], (int, np.integer)) else 256
+    w = int(shape[3]) if isinstance(shape[3], (int, np.integer)) else 192
+    return w, h
+
+
 def _load_rtmpose() -> Optional[object]:
     """
     Try to load the RTMPose ONNX model via onnxruntime.
@@ -61,11 +79,14 @@ def _load_rtmpose() -> Optional[object]:
     try:
         import onnxruntime as ort
 
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if "CUDAExecutionProvider" in ort.get_available_providers()
-            else ["CPUExecutionProvider"]
-        )
+        if _POSE_ORT_CPU:
+            providers = ["CPUExecutionProvider"]
+        else:
+            providers = (
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                if "CUDAExecutionProvider" in ort.get_available_providers()
+                else ["CPUExecutionProvider"]
+            )
         sess = ort.InferenceSession(str(onnx_path), providers=providers)
         log.info("RTMPose loaded: %s  (providers=%s)", onnx_path.name, providers)
         return sess
@@ -74,103 +95,200 @@ def _load_rtmpose() -> Optional[object]:
         return None
 
 
+def _get_3rd_point(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Third point for a stable affine transform (mmpose-style)."""
+    direction = a - b
+    return b + np.array([-direction[1], direction[0]], dtype=np.float32)
+
+
+def _rotate_point(pt: np.ndarray, angle_rad: float) -> np.ndarray:
+    sn, cs = np.sin(angle_rad), np.cos(angle_rad)
+    rot = np.array([[cs, -sn], [sn, cs]], dtype=np.float32)
+    return rot @ pt
+
+
+def _get_warp_matrix(
+    center: np.ndarray,
+    scale: np.ndarray,
+    rot: float,
+    output_size: tuple[int, int],
+    shift: tuple[float, float] = (0.0, 0.0),
+    inv: bool = False,
+) -> np.ndarray:
+    """Affine warp between image space and model input (width, height)."""
+    import cv2
+
+    shift_v = np.array(shift, dtype=np.float32)
+    src_w = scale[0]
+    dst_w, dst_h = output_size
+
+    rot_rad = np.deg2rad(rot)
+    src_dir = _rotate_point(np.array([0.0, src_w * -0.5], dtype=np.float32), rot_rad)
+    dst_dir = np.array([0.0, dst_w * -0.5], dtype=np.float32)
+
+    src = np.zeros((3, 2), dtype=np.float32)
+    dst = np.zeros((3, 2), dtype=np.float32)
+    src[0, :] = center + scale * shift_v
+    src[1, :] = center + src_dir + scale * shift_v
+    dst[0, :] = [dst_w * 0.5, dst_h * 0.5]
+    dst[1, :] = np.array([dst_w * 0.5, dst_h * 0.5], dtype=np.float32) + dst_dir
+
+    src[2, :] = _get_3rd_point(src[0, :], src[1, :])
+    dst[2, :] = _get_3rd_point(dst[0, :], dst[1, :])
+
+    if inv:
+        return cv2.getAffineTransform(dst, src)
+    return cv2.getAffineTransform(src, dst)
+
+
+def _box2cs(
+    box_xywh: list[float],
+    aspect_ratio: float,
+    padding: float = _RTMPOSE_PADDING,
+) -> tuple[np.ndarray, np.ndarray]:
+    """BBox (x, y, w, h) → center and scale with fixed aspect ratio."""
+    x, y, w, h = box_xywh
+    center = np.array([x + w * 0.5, y + h * 0.5], dtype=np.float32)
+    if w > aspect_ratio * h:
+        h = w / aspect_ratio
+    elif w < aspect_ratio * h:
+        w = h * aspect_ratio
+    scale = np.array([w, h], dtype=np.float32) * padding
+    return center, scale
+
+
+def _affine_transform(pt: np.ndarray, mat: np.ndarray) -> np.ndarray:
+    out = mat @ np.array([pt[0], pt[1], 1.0], dtype=np.float32)
+    return out[:2]
+
+
 def _preprocess_rtmpose(
     frame: np.ndarray,
     bbox: list[float],
     input_size: tuple[int, int] = (192, 256),
-) -> tuple[np.ndarray, np.ndarray, float]:
+    padding: float = _RTMPOSE_PADDING,
+) -> tuple[np.ndarray, dict[str, Any]]:
     """
-    Crop and resize the person bbox for RTMPose inference.
+    Aspect-ratio-preserving affine warp of the person bbox to model input size.
 
     Returns
     -------
-    blob   : (1, 3, H, W) float32 normalized image
-    center : (cx, cy)
-    scale  : pixel size of the crop side
+    blob : (1, 3, H, W) float32 normalized RGB (mmpose / RTMPose convention)
+    meta : center, scale, input_size, inv_warp matrix for decoding
     """
     import cv2
 
-    x1, y1, x2, y2 = [int(v) for v in bbox]
-    h_img, w_img = frame.shape[:2]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w_img, x2), min(h_img, y2)
+    inp_w, inp_h = input_size
+    aspect_ratio = inp_w / inp_h
 
-    crop = frame[y1:y2, x1:x2]
-    if crop.size == 0:
-        blob = np.zeros((1, 3, input_size[1], input_size[0]), dtype=np.float32)
-        return blob, np.array([(x1 + x2) / 2, (y1 + y2) / 2]), float(max(x2 - x1, y2 - y1))
+    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    box_xywh = [x1, y1, max(x2 - x1, 1.0), max(y2 - y1, 1.0)]
+    center, scale = _box2cs(box_xywh, aspect_ratio, padding)
 
-    crop_resized = cv2.resize(crop, input_size)
-    # Normalize with ImageNet mean/std
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    blob = (crop_resized[..., ::-1].astype(np.float32) / 255.0 - mean) / std
-    blob = blob.transpose(2, 0, 1)[np.newaxis]   # (1, 3, H, W)
+    warp_mat = _get_warp_matrix(center, scale, 0.0, (inp_w, inp_h), inv=False)
+    warped = cv2.warpAffine(
+        frame,
+        warp_mat,
+        (inp_w, inp_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
 
-    center = np.array([(x1 + x2) / 2, (y1 + y2) / 2], dtype=np.float32)
-    scale = float(max(x2 - x1, y2 - y1))
-    return blob, center, scale
+    rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+    img = (rgb.astype(np.float32) - _RTMPOSE_RGB_MEAN) / _RTMPOSE_RGB_STD
+    blob = img.transpose(2, 0, 1)[np.newaxis]
+
+    meta = {
+        "center": center,
+        "scale": scale,
+        "input_size": input_size,
+        "inv_warp": _get_warp_matrix(center, scale, 0.0, (inp_w, inp_h), inv=True),
+    }
+    return blob, meta
+
+
+def _simcc_confidence(simcc_x_row: np.ndarray, simcc_y_row: np.ndarray) -> float:
+    """Geometric mean of 1-D softmax peaks (standard SimCC score)."""
+    def _peak_prob(row: np.ndarray) -> float:
+        row = row - row.max()
+        exp = np.exp(row)
+        return float(exp[np.argmax(row)] / np.sum(exp))
+
+    return float((_peak_prob(simcc_x_row) * _peak_prob(simcc_y_row)) ** 0.5)
+
+
+def _pair_simcc_xy(
+    a: np.ndarray,
+    b: np.ndarray,
+    inp_w: int,
+    inp_h: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Assign two SimCC tensors to (simcc_x, simcc_y) using bin counts vs input size."""
+    err_ab = abs(a.shape[1] / inp_w - b.shape[1] / inp_h)
+    err_ba = abs(b.shape[1] / inp_w - a.shape[1] / inp_h)
+    if err_ab <= err_ba:
+        return a, b
+    return b, a
 
 
 def _postprocess_rtmpose(
-    output: np.ndarray,
-    center: np.ndarray,
-    scale: float,
-    bbox: list[float],
-    input_size: tuple[int, int] = (192, 256),
-    n_coco: int = 17,
+    output: np.ndarray | list | tuple,
+    meta: dict[str, Any],
+    n_coco: int = _COCO17_COUNT,
 ) -> np.ndarray:
     """
-    Convert RTMPose SimCC output to COCO-17 keypoints in image coordinates.
+    Convert RTMPose SimCC outputs to COCO-17 keypoints in image coordinates.
 
-    The Wholebody-133 model uses SimCC (Simple Coordinate Classification) decoding.
-    Output shape: (1, 133, 2*W) or separate x/y logits.
+    Detects keypoint count from output shape; returns the first ``n_coco`` joints.
 
     Returns
     -------
     kps : (17, 3) array of (x, y, confidence) in original image pixels
     """
-    x1, y1, x2, y2 = bbox
-    crop_w = max(int(x2 - x1), 1)
-    crop_h = max(int(y2 - y1), 1)
+    inp_w, inp_h = meta["input_size"]
+    inv_warp = meta["inv_warp"]
 
-    # output shape: (1, N_kp, simcc_split_ratio * W or H)
-    # We receive a tuple (simcc_x, simcc_y) from the session
     if isinstance(output, (list, tuple)) and len(output) == 2:
-        simcc_x, simcc_y = output  # each (1, 133, W*r) and (1, 133, H*r)
+        out_a, out_b = output[0], output[1]
+        if out_a.ndim == 3:
+            out_a = out_a[0]
+            out_b = out_b[0]
+        simcc_x, simcc_y = _pair_simcc_xy(out_a, out_b, inp_w, inp_h)
     else:
-        # Fallback: treat as raw heatmap — pick argmax coords
-        heatmap = output[0]  # (133, H, W)
+        heatmap = np.asarray(output)
+        if heatmap.ndim == 4:
+            heatmap = heatmap[0]
+        n_kp = heatmap.shape[0]
+        n_out = min(n_kp, n_coco)
         kps = np.zeros((n_coco, 3), dtype=np.float32)
-        for i in range(n_coco):
+        for i in range(n_out):
             idx = int(np.argmax(heatmap[i]))
             hm_h, hm_w = heatmap.shape[1], heatmap.shape[2]
             ky, kx = divmod(idx, hm_w)
             conf = float(heatmap[i].max())
-            kps[i] = [
-                x1 + kx / hm_w * crop_w,
-                y1 + ky / hm_h * crop_h,
-                conf,
-            ]
+            pt = _affine_transform(
+                np.array([kx / max(hm_w - 1, 1) * inp_w, ky / max(hm_h - 1, 1) * inp_h]),
+                inv_warp,
+            )
+            kps[i] = [pt[0], pt[1], np.clip(conf, 0.0, 1.0)]
         return kps
 
-    # SimCC decoding
-    simcc_x = simcc_x[0]  # (133, W*r)
-    simcc_y = simcc_y[0]  # (133, H*r)
+    n_kp = simcc_x.shape[0]
+    split_x = simcc_x.shape[1] / inp_w
+    split_y = simcc_y.shape[1] / inp_h
+    n_out = min(n_kp, n_coco)
 
     kps = np.zeros((n_coco, 3), dtype=np.float32)
-    for i in range(n_coco):
+    for i in range(n_out):
         x_idx = int(np.argmax(simcc_x[i]))
         y_idx = int(np.argmax(simcc_y[i]))
-        conf = float(
-            (np.exp(simcc_x[i][x_idx]) / np.sum(np.exp(simcc_x[i]))) *
-            (np.exp(simcc_y[i][y_idx]) / np.sum(np.exp(simcc_y[i])))
-        ) ** 0.5
+        conf = np.clip(_simcc_confidence(simcc_x[i], simcc_y[i]), 0.0, 1.0)
 
-        # Map back to image coordinates
-        px = x1 + x_idx / simcc_x.shape[1] * crop_w
-        py = y1 + y_idx / simcc_y.shape[1] * crop_h
-        kps[i] = [px, py, conf]
+        px_in = x_idx / split_x
+        py_in = y_idx / split_y
+        pt = _affine_transform(np.array([px_in, py_in], dtype=np.float32), inv_warp)
+        kps[i] = [pt[0], pt[1], conf]
 
     return kps
 
@@ -182,7 +300,7 @@ class PoseEstimator:
     Estimate 2-D body keypoints for each tracked player.
 
     Backends (auto-detected):
-    1. RTMPose ONNX (Wholebody-133, preferred — most accurate for sports)
+    1. RTMPose ONNX (SimCC COCO-17 for the bundled model; returns first 17 joints)
     2. YOLO-pose (COCO-17, fallback)
     3. Dummy (synthetic sine-wave data, for testing / BA_DUMMY_MODELS=1)
 
@@ -197,12 +315,14 @@ class PoseEstimator:
         self._backend = "dummy"
         self._session = None
         self._yolo_model = None
+        self._rtm_input_size: tuple[int, int] = (192, 256)
 
         if not self._dummy:
             if _POSE_BACKEND in ("rtmpose", "auto"):
                 self._session = _load_rtmpose()
                 if self._session is not None:
                     self._backend = "rtmpose"
+                    self._rtm_input_size = _rtm_input_size_from_session(self._session)
 
             if self._session is None and _POSE_BACKEND in ("yolo", "auto"):
                 self._yolo_model = self._try_load_yolo(model_path)
@@ -289,9 +409,9 @@ class PoseEstimator:
             bbox = info.get("bbox", [])
             if len(bbox) < 4:
                 continue
-            blob, center, scale = _preprocess_rtmpose(frame, bbox)
+            blob, meta = _preprocess_rtmpose(frame, bbox, self._rtm_input_size)
             raw = self._session.run(output_names, {input_name: blob})
-            kps = _postprocess_rtmpose(raw, center, scale, bbox)
+            kps = _postprocess_rtmpose(raw, meta)
             results[track_id] = kps
 
         return results

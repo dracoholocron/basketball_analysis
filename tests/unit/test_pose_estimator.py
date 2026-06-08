@@ -4,7 +4,10 @@ import sys
 import numpy as np
 import pytest
 
-sys.path.insert(0, "Z:/code/basketball_analysis/basketball_analysis")
+from pathlib import Path
+
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "basketball_analysis"
+sys.path.insert(0, str(_PKG_ROOT))
 
 from pose_estimator.skeleton_utils import (
     KP, COCO_KEYPOINTS, COCO_SKELETON, joint_angle, wrist_position, hip_center,
@@ -112,3 +115,80 @@ class TestPoseEstimatorDummy:
         assert "keypoints" in rec
         assert len(rec["keypoints"]) == 17
         assert len(rec["keypoints"][0]) == 3
+
+
+class TestRTMPoseBackend:
+    """RTMPose ONNX path (skipped when model or onnxruntime unavailable)."""
+
+    @staticmethod
+    def _model_path():
+        return _PKG_ROOT / "models" / "rtmpose_body2d.onnx"
+
+    def test_preprocess_blob_shape(self):
+        pytest.importorskip("onnxruntime")
+        if not self._model_path().is_file():
+            pytest.skip("rtmpose_body2d.onnx not present")
+
+        import numpy as np
+        from pose_estimator.pose_estimator import _preprocess_rtmpose
+
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        frame[200:600, 500:700] = 180
+        blob, meta = _preprocess_rtmpose(frame, [500, 200, 700, 600], (192, 256))
+        assert blob.shape == (1, 3, 256, 192)
+        assert "inv_warp" in meta
+        assert meta["input_size"] == (192, 256)
+
+    def test_postprocess_simcc_maps_center_to_bbox(self):
+        from pose_estimator.pose_estimator import _postprocess_rtmpose, _preprocess_rtmpose
+
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        bbox = [560.0, 180.0, 720.0, 620.0]
+        _blob, meta = _preprocess_rtmpose(frame, bbox, (192, 256))
+        inp_w, inp_h = meta["input_size"]
+        split = 2.0
+        n_kp = 17
+        simcc_x = np.full((n_kp, int(inp_w * split)), -10.0, dtype=np.float32)
+        simcc_y = np.full((n_kp, int(inp_h * split)), -10.0, dtype=np.float32)
+        cx_bin = int(inp_w * split * 0.5)
+        cy_bin = int(inp_h * split * 0.5)
+        simcc_x[0, cx_bin] = 10.0
+        simcc_y[0, cy_bin] = 10.0
+        kps = _postprocess_rtmpose((simcc_x, simcc_y), meta)
+        assert kps.shape == (17, 3)
+        bx_cx = (bbox[0] + bbox[2]) * 0.5
+        bx_cy = (bbox[1] + bbox[3]) * 0.5
+        assert abs(kps[0, 0] - bx_cx) < 80.0
+        assert abs(kps[0, 1] - bx_cy) < 120.0
+        assert 0.0 <= kps[0, 2] <= 1.0
+
+    def test_rtmpose_estimate_frame(self, monkeypatch):
+        pytest.importorskip("onnxruntime")
+        if not self._model_path().is_file():
+            pytest.skip("rtmpose_body2d.onnx not present")
+
+        monkeypatch.setenv("BA_POSE_BACKEND", "rtmpose")
+        monkeypatch.delenv("BA_DUMMY_MODELS", raising=False)
+        monkeypatch.setenv("BA_POSE_ORT_CPU", "1")
+
+        import importlib
+        import pose_estimator.pose_estimator as pe_mod
+
+        importlib.reload(pe_mod)
+
+        pe = pe_mod.PoseEstimator()
+        if pe._backend != "rtmpose":
+            pytest.skip("RTMPose session could not be loaded")
+
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        frame[180:620, 560:720] = (200, 180, 160)
+        tracks = {1: {"bbox": [560, 180, 720, 620]}}
+        result = pe.estimate_frame(frame, tracks)
+        assert 1 in result
+        kps = result[1]
+        assert kps.shape == (17, 3)
+        assert np.all(np.isfinite(kps))
+        assert np.all((kps[:, 2] >= 0.0) & (kps[:, 2] <= 1.0))
+        h, w = frame.shape[:2]
+        assert np.all(kps[:, 0] >= -w * 0.5) and np.all(kps[:, 0] <= w * 1.5)
+        assert np.all(kps[:, 1] >= -h * 0.5) and np.all(kps[:, 1] <= h * 1.5)

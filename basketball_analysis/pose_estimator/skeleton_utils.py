@@ -2,11 +2,9 @@
 Skeleton utilities for basketball pose analysis.
 
 Supports two keypoint schemas:
-  - COCO-17  : standard 17-point body keypoints (used by YOLO-pose)
-  - Wholebody-133: RTMPose Wholebody (133 keypoints — body + hands + face + feet)
-
-When using the 133-keypoint model the first 17 indices are body keypoints that
-match the COCO-17 layout, so all COCO-17 helpers work unchanged.
+  - COCO-17  : standard 17-point body keypoints (used by YOLO-pose and consumers)
+  - RTMPose ONNX: bundled model is COCO-17; if a wholebody checkpoint is used,
+    PoseEstimator still returns only the first 17 (COCO body layout).
 """
 from __future__ import annotations
 

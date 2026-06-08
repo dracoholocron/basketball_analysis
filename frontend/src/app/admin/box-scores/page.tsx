@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import AppShell from "@/components/layout/AppShell";
 import {
-  listSeasons, listTeams, listGames, listBoxScores, createBoxScore, importBoxScores, getTeamAverages,
+  listSeasons, listTeams, listGames, listBoxScores, createBoxScore, importBoxScoresCsv, getTeamAverages,
 } from "@/lib/api";
 import { Upload, PlusCircle, Loader2, AlertCircle, CheckCircle2, ChevronDown, ChevronUp, BarChart2 } from "lucide-react";
 import { clsx } from "clsx";
@@ -119,8 +119,12 @@ export default function BoxScoresAdminPage() {
     setImporting(true);
     setMsg(null);
     try {
-      const result = await importBoxScores(selectedGame);
-      setMsg({ type: "ok", text: result?.message ?? "CSV imported!" });
+      const result = await importBoxScoresCsv(selectedGame, selectedTeam, file);
+      const detail =
+        result?.imported != null
+          ? `${result.message ?? "CSV imported."} (${result.imported} imported, ${result.skipped ?? 0} skipped)`
+          : (result?.message ?? "CSV imported!");
+      setMsg({ type: "ok", text: detail });
       listBoxScores({ game_id: selectedGame, team_id: selectedTeam }).then(setBoxScores);
     } catch {
       setMsg({ type: "err", text: "CSV import failed. Check format." });
@@ -177,7 +181,12 @@ export default function BoxScoresAdminPage() {
         <div className="card">
           <h2 className="section-title mb-2">CSV Import</h2>
           <p className="text-xs text-slate-500 mb-4">
-            Upload a HUDL/MaxPreps-compatible CSV. Required columns: <code className="bg-slate-100 px-1 rounded">player_name, pts, fgm, fga, fg3m, fg3a, ftm, fta, oreb, dreb, ast, stl, blk, tov, pf</code>. Optional: <code className="bg-slate-100 px-1 rounded">jersey_number, minutes_played, plus_minus</code>. Include a row with player_name = "TEAM" for team totals.
+            One row per player. Required header: <code className="bg-slate-100 px-1 rounded">player_name</code>.
+            Optional stats (default 0):{" "}
+            <code className="bg-slate-100 px-1 rounded">
+              jersey_number, minutes_played, pts, fgm, fga, fg3m, fg3a, ftm, fta, oreb, dreb, ast, stl, blk, tov, pf, plus_minus
+            </code>
+            . Headers are case-insensitive; team totals are summed from player rows.
           </p>
           <div className="flex items-center gap-3">
             <label className={clsx("btn-secondary cursor-pointer flex items-center gap-2", (!selectedSeason || !selectedGame || !selectedTeam) && "opacity-50 cursor-not-allowed")}>

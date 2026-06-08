@@ -202,7 +202,196 @@ async def import_box_scores(
     existing = result.scalars().all()
 
     return ImportResult(
-        message=f"Game {str(game_id)[:8]} has {len(existing)} box score(s). Use the manual entry form to add or update scores.",
+        message=(
+            f"Game {str(game_id)[:8]} has {len(existing)} box score(s). "
+            "Upload a CSV via POST /box-scores/import-csv (multipart) or use manual entry."
+        ),
         imported=0,
         skipped=len(existing),
+    )
+
+
+_CSV_INT_STAT_FIELDS = (
+    "pts",
+    "fgm",
+    "fga",
+    "fg3m",
+    "fg3a",
+    "ftm",
+    "fta",
+    "oreb",
+    "dreb",
+    "ast",
+    "stl",
+    "blk",
+    "tov",
+    "pf",
+    "plus_minus",
+)
+
+
+def _normalize_csv_row(raw: dict[str, Any]) -> dict[str, str]:
+    return {
+        (k or "").strip().lower(): ("" if v is None else str(v)).strip()
+        for k, v in raw.items()
+        if k is not None and str(k).strip()
+    }
+
+
+def _parse_csv_int(value: str, default: int = 0) -> int:
+    if not value:
+        return default
+    return int(float(value))
+
+
+def _parse_csv_float_optional(value: str) -> float | None:
+    if not value:
+        return None
+    return float(value)
+
+
+def _parse_player_csv_row(row: dict[str, str]) -> dict[str, Any]:
+    name = row.get("player_name", "").strip()
+    if not name:
+        raise ValueError("player_name is required")
+
+    parsed: dict[str, Any] = {
+        "player_name": name,
+        "jersey_number": row.get("jersey_number") or None,
+        "minutes_played": _parse_csv_float_optional(row.get("minutes_played", "")),
+        "player_id": None,
+    }
+    for field in _CSV_INT_STAT_FIELDS:
+        parsed[field] = _parse_csv_int(row.get(field, ""), 0)
+    return parsed
+
+
+@router.post("/import-csv", response_model=ImportResult)
+async def import_box_scores_csv(
+    game_id: uuid.UUID = Query(...),
+    team_id: uuid.UUID = Query(...),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_admin),
+):
+    """
+    Import per-player box score rows from CSV and derive team totals by summing players.
+
+    If a box score already exists for (game_id, team_id), it is replaced (delete + recreate).
+    """
+    from ..models.game import Game
+
+    game = await db.get(Game, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    raw_bytes = await file.read()
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded") from exc
+
+    reader = csv.DictReader(io.StringIO(text))
+    if reader.fieldnames is None:
+        raise HTTPException(status_code=400, detail="CSV is empty or missing a header row")
+
+    imported = 0
+    skipped = 0
+    player_rows: list[dict[str, Any]] = []
+
+    for raw in reader:
+        try:
+            normalized = _normalize_csv_row(raw)
+            if not any(normalized.values()):
+                continue
+            player_rows.append(_parse_player_csv_row(normalized))
+            imported += 1
+        except (ValueError, TypeError):
+            skipped += 1
+
+    if not player_rows:
+        return ImportResult(
+            message="No player rows imported. Check CSV headers and player_name column.",
+            imported=0,
+            skipped=skipped,
+        )
+
+    team_totals = {f: 0 for f in _CSV_INT_STAT_FIELDS if f != "plus_minus"}
+    for pr in player_rows:
+        for f in team_totals:
+            team_totals[f] += pr[f]
+
+    _validate_pts_consistency(
+        team_totals["pts"],
+        team_totals["fgm"],
+        team_totals["fg3m"],
+        team_totals["ftm"],
+    )
+
+    existing_result = await db.execute(
+        select(BoxScore).where(BoxScore.game_id == game_id, BoxScore.team_id == team_id)
+    )
+    existing_scores = existing_result.scalars().all()
+    had_existing = bool(existing_scores)
+    for existing_bs in existing_scores:
+        await db.delete(existing_bs)
+    await db.flush()
+
+    box_score = BoxScore(
+        game_id=game_id,
+        team_id=team_id,
+        pts=team_totals["pts"],
+        fgm=team_totals["fgm"],
+        fga=team_totals["fga"],
+        fg3m=team_totals["fg3m"],
+        fg3a=team_totals["fg3a"],
+        ftm=team_totals["ftm"],
+        fta=team_totals["fta"],
+        oreb=team_totals["oreb"],
+        dreb=team_totals["dreb"],
+        ast=team_totals["ast"],
+        stl=team_totals["stl"],
+        blk=team_totals["blk"],
+        tov=team_totals["tov"],
+        pf=team_totals["pf"],
+    )
+    db.add(box_score)
+    await db.flush()
+
+    for pr in player_rows:
+        db.add(
+            PlayerBoxScore(
+                box_score_id=box_score.id,
+                player_id=pr["player_id"],
+                player_name=pr["player_name"],
+                jersey_number=pr["jersey_number"],
+                minutes_played=pr["minutes_played"],
+                pts=pr["pts"],
+                fgm=pr["fgm"],
+                fga=pr["fga"],
+                fg3m=pr["fg3m"],
+                fg3a=pr["fg3a"],
+                ftm=pr["ftm"],
+                fta=pr["fta"],
+                oreb=pr["oreb"],
+                dreb=pr["dreb"],
+                ast=pr["ast"],
+                stl=pr["stl"],
+                blk=pr["blk"],
+                tov=pr["tov"],
+                pf=pr["pf"],
+                plus_minus=pr["plus_minus"],
+            )
+        )
+
+    await db.commit()
+
+    replaced_note = " Replaced existing box score for this game/team." if had_existing else ""
+    return ImportResult(
+        message=(
+            f"Imported {imported} player row(s) for game {str(game_id)[:8]} / team {str(team_id)[:8]}."
+            f"{replaced_note} Skipped {skipped} row(s)."
+        ),
+        imported=imported,
+        skipped=skipped,
     )
