@@ -183,7 +183,7 @@ export async function generateScoutingReport(matchupId: string) {
 }
 
 export async function updateScoutingNotes(reportId: string, notes: string) {
-  const { data } = await api.patch(`/scouting-reports/${reportId}/notes`, { coach_notes: notes });
+  const { data } = await api.patch(`/matchups/scouting-reports/${reportId}/notes`, { coach_notes: notes });
   return data;
 }
 
@@ -194,8 +194,12 @@ export async function getVideoInsights(matchupId: string) {
 
 // ── Simulation ────────────────────────────────────────────────────────────────
 export async function getSimulation(matchupId: string) {
-  const { data } = await api.get(`/matchups/${matchupId}/prep-status`);
-  return data;
+  try {
+    const { data } = await api.get(`/matchups/${matchupId}/simulation`);
+    return data;
+  } catch {
+    return null;
+  }
 }
 
 export async function runSimulation(matchupId: string, payload?: Record<string, unknown>) {
@@ -293,7 +297,7 @@ export async function deleteBoxScore(boxScoreId: string) {
 }
 
 export async function importBoxScores(gameId: string) {
-  const { data } = await api.post(`/box-scores/import`, { game_id: gameId });
+  const { data } = await api.post("/box-scores/import", null, { params: { game_id: gameId } });
   return data;
 }
 

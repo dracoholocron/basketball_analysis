@@ -6,7 +6,7 @@ import { Suspense } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
-  getMatchup, getPrepStatus, getSimulation, listPlays, updateMatchupNotes,
+  getMatchup, getPrepStatus, getSimulation, runSimulation, listPlays, updateMatchupNotes,
   listGameEvents, setPriorityKey,
 } from "@/lib/api";
 import {
@@ -31,6 +31,14 @@ interface PrepStatus {
 interface Key {
   id: string; title: string; description?: string; is_priority: boolean;
   priority_rank?: number; coefficient?: number; live_status?: string;
+}
+
+interface SimulationData {
+  id: string;
+  win_pct_own: number;
+  avg_score_own: number | null;
+  avg_score_opp: number | null;
+  keys?: Key[];
 }
 
 type TabId = "overview" | "scouting" | "simulation" | "plays" | "tracker" | "notes";
@@ -72,6 +80,8 @@ function MatchupWorkspaceContent() {
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(true);
   const [savingNotes, setSavingNotes] = useState(false);
+  const [simulation, setSimulation] = useState<SimulationData | null>(null);
+  const [simRunning, setSimRunning] = useState(false);
 
   const tabParam = (searchParams.get("tab") as TabId) || "overview";
   const [activeTab, setActiveTab] = useState<TabId>(tabParam);
@@ -84,8 +94,12 @@ function MatchupWorkspaceContent() {
       if (m.notes && typeof m.notes === "object") {
         setNotes((m.notes as Record<string, string>).text ?? "");
       }
-      // Fetch simulation keys
-      getSimulation(id).then((sim) => setKeys(sim?.keys ?? [])).catch(() => {});
+      getSimulation(id).then((sim) => {
+        if (sim) {
+          setSimulation(sim);
+          setKeys(sim.keys ?? []);
+        }
+      }).catch(() => {});
       // Fetch recent events
       listGameEvents(id, 0, 10).then(setRecentEvents).catch(() => {});
       // Fetch linked plays
@@ -108,12 +122,41 @@ function MatchupWorkspaceContent() {
     if (!matchup || notes === ((matchup.notes as Record<string, string> | null)?.text ?? "")) return;
     const t = setTimeout(async () => {
       setSavingNotes(true);
-      try { await updateMatchupNotes(id, { text: notes }); }
+      try { await updateMatchupNotes(id, { notes: { text: notes } }); }
       catch { /* ignore */ }
       finally { setSavingNotes(false); }
     }, 1000);
     return () => clearTimeout(t);
   }, [notes, id, matchup]);
+
+  async function loadSimulation() {
+    const sim = await getSimulation(id);
+    if (sim) {
+      setSimulation(sim);
+      setKeys(sim.keys ?? []);
+    } else {
+      setSimulation(null);
+      setKeys([]);
+    }
+  }
+
+  async function handleRunSimulation() {
+    setSimRunning(true);
+    try {
+      await runSimulation(id);
+      await loadSimulation();
+    } catch { /* ignore */ }
+    finally { setSimRunning(false); }
+  }
+
+  async function toggleKeyPriority(key: Key) {
+    const next = !key.is_priority;
+    const rank = next ? (priorityKeys.length + 1) : undefined;
+    try {
+      await setPriorityKey(id, key.id, next, rank);
+      await loadSimulation();
+    } catch { /* ignore */ }
+  }
 
   function switchTab(tab: TabId) {
     setActiveTab(tab);
@@ -324,13 +367,81 @@ function MatchupWorkspaceContent() {
               </div>
             )}
 
-            {(activeTab === "simulation") && (
-              <div className="card text-center py-10">
-                <Target size={28} className="text-slate-200 mx-auto mb-2" />
-                <p className="text-slate-400 text-sm mb-3">View simulation and manage priorities</p>
-                <Link href={`/game-day?matchup=${id}`} className="btn-primary btn-sm">
-                  Open Game Day <ChevronRight size={13} />
-                </Link>
+            {activeTab === "simulation" && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-slate-700">Monte Carlo simulation</p>
+                  <button
+                    type="button"
+                    onClick={handleRunSimulation}
+                    disabled={simRunning}
+                    className="btn-primary btn-sm"
+                  >
+                    {simRunning ? <Loader2 size={13} className="animate-spin" /> : <Target size={13} />}
+                    Run Simulation
+                  </button>
+                </div>
+
+                {simulation ? (
+                  <>
+                    <div className="grid sm:grid-cols-3 gap-3">
+                      <div className="card text-center">
+                        <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Win probability</p>
+                        <p className="text-2xl font-bold text-slate-900">
+                          {Math.round((simulation.win_pct_own ?? 0) * 100)}%
+                        </p>
+                      </div>
+                      <div className="card text-center">
+                        <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Projected (us)</p>
+                        <p className="text-2xl font-bold text-slate-900">
+                          {(simulation.avg_score_own ?? 0).toFixed(1)}
+                        </p>
+                      </div>
+                      <div className="card text-center">
+                        <p className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Projected (opp)</p>
+                        <p className="text-2xl font-bold text-slate-900">
+                          {(simulation.avg_score_opp ?? 0).toFixed(1)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="card">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Keys to Victory</p>
+                      {keys.length === 0 ? (
+                        <p className="text-sm text-slate-400">No keys generated yet.</p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {keys.map((key) => (
+                            <li key={key.id} className="flex items-start gap-3 p-3 rounded-xl border border-slate-100">
+                              <button
+                                type="button"
+                                onClick={() => toggleKeyPriority(key)}
+                                className={clsx(
+                                  "mt-0.5 h-5 w-5 rounded border flex-shrink-0 flex items-center justify-center",
+                                  key.is_priority ? "bg-indigo-600 border-indigo-600 text-white" : "border-slate-300 bg-white",
+                                )}
+                                title={key.is_priority ? "Remove priority" : "Mark as priority"}
+                              >
+                                {key.is_priority && <CheckCircle2 size={12} />}
+                              </button>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-slate-800">{key.title}</p>
+                                {key.description && (
+                                  <p className="text-xs text-slate-500 mt-0.5">{key.description}</p>
+                                )}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="card text-center py-10">
+                    <Target size={28} className="text-slate-200 mx-auto mb-2" />
+                    <p className="text-slate-400 text-sm">No simulation yet. Run one to see projected scores and keys.</p>
+                  </div>
+                )}
               </div>
             )}
           </div>

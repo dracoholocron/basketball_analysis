@@ -19,7 +19,7 @@ def run_simulation_task(self, matchup_id: str, n_runs: int = 1000) -> dict:
     from ..models.simulation import GameSimulation, KeyToVictory
     from ..services import simulation as sim_engine
     from ..services.llm import generate_keys_to_victory
-    from ..routers.simulations import _fetch_team_averages
+    from ..routers.matchups import _get_team_stats
 
     async def _run() -> dict:
         engine = create_async_engine(settings.database_url, echo=False)
@@ -34,9 +34,9 @@ def run_simulation_task(self, matchup_id: str, n_runs: int = 1000) -> dict:
             own_stats: dict = {}
             opp_stats: dict = {}
             if matchup.own_team_id:
-                own_stats = await _fetch_team_averages(db, matchup.own_team_id, matchup.season_id)
+                own_stats = await _get_team_stats(db, matchup.own_team_id)
             if matchup.opponent_team_id:
-                opp_stats = await _fetch_team_averages(db, matchup.opponent_team_id, matchup.season_id)
+                opp_stats = await _get_team_stats(db, matchup.opponent_team_id)
 
             data_source = "real" if (own_stats or opp_stats) else "default"
             results = sim_engine.run_monte_carlo(own_stats, opp_stats, n_runs=min(n_runs, 5000))

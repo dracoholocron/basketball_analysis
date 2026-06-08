@@ -4,9 +4,11 @@ from __future__ import annotations
 import csv
 import io
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -112,3 +114,95 @@ async def delete_box_score(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Box score not found")
     await db.delete(bs)
     await db.commit()
+
+
+# ── Team Averages ──────────────────────────────────────────────────────────────
+
+class TeamAveragesRead(BaseModel):
+    team_id: str
+    games_played: int
+    avg_pts: float
+    avg_fgm: float
+    avg_fga: float
+    avg_fg3m: float
+    avg_fg3a: float
+    avg_ftm: float
+    avg_fta: float
+    avg_oreb: float
+    avg_dreb: float
+    avg_reb: float
+    avg_ast: float
+    avg_stl: float
+    avg_blk: float
+    avg_tov: float
+    fg_pct: float
+    fg3_pct: float
+    ft_pct: float
+
+
+@router.get("/team-averages", response_model=TeamAveragesRead)
+async def get_team_averages(
+    team_id: uuid.UUID = Query(...),
+    season_id: uuid.UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Return aggregated box score averages for a team, optionally filtered by season."""
+    q = select(BoxScore).where(BoxScore.team_id == team_id)
+    if season_id is not None:
+        from ..models.game import Game
+        subq = select(Game.id).where(Game.season_id == season_id)
+        q = q.where(BoxScore.game_id.in_(subq))
+    result = await db.execute(q)
+    scores = result.scalars().all()
+
+    if not scores:
+        raise HTTPException(status_code=404, detail="No box scores found for this team")
+
+    n = len(scores)
+    stat_fields = ["pts", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "ast", "stl", "blk", "tov"]
+    avgs: dict[str, Any] = {"team_id": str(team_id), "games_played": n}
+    for f in stat_fields:
+        avgs[f"avg_{f}"] = round(sum(getattr(s, f, 0) or 0 for s in scores) / n, 2)
+
+    avgs["avg_reb"] = round(avgs["avg_oreb"] + avgs["avg_dreb"], 2)
+    avgs["fg_pct"] = round(avgs["avg_fgm"] / avgs["avg_fga"], 3) if avgs["avg_fga"] > 0 else 0.0
+    avgs["fg3_pct"] = round(avgs["avg_fg3m"] / avgs["avg_fg3a"], 3) if avgs["avg_fg3a"] > 0 else 0.0
+    avgs["ft_pct"] = round(avgs["avg_ftm"] / avgs["avg_fta"], 3) if avgs["avg_fta"] > 0 else 0.0
+    return avgs
+
+
+# ── CSV Import ─────────────────────────────────────────────────────────────────
+
+class ImportResult(BaseModel):
+    message: str
+    imported: int
+    skipped: int
+
+
+@router.post("/import", response_model=ImportResult)
+async def import_box_scores(
+    game_id: uuid.UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_admin),
+):
+    """
+    Import box scores via game_id. Currently a stub that returns a message
+    directing users to use the manual entry form for individual game import.
+    Full CSV import requires uploading a file via multipart/form-data.
+    """
+    # Check game exists
+    from ..models.game import Game
+    game = await db.get(Game, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    # Count existing box scores for this game
+    result = await db.execute(select(BoxScore).where(BoxScore.game_id == game_id))
+    existing = result.scalars().all()
+
+    return ImportResult(
+        message=f"Game {str(game_id)[:8]} has {len(existing)} box score(s). Use the manual entry form to add or update scores.",
+        imported=0,
+        skipped=len(existing),
+    )

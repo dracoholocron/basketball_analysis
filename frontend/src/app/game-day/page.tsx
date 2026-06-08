@@ -6,7 +6,6 @@ import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
   listMatchups, createMatchup, getPrepStatus, listTeams,
-  getSimulation,
 } from "@/lib/api";
 import {
   CalendarDays, CheckCircle2, Circle, Loader2, PlusCircle,

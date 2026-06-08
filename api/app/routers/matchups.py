@@ -1,11 +1,15 @@
 """Matchup CRUD endpoints."""
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,7 +19,8 @@ from ..models.box_score import BoxScore
 from ..models.game_event import GameEvent
 from ..models.matchup import Matchup
 from ..models.play import Play
-from ..models.simulation import GameSimulation, KeyToVictory
+from ..models.scouting_report import ScoutingReport
+from ..models.simulation import GameSimulation, KeyToVictory, SituationalAdjustment
 from ..models.team import Team
 from ..schemas.matchup import (
     ClockAction, MatchupCreate, MatchupRead, MatchupUpdate, MatchupNotesUpdate,
@@ -325,3 +330,395 @@ async def get_prep_status(
         win_probability_us=win_prob,
         progress_pct=progress_pct,
     )
+
+
+# ── Pydantic schemas for new endpoints ────────────────────────────────────────
+
+class ScoutingReportRead(BaseModel):
+    id: uuid.UUID
+    matchup_id: uuid.UUID
+    generated_at: datetime
+    model_used: str | None = None
+    team_identity: str | None = None
+    strengths: list | None = None
+    weaknesses: list | None = None
+    mvp_players: list | None = None
+    game_keys_offensive: list | None = None
+    game_keys_defensive: list | None = None
+    coach_notes: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ScoutingNotesUpdate(BaseModel):
+    coach_notes: str
+
+
+class KeyToVictoryRead(BaseModel):
+    id: uuid.UUID
+    simulation_id: uuid.UUID
+    title: str
+    description: str | None = None
+    target_metric: str | None = None
+    target_value: float | None = None
+    weight: float = 1.0
+    coefficient: float | None = None
+    feature_name: str | None = None
+    is_priority: bool = False
+    priority_rank: int | None = None
+    live_status: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class SimulationRead(BaseModel):
+    id: uuid.UUID
+    matchup_id: uuid.UUID
+    n_runs: int
+    win_pct_own: float
+    win_pct_opp: float
+    avg_score_own: float | None = None
+    avg_score_opp: float | None = None
+    score_range_own_low: float | None = None
+    score_range_own_high: float | None = None
+    score_range_opp_low: float | None = None
+    score_range_opp_high: float | None = None
+    key_drivers: dict | None = None
+    base_log_odds: float | None = None
+    created_at: datetime
+    keys: list[KeyToVictoryRead] = []
+
+    model_config = {"from_attributes": True}
+
+
+class PriorityKeyUpdate(BaseModel):
+    is_priority: bool
+    priority_rank: int | None = None
+
+
+# ── Helper: aggregate box scores for a team ───────────────────────────────────
+
+async def _get_team_stats(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
+    """Return averaged box score stats for a team."""
+    result = await db.execute(
+        select(BoxScore).where(BoxScore.team_id == team_id).order_by(BoxScore.created_at.desc()).limit(10)
+    )
+    scores = result.scalars().all()
+    if not scores:
+        return {}
+    n = len(scores)
+    fields = ["pts", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "ast", "stl", "blk", "tov"]
+    avgs: dict[str, float] = {}
+    for f in fields:
+        total = sum(getattr(s, f, 0) or 0 for s in scores)
+        avgs[f"avg_{f}"] = round(total / n, 2)
+    avgs["games_played"] = n
+    avgs["fg_pct"] = round(avgs["avg_fgm"] / avgs["avg_fga"], 3) if avgs.get("avg_fga", 0) > 0 else 0.0
+    avgs["fg3_pct"] = round(avgs["avg_fg3m"] / avgs["avg_fg3a"], 3) if avgs.get("avg_fg3a", 0) > 0 else 0.0
+    avgs["ft_pct"] = round(avgs["avg_ftm"] / avgs["avg_fta"], 3) if avgs.get("avg_fta", 0) > 0 else 0.0
+    avgs["avg_reb"] = round(avgs.get("avg_oreb", 0) + avgs.get("avg_dreb", 0), 2)
+    return avgs
+
+
+# ── Scouting Report endpoints ──────────────────────────────────────────────────
+
+@router.get("/{matchup_id}/scouting-report", response_model=ScoutingReportRead)
+async def get_scouting_report(
+    matchup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Return the latest scouting report for a matchup."""
+    result = await db.execute(
+        select(ScoutingReport)
+        .where(ScoutingReport.matchup_id == matchup_id)
+        .order_by(ScoutingReport.generated_at.desc())
+        .limit(1)
+    )
+    report = result.scalar_one_or_none()
+    if report is None:
+        raise HTTPException(status_code=404, detail="No scouting report found for this matchup")
+    return report
+
+
+@router.post("/{matchup_id}/scouting-report/generate", response_model=ScoutingReportRead)
+async def generate_scouting_report(
+    matchup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Generate a new scouting report using LLM + team box score stats."""
+    m = await db.get(Matchup, matchup_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Matchup not found")
+
+    # Fetch team names
+    own_team = await db.get(Team, m.own_team_id) if m.own_team_id else None
+    opp_team = await db.get(Team, m.opponent_team_id) if m.opponent_team_id else None
+
+    own_stats = await _get_team_stats(db, m.own_team_id) if m.own_team_id else {}
+    opp_stats = await _get_team_stats(db, m.opponent_team_id) if m.opponent_team_id else {}
+
+    # Build a hash to detect if stats have changed
+    stats_hash = hashlib.md5(json.dumps(opp_stats, sort_keys=True).encode()).hexdigest()
+
+    from ..services.llm import generate_scouting_report as llm_generate
+    content = await llm_generate(
+        matchup_name=m.name,
+        own_team_name=own_team.name if own_team else "Our Team",
+        opponent_team_name=opp_team.name if opp_team else "Opponent",
+        opponent_stats=opp_stats,
+    )
+
+    report = ScoutingReport(
+        matchup_id=matchup_id,
+        model_used=content.get("model_used", "llm"),
+        team_identity=content.get("team_identity"),
+        strengths=content.get("strengths", []),
+        weaknesses=content.get("weaknesses", []),
+        mvp_players=content.get("mvp_players", []),
+        game_keys_offensive=content.get("game_keys_offensive", []),
+        game_keys_defensive=content.get("game_keys_defensive", []),
+        box_scores_hash=stats_hash,
+    )
+    db.add(report)
+    await db.commit()
+    await db.refresh(report)
+    return report
+
+
+@router.patch("/scouting-reports/{report_id}/notes", response_model=ScoutingReportRead)
+async def update_scouting_notes(
+    report_id: uuid.UUID,
+    payload: ScoutingNotesUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Update coach notes on a scouting report."""
+    report = await db.get(ScoutingReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Scouting report not found")
+    report.coach_notes = payload.coach_notes
+    await db.commit()
+    await db.refresh(report)
+    return report
+
+
+# ── Video Insights endpoint ────────────────────────────────────────────────────
+
+@router.get("/{matchup_id}/video-insights", response_model=dict)
+async def get_video_insights(
+    matchup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Return player-level video analysis metrics for both teams in a matchup."""
+    m = await db.get(Matchup, matchup_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Matchup not found")
+
+    teams = [
+        {"team_id": str(m.own_team_id), "team_role": "own"},
+        {"team_id": str(m.opponent_team_id), "team_role": "opponent"},
+    ] if m.own_team_id and m.opponent_team_id else []
+
+    insights = []
+    for t in teams:
+        team_id = uuid.UUID(t["team_id"])
+        # Use box score player data as proxy for video metrics
+        bs_result = await db.execute(
+            select(BoxScore)
+            .options(selectinload(BoxScore.player_box_scores))
+            .where(BoxScore.team_id == team_id)
+            .order_by(BoxScore.created_at.desc())
+            .limit(5)
+        )
+        box_scores = bs_result.scalars().all()
+
+        # Aggregate player stats across games
+        player_agg: dict[str, Any] = {}
+        for bs in box_scores:
+            for pbs in (bs.player_box_scores or []):
+                name = pbs.player_name or "Unknown"
+                if name not in player_agg:
+                    player_agg[name] = {
+                        "player_name": name,
+                        "jersey_number": pbs.jersey_number,
+                        "pts": 0, "ast": 0, "reb": 0, "stl": 0, "blk": 0,
+                        "fgm": 0, "fga": 0, "games": 0,
+                    }
+                agg = player_agg[name]
+                agg["pts"] += pbs.pts or 0
+                agg["ast"] += pbs.ast or 0
+                agg["reb"] += (pbs.oreb or 0) + (pbs.dreb or 0)
+                agg["stl"] += pbs.stl or 0
+                agg["blk"] += pbs.blk or 0
+                agg["fgm"] += pbs.fgm or 0
+                agg["fga"] += pbs.fga or 0
+                agg["games"] += 1
+
+        players = []
+        for p in player_agg.values():
+            g = p["games"] or 1
+            players.append({
+                "player_name": p["player_name"],
+                "jersey_number": p.get("jersey_number"),
+                "avg_pts": round(p["pts"] / g, 1),
+                "avg_ast": round(p["ast"] / g, 1),
+                "avg_reb": round(p["reb"] / g, 1),
+                "avg_stl": round(p["stl"] / g, 1),
+                "avg_blk": round(p["blk"] / g, 1),
+                "fg_pct": round(p["fgm"] / p["fga"], 3) if p["fga"] > 0 else 0.0,
+                "games": g,
+            })
+        players.sort(key=lambda x: x["avg_pts"], reverse=True)
+
+        insights.append({"team_id": t["team_id"], "team_role": t["team_role"], "players": players})
+
+    return {"insights": insights, "note": "Derived from box score data"}
+
+
+# ── Simulation endpoint ────────────────────────────────────────────────────────
+
+@router.get("/{matchup_id}/simulation", response_model=SimulationRead)
+async def get_latest_simulation(
+    matchup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+) -> SimulationRead:
+    """Return the most recent simulation for a matchup."""
+    stmt = (
+        select(GameSimulation)
+        .where(GameSimulation.matchup_id == matchup_id)
+        .options(selectinload(GameSimulation.keys))
+        .order_by(GameSimulation.created_at.desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    sim = result.scalar_one_or_none()
+    if sim is None:
+        raise HTTPException(status_code=404, detail="No simulation found for this matchup")
+    return sim
+
+
+@router.post("/{matchup_id}/simulate", response_model=SimulationRead)
+async def run_simulation(
+    matchup_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Run Monte Carlo simulation for a matchup using team box score averages."""
+    m = await db.get(Matchup, matchup_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Matchup not found")
+
+    own_stats = await _get_team_stats(db, m.own_team_id) if m.own_team_id else {}
+    opp_stats = await _get_team_stats(db, m.opponent_team_id) if m.opponent_team_id else {}
+
+    from ..services.simulation import run_monte_carlo
+    from ..services.llm import generate_keys_to_victory
+
+    sim_result = run_monte_carlo(own_stats, opp_stats, n_runs=1000)
+
+    sim = GameSimulation(
+        matchup_id=matchup_id,
+        n_runs=sim_result["n_runs"],
+        win_pct_own=sim_result["win_pct_own"],
+        win_pct_opp=sim_result["win_pct_opp"],
+        avg_score_own=sim_result["avg_score_own"],
+        avg_score_opp=sim_result["avg_score_opp"],
+        score_range_own_low=sim_result["score_range_own_low"],
+        score_range_own_high=sim_result["score_range_own_high"],
+        score_range_opp_low=sim_result["score_range_opp_low"],
+        score_range_opp_high=sim_result["score_range_opp_high"],
+        key_drivers={"drivers": sim_result.get("key_drivers", [])},
+        base_log_odds=sim_result.get("base_log_odds"),
+        runs_data=sim_result.get("runs_data", [])[:100],  # Store first 100 for space
+    )
+    db.add(sim)
+    await db.flush()
+
+    # Generate keys to victory from LLM
+    summary = {
+        "win_pct_own": round(sim_result["win_pct_own"], 3),
+        "avg_score_own": round(sim_result.get("avg_score_own", 0), 1),
+        "avg_score_opp": round(sim_result.get("avg_score_opp", 0), 1),
+        "key_drivers": sim_result.get("key_drivers", []),
+        "own_team_stats": {k: v for k, v in own_stats.items() if k.startswith("avg_") or k in ("fg_pct", "fg3_pct", "ft_pct")},
+        "opp_team_stats": {k: v for k, v in opp_stats.items() if k.startswith("avg_") or k in ("fg_pct", "fg3_pct", "ft_pct")},
+    }
+
+    try:
+        keys_data = await generate_keys_to_victory(summary, m.name)
+    except Exception:
+        keys_data = []
+
+    # Fallback: use driver-based keys if LLM fails
+    if not keys_data:
+        driver_labels = {
+            "own_fg_pct": ("Shoot efficiently", "Maintain high field goal percentage", "fg_pct"),
+            "own_fg3_pct": ("3-point shooting", "Capitalize on three-point opportunities", "fg3_pct"),
+            "own_tov_rate": ("Protect the ball", "Minimize turnovers to preserve possessions", "tov"),
+            "own_oreb_rate": ("Win the boards", "Dominate offensive rebounding for second chances", "reb"),
+            "opp_fg_pct": ("Defend the paint", "Limit opponent field goal percentage", "fg_pct"),
+        }
+        for d in (sim_result.get("key_drivers") or [])[:5]:
+            fn = d.get("feature_name", "")
+            label_info = driver_labels.get(fn, (fn.replace("_", " ").title(), "", fn))
+            keys_data.append({
+                "title": label_info[0],
+                "description": label_info[1],
+                "target_metric": label_info[2],
+                "target_value": None,
+                "weight": min(1.0, abs(d.get("coefficient", 0.5))),
+            })
+
+    for i, kd in enumerate(keys_data[:6]):
+        key = KeyToVictory(
+            simulation_id=sim.id,
+            title=kd.get("title", f"Key {i+1}"),
+            description=kd.get("description"),
+            target_metric=kd.get("target_metric"),
+            target_value=kd.get("target_value"),
+            weight=kd.get("weight", 1.0),
+            order=i,
+            feature_name=(sim_result.get("key_drivers") or [{}])[i % len(sim_result.get("key_drivers") or [{}])].get("feature_name") if sim_result.get("key_drivers") else None,
+            coefficient=(sim_result.get("key_drivers") or [{}])[i % len(sim_result.get("key_drivers") or [{}])].get("coefficient") if sim_result.get("key_drivers") else None,
+        )
+        db.add(key)
+
+    await db.commit()
+
+    final = await db.execute(
+        select(GameSimulation)
+        .where(GameSimulation.id == sim.id)
+        .options(selectinload(GameSimulation.keys))
+    )
+    return final.scalar_one()
+
+
+# ── Priority Keys endpoint ─────────────────────────────────────────────────────
+
+@router.patch("/{matchup_id}/keys/{key_id}/priority", response_model=KeyToVictoryRead)
+async def set_key_priority(
+    matchup_id: uuid.UUID,
+    key_id: uuid.UUID,
+    payload: PriorityKeyUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Toggle priority flag and rank on a Key to Victory."""
+    key = await db.get(KeyToVictory, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="Key not found")
+
+    # Verify the key belongs to a simulation of this matchup
+    sim = await db.get(GameSimulation, key.simulation_id)
+    if sim is None or sim.matchup_id != matchup_id:
+        raise HTTPException(status_code=403, detail="Key does not belong to this matchup")
+
+    key.is_priority = payload.is_priority
+    key.priority_rank = payload.priority_rank
+    await db.commit()
+    await db.refresh(key)
+    return key

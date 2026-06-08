@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 import AppShell from "@/components/layout/AppShell";
 import {
   listMatchups, createMatchup, listTeams,
@@ -33,11 +34,12 @@ interface ScoutingReport {
 interface VideoInsightPlayer {
   player_name: string;
   jersey_number?: string;
-  position?: string;
-  total_distance_m: number;
-  max_speed_kmh: number;
-  possession_frames: number;
-  passes_made: number;
+  avg_pts: number;
+  avg_ast: number;
+  avg_reb: number;
+  avg_stl: number;
+  avg_blk: number;
+  fg_pct: number;
   games: number;
 }
 
@@ -46,8 +48,9 @@ interface VideoInsights {
   note: string;
 }
 
-export default function ScoutingPage() {
+function ScoutingPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { selfScout } = useSelfScout();
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
@@ -76,6 +79,11 @@ export default function ScoutingPage() {
     loadMatchups();
     listTeams().then((d) => setTeams(d.items ?? d)).catch(() => null);
   }, [loadMatchups]);
+
+  useEffect(() => {
+    const matchupId = searchParams.get("matchup");
+    if (matchupId) loadReport(matchupId);
+  }, [searchParams]);
 
   async function loadReport(matchupId: string) {
     setSelectedMatchup(matchupId);
@@ -382,27 +390,29 @@ export default function ScoutingPage() {
                   {videoInsights.insights.map((insight) => (
                     <div key={insight.team_role} className="mb-4">
                       <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2 capitalize">
-                        {insight.team_role === "opponent" ? "Opponent" : "Our Team"} — CV Metrics
+                        {insight.team_role === "opponent" ? "Opponent" : "Our Team"} — Box score averages
                       </p>
                       <div className="overflow-x-auto">
                         <table className="min-w-full text-xs">
                           <thead>
                             <tr className="text-left text-slate-400 border-b border-slate-100">
                               <th className="pb-1 pr-4">Player</th>
-                              <th className="pb-1 pr-4">Distance (m)</th>
-                              <th className="pb-1 pr-4">Max Speed</th>
-                              <th className="pb-1 pr-4">Possessions</th>
-                              <th className="pb-1">Passes</th>
+                              <th className="pb-1 pr-4">PTS</th>
+                              <th className="pb-1 pr-4">AST</th>
+                              <th className="pb-1 pr-4">REB</th>
+                              <th className="pb-1 pr-4">STL</th>
+                              <th className="pb-1">FG%</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-50">
                             {insight.players.slice(0, 5).map((p, i) => (
                               <tr key={i}>
                                 <td className="py-1.5 pr-4 font-medium text-slate-700">{p.jersey_number ? `#${p.jersey_number} ` : ""}{p.player_name}</td>
-                                <td className="py-1.5 pr-4 text-slate-600">{(p.total_distance_m / p.games).toFixed(0)}/game</td>
-                                <td className="py-1.5 pr-4 text-slate-600">{p.max_speed_kmh.toFixed(1)} km/h</td>
-                                <td className="py-1.5 pr-4 text-slate-600">{Math.round(p.possession_frames / p.games)}</td>
-                                <td className="py-1.5 text-slate-600">{Math.round(p.passes_made / p.games)}</td>
+                                <td className="py-1.5 pr-4 text-slate-600">{(p?.avg_pts ?? 0).toFixed(1)}</td>
+                                <td className="py-1.5 pr-4 text-slate-600">{(p?.avg_ast ?? 0).toFixed(1)}</td>
+                                <td className="py-1.5 pr-4 text-slate-600">{(p?.avg_reb ?? 0).toFixed(1)}</td>
+                                <td className="py-1.5 pr-4 text-slate-600">{(p?.avg_stl ?? 0).toFixed(1)}</td>
+                                <td className="py-1.5 text-slate-600">{((p?.fg_pct ?? 0) * 100).toFixed(1)}%</td>
                               </tr>
                             ))}
                           </tbody>
@@ -471,5 +481,19 @@ export default function ScoutingPage() {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+export default function ScoutingPage() {
+  return (
+    <Suspense fallback={
+      <AppShell title="Scouting">
+        <div className="flex items-center justify-center py-20">
+          <Loader2 size={24} className="animate-spin text-slate-400" />
+        </div>
+      </AppShell>
+    }>
+      <ScoutingPageContent />
+    </Suspense>
   );
 }
