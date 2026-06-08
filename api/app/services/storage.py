@@ -63,6 +63,15 @@ class StorageService:
         with open(local_path, "rb") as f:
             return self.upload_file(f, bucket, key)
 
+    def upload_bytes(
+        self,
+        data: bytes,
+        bucket: str,
+        key: str,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        return self.upload_file(io.BytesIO(data), bucket, key, content_type=content_type)
+
     def download_file(self, bucket: str, key: str, dest_path: str) -> None:
         Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
         self._client.download_file(bucket, key, dest_path)

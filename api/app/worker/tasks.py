@@ -204,6 +204,10 @@ def run_analysis(
         storage.upload_local_file(output_video, api_settings.minio_bucket_outputs, output_key)
         logger.info("Uploaded annotated video: %s", output_key)
 
+        # Save source video key so highlights generation can locate the original
+        with Session(engine) as db:
+            _update_job(db, job_id, source_video_s3_key=video_s3_key)
+
         # ── 5b. Copy to host-mounted output directory (if available) ──────
         host_outputs = Path("/app/host_outputs")
         if host_outputs.exists():
@@ -220,6 +224,9 @@ def run_analysis(
         # ── 6. Persist metrics ─────────────────────────────────────────────
         _persist_metrics(engine, job_id, metrics)
 
+        # ── 7. Build CV events from pipeline metrics ───────────────────────
+        cv_events = _build_cv_events(metrics)
+
         with Session(engine) as db:
             _update_job(
                 db,
@@ -228,6 +235,7 @@ def run_analysis(
                 current_stage=JobStage.COMPLETE,
                 progress_pct=100,
                 output_s3_key=output_key,
+                cv_events_json=cv_events,
                 finished_at=datetime.now(timezone.utc),
             )
         logger.info("Job %s completed successfully", job_id)
@@ -366,3 +374,203 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
     logger.info(
         "Persisted %d player metrics, %d frame metrics", len(player_rows), total_frames
     )
+
+
+def _build_cv_events(metrics: dict) -> list[dict]:
+    """Build a list of CV event dicts from pipeline metrics for the CV events tab."""
+    fps: float = float(metrics.get("fps", 25.0)) or 25.0
+    events: list[dict] = []
+
+    ball_acquisition: list[int] = metrics.get("ball_acquisition", [])
+    passes: list[int] = metrics.get("passes", [])
+    interceptions: list[int] = metrics.get("interceptions", [])
+
+    def frame_to_s(f: int) -> float:
+        return round(f / fps, 2)
+
+    # Pass events — each frame where passes[f] != -1 is a completed pass
+    for frame_idx, team_id in enumerate(passes):
+        if team_id == -1:
+            continue
+        # Attribution: find who held the ball in the previous frame
+        passer_id = None
+        if frame_idx > 0 and (frame_idx - 1) < len(ball_acquisition):
+            h = ball_acquisition[frame_idx - 1]
+            passer_id = int(h) if h != -1 else None
+        events.append({
+            "event_type": "pass",
+            "frame": int(frame_idx),
+            "time_s": frame_to_s(frame_idx),
+            "team_id": int(team_id),
+            "player_track_id": passer_id,
+            "description": f"Pase — equipo {team_id + 1}",
+        })
+
+    # Interception / turnover events
+    for frame_idx, team_id in enumerate(interceptions):
+        if team_id == -1:
+            continue
+        interceptor_id = None
+        if frame_idx < len(ball_acquisition):
+            h = ball_acquisition[frame_idx]
+            interceptor_id = int(h) if h != -1 else None
+        events.append({
+            "event_type": "steal",
+            "frame": int(frame_idx),
+            "time_s": frame_to_s(frame_idx),
+            "team_id": int(team_id),
+            "player_track_id": interceptor_id,
+            "description": f"Robo / pérdida — equipo {team_id + 1}",
+        })
+
+    # Sort by frame
+    events.sort(key=lambda e: e["frame"])
+    logger.info("Built %d CV events from pipeline metrics", len(events))
+    return events
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.generate_highlights", max_retries=0,
+                 acks_late=True)
+def generate_highlights(
+    self: Task,
+    job_id: str,
+    game_id: str,
+    portrait: bool = False,
+    pad_before_s: float = 2.0,
+    pad_after_s: float = 3.0,
+    event_types: list[str] | None = None,
+) -> dict:
+    """
+    Extract highlight clips from the source video based on cv_events_json.
+
+    Uses ffmpeg to cut clips around each event, uploads them to MinIO, and
+    saves a JSON manifest so the highlights page can list them.
+    """
+    import json
+    import subprocess
+
+    engine = _sync_engine()
+    storage = StorageService()
+
+    with Session(engine) as db:
+        job = db.get(Job, uuid.UUID(job_id))
+        if job is None:
+            logger.error("generate_highlights: job %s not found", job_id)
+            return {"error": "job not found"}
+        source_key = job.source_video_s3_key
+        cv_events: list[dict] = job.cv_events_json or []
+
+    if not source_key:
+        logger.warning("generate_highlights: no source_video_s3_key on job %s", job_id)
+        return {"error": "source video not available"}
+
+    # Filter by requested event types
+    if event_types:
+        cv_events = [e for e in cv_events if e.get("event_type") in event_types]
+
+    # Deduplicate nearby events (within 3 s)
+    deduped: list[dict] = []
+    last_time: float | None = None
+    for ev in sorted(cv_events, key=lambda e: e.get("time_s", 0)):
+        t = float(ev.get("time_s", 0))
+        if last_time is None or t - last_time >= 3.0:
+            deduped.append(ev)
+            last_time = t
+
+    if not deduped:
+        logger.info("generate_highlights: no events to clip for job %s", job_id)
+        return {"clips": 0}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local_video = os.path.join(tmp, "source.mp4")
+        try:
+            storage.download_file(api_settings.minio_bucket_videos, source_key, local_video)
+        except Exception as exc:
+            logger.error("generate_highlights: could not download source video: %s", exc)
+            return {"error": str(exc)}
+
+        # Get video duration via ffprobe
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", local_video],
+                capture_output=True, text=True, timeout=30,
+            )
+            import json as _json
+            fmt = _json.loads(probe.stdout).get("format", {})
+            video_duration = float(fmt.get("duration", 9999))
+        except Exception:
+            video_duration = 9999.0
+
+        manifest: list[dict] = []
+        clips_dir = os.path.join(tmp, "clips")
+        os.makedirs(clips_dir, exist_ok=True)
+
+        vf_filter = "scale=iw*min(1080/iw\\,1920/ih):ih*min(1080/iw\\,1920/ih),pad=1080:1920:(1080-iw)/2:(1920-ih)/2" if portrait else ""
+
+        for i, ev in enumerate(deduped):
+            t = float(ev.get("time_s", 0))
+            start = max(0.0, t - pad_before_s)
+            end = min(video_duration, t + pad_after_s)
+            duration = end - start
+            if duration < 0.5:
+                continue
+
+            clip_name = f"highlight_{i:03d}_{ev.get('event_type', 'event')}.mp4"
+            clip_path = os.path.join(clips_dir, clip_name)
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start),
+                "-i", local_video,
+                "-t", str(duration),
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+            ]
+            if vf_filter:
+                cmd += ["-vf", vf_filter]
+            cmd.append(clip_path)
+
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+            except Exception as exc:
+                logger.warning("Clip %s failed: %s", clip_name, exc)
+                continue
+
+            s3_key = f"highlights/{game_id}/{clip_name}"
+            try:
+                storage.upload_local_file(clip_path, api_settings.minio_bucket_outputs, s3_key)
+            except Exception as exc:
+                logger.warning("Could not upload clip %s: %s", clip_name, exc)
+                s3_key = None
+
+            manifest.append({
+                "id": f"{job_id}_{i}",
+                "event_type": ev.get("event_type", "event"),
+                "start_s": start,
+                "end_s": end,
+                "time_s": t,
+                "s3_key": s3_key,
+                "description": ev.get("description", ""),
+            })
+
+        # Upload manifest JSON
+        manifest_key = f"highlights/{game_id}/{job_id}_manifest.json"
+        manifest_json = json.dumps(manifest).encode()
+        try:
+            storage.upload_bytes(
+                manifest_json,
+                api_settings.minio_bucket_outputs,
+                manifest_key,
+                content_type="application/json",
+            )
+        except Exception as exc:
+            logger.warning("Could not upload highlights manifest: %s", exc)
+            manifest_key = None
+
+        with Session(engine) as db:
+            _update_job(db, job_id, highlights_manifest_key=manifest_key)
+
+        logger.info(
+            "generate_highlights done: %d clips for job %s", len(manifest), job_id
+        )
+        return {"clips": len(manifest), "manifest_key": manifest_key}

@@ -51,18 +51,21 @@ interface Metrics {
 }
 
 interface CvEvent {
-  type: string;
+  event_type: string;
   frame: number;
-  track_id?: number;
-  confidence?: number;
+  time_s?: number;
+  team_id?: number;
+  player_track_id?: number;
+  description?: string;
 }
 
 const TEAM_COLORS = ["#3b82f6", "#ef4444"];
 
 const CV_EVENT_CONFIG: Record<string, { color: string; bg: string; icon: React.ReactNode; label: string }> = {
-  shot_attempt: { color: "text-orange-400", bg: "bg-orange-500/20 border-orange-500/30", icon: <Target size={14} />, label: "Tiro" },
-  rebound:      { color: "text-blue-400",   bg: "bg-blue-500/20 border-blue-500/30",   icon: <Activity size={14} />, label: "Rebote" },
-  steal:        { color: "text-purple-400", bg: "bg-purple-500/20 border-purple-500/30", icon: <Zap size={14} />, label: "Robo" },
+  shot_attempt: { color: "text-orange-400", bg: "bg-orange-500/20 border-orange-500/30",   icon: <Target size={14} />,   label: "Tiro" },
+  rebound:      { color: "text-blue-400",   bg: "bg-blue-500/20 border-blue-500/30",       icon: <Activity size={14} />, label: "Rebote" },
+  steal:        { color: "text-purple-400", bg: "bg-purple-500/20 border-purple-500/30",   icon: <Zap size={14} />,      label: "Robo" },
+  pass:         { color: "text-green-400",  bg: "bg-green-500/20 border-green-500/30",     icon: <Activity size={14} />, label: "Pase" },
 };
 
 type Tab = "stats" | "events" | "players";
@@ -227,9 +230,11 @@ export default function GameDetailPage() {
     { name: "Interceptions",team1: metrics.team1_interceptions, team2: metrics.team2_interceptions },
   ] : [];
 
-  const shotCount    = cvEvents.filter(e => e.type === "shot_attempt").length;
-  const reboundCount = cvEvents.filter(e => e.type === "rebound").length;
-  const stealCount   = cvEvents.filter(e => e.type === "steal").length;
+  const shotCount    = cvEvents.filter(e => e.event_type === "shot_attempt").length;
+  const reboundCount = cvEvents.filter(e => e.event_type === "rebound").length;
+  const stealCount   = cvEvents.filter(e => e.event_type === "steal").length;
+  const passCount    = cvEvents.filter(e => e.event_type === "pass").length;
+  const stealCvCount = cvEvents.filter(e => e.event_type === "steal").length;
 
   return (
     <AppShell>
@@ -565,26 +570,33 @@ export default function GameDetailPage() {
             {cvEvents.length === 0 ? (
               <div className="bg-slate-800 rounded-xl text-center py-16 text-slate-400">
                 <Activity size={40} className="mx-auto mb-3 opacity-30" />
-                <p className="text-sm">No hay eventos CV. Analiza un video con el motor de pose.</p>
+                <p className="text-sm">No hay eventos CV. Analiza el video para ver pases, robos y más.</p>
               </div>
             ) : (
               cvEvents.map((ev, i) => {
-                const cfg = CV_EVENT_CONFIG[ev.type];
+                const cfg = CV_EVENT_CONFIG[ev.event_type];
                 return (
                   <div key={i} className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-3">
-                    <span className={clsx("flex items-center justify-center w-7 h-7 rounded-full border text-xs", cfg?.bg ?? "bg-slate-700", cfg?.color ?? "text-slate-400")}>
+                    <span className={clsx("flex items-center justify-center w-7 h-7 rounded-full border text-xs", cfg?.bg ?? "bg-slate-700 border-slate-600", cfg?.color ?? "text-slate-400")}>
                       {cfg?.icon ?? <Activity size={14} />}
                     </span>
-                    <span className="text-white font-medium">{cfg?.label ?? ev.type.replace("_", " ")}</span>
-                    {ev.track_id != null && (
+                    <div className="flex-1 min-w-0">
+                      <div className="text-white font-medium text-sm">{cfg?.label ?? ev.event_type.replace("_", " ")}</div>
+                      {ev.description && <div className="text-xs text-slate-400 truncate">{ev.description}</div>}
+                    </div>
+                    {ev.player_track_id != null && (
                       <span className="text-xs text-slate-500">
-                        jugador {metrics?.players.find(p => p.track_id === ev.track_id)?.display_label ?? `#${ev.track_id}`}
+                        {metrics?.players.find(p => p.track_id === ev.player_track_id)?.display_label ?? `#${ev.player_track_id}`}
                       </span>
                     )}
-                    {ev.confidence != null && (
-                      <span className="text-xs text-slate-500">{(ev.confidence * 100).toFixed(0)}%</span>
+                    {ev.team_id != null && (
+                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: TEAM_COLORS[ev.team_id] + "33", color: TEAM_COLORS[ev.team_id] }}>
+                        Equipo {ev.team_id + 1}
+                      </span>
                     )}
-                    <span className="text-xs text-slate-500 ml-auto">frame {ev.frame}</span>
+                    <span className="text-xs text-slate-500 ml-auto shrink-0">
+                      {ev.time_s != null ? `${ev.time_s.toFixed(1)}s` : `f${ev.frame}`}
+                    </span>
                   </div>
                 );
               })

@@ -21,6 +21,8 @@ import {
   Info,
   Loader2,
   MapPin,
+  Pause,
+  Play,
   Save,
   Trash2,
   Wind,
@@ -30,11 +32,11 @@ import { clsx } from "clsx";
 // ── Category colors ──────────────────────────────────────────────────────────
 
 const CAT_COLORS: Record<string, string> = {
-  corner: "#f97316",   // orange
-  circle: "#22d3ee",   // cyan
-  line:   "#4ade80",   // green
-  key:    "#facc15",   // yellow
-  hoop:   "#f472b6",   // pink
+  corner: "#f97316",
+  circle: "#22d3ee",
+  line:   "#4ade80",
+  key:    "#facc15",
+  hoop:   "#f472b6",
 };
 
 const CAT_RING: Record<string, string> = {
@@ -49,7 +51,35 @@ function getCatColor(cat: string) {
   return CAT_COLORS[cat] ?? "#94a3b8";
 }
 
-// ── Motion banner config ──────────────────────────────────────────────────────
+// ── Court diagram landmark positions (normalized 0-1 on full court) ──────────
+// x: 0 = left baseline, 1 = right baseline
+// y: 0 = top sideline, 1 = bottom sideline
+
+const COURT_POSITIONS: Record<string, [number, number]> = {
+  corner_tl:      [0.00, 0.00],
+  corner_tr:      [1.00, 0.00],
+  corner_br:      [1.00, 1.00],
+  corner_bl:      [0.00, 1.00],
+  center_circle:  [0.50, 0.50],
+  midline_top:    [0.50, 0.00],
+  midline_bottom: [0.50, 1.00],
+  // Left key (x=0 is left baseline, key depth ~5.8m/28m ≈ 0.207, half-width ~2.45m/15m ≈ 0.163)
+  key_tl_left:    [0.207, 0.337],
+  key_bl_left:    [0.000, 0.337],
+  key_tr_left:    [0.207, 0.663],
+  key_br_left:    [0.000, 0.663],
+  ftline_left:    [0.207, 0.500],
+  hoop_left:      [0.056, 0.500],
+  // Right key (mirror)
+  key_tl_right:   [0.793, 0.337],
+  key_bl_right:   [1.000, 0.337],
+  key_tr_right:   [0.793, 0.663],
+  key_br_right:   [1.000, 0.663],
+  ftline_right:   [0.793, 0.500],
+  hoop_right:     [0.944, 0.500],
+};
+
+// ── Motion banner config ─────────────────────────────────────────────────────
 
 const MOTION_BANNER: Record<string, { bg: string; icon: React.ReactNode; msg: string }> = {
   static: {
@@ -60,19 +90,146 @@ const MOTION_BANNER: Record<string, { bg: string; icon: React.ReactNode; msg: st
   moderate: {
     bg: "bg-yellow-900/40 border-yellow-700/50",
     icon: <Info size={16} className="text-yellow-400 shrink-0" />,
-    msg: "Some camera movement detected — consider marking the same landmarks at 2–3 different frames for better accuracy.",
+    msg: "Some camera movement — mark the same landmarks at 2–3 different frames.",
   },
   moving: {
     bg: "bg-red-900/40 border-red-700/50",
     icon: <Wind size={16} className="text-red-400 shrink-0" />,
-    msg: "Camera moves significantly — mark landmarks at multiple keyframes (every ~10 s) for accurate tracking.",
+    msg: "Camera moves significantly — mark landmarks at multiple keyframes (every ~10 s).",
   },
   unknown: {
     bg: "bg-slate-700/40 border-slate-600/50",
     icon: <Info size={16} className="text-slate-400 shrink-0" />,
-    msg: "Motion detection unavailable. Annotate landmarks at the frame that best shows the court.",
+    msg: "Annotate landmarks at the frame that best shows the court.",
   },
 };
+
+// ── Court diagram SVG ─────────────────────────────────────────────────────────
+
+function CourtDiagram({
+  catalog,
+  placed,
+  selectedLandmarkId,
+  onSelect,
+}: {
+  catalog: LandmarkCatalogItem[];
+  placed: LandmarkPoint[];
+  selectedLandmarkId: string;
+  onSelect: (id: string) => void;
+}) {
+  const W = 560;
+  const H = 300;
+  const PAD = 24;
+  const cw = W - PAD * 2;
+  const ch = H - PAD * 2;
+
+  const cx = (nx: number) => PAD + nx * cw;
+  const cy = (ny: number) => PAD + ny * ch;
+
+  // Key dimensions in normalized coords
+  const keyDepth = 0.207;
+  const keyHalfW = 0.163;
+  const threeR = 0.214; // ~6m/28m normalized
+
+  // Placed landmark_ids at the current frame (or any frame)
+  const placedIds = new Set(placed.map((p) => p.landmark_id));
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full rounded-xl bg-slate-900 border border-slate-700"
+      style={{ maxHeight: 220 }}
+    >
+      {/* Court outline */}
+      <rect x={PAD} y={PAD} width={cw} height={ch} fill="none" stroke="#475569" strokeWidth={1.5} />
+
+      {/* Midline */}
+      <line x1={cx(0.5)} y1={cy(0)} x2={cx(0.5)} y2={cy(1)} stroke="#475569" strokeWidth={1} />
+
+      {/* Center circle */}
+      <circle cx={cx(0.5)} cy={cy(0.5)} r={ch * 0.12} fill="none" stroke="#475569" strokeWidth={1} />
+
+      {/* Left key */}
+      <rect
+        x={cx(0)} y={cy(0.5 - keyHalfW)}
+        width={cx(keyDepth) - cx(0)} height={ch * keyHalfW * 2}
+        fill="none" stroke="#475569" strokeWidth={1}
+      />
+      {/* Left FT circle */}
+      <circle cx={cx(keyDepth)} cy={cy(0.5)} r={ch * 0.12} fill="none" stroke="#475569" strokeWidth={1} strokeDasharray="4 3" />
+      {/* Left 3pt arc (approximate) */}
+      <path
+        d={`M ${cx(0)} ${cy(0.5 - threeR)} A ${cw * threeR} ${cw * threeR} 0 0 1 ${cx(0)} ${cy(0.5 + threeR)}`}
+        fill="none" stroke="#475569" strokeWidth={1}
+      />
+      {/* Left hoop */}
+      <circle cx={cx(0.056)} cy={cy(0.5)} r={5} fill="none" stroke="#f472b6" strokeWidth={1.5} />
+
+      {/* Right key */}
+      <rect
+        x={cx(1 - keyDepth)} y={cy(0.5 - keyHalfW)}
+        width={cx(keyDepth) - cx(0)} height={ch * keyHalfW * 2}
+        fill="none" stroke="#475569" strokeWidth={1}
+      />
+      {/* Right FT circle */}
+      <circle cx={cx(1 - keyDepth)} cy={cy(0.5)} r={ch * 0.12} fill="none" stroke="#475569" strokeWidth={1} strokeDasharray="4 3" />
+      {/* Right 3pt arc */}
+      <path
+        d={`M ${cx(1)} ${cy(0.5 - threeR)} A ${cw * threeR} ${cw * threeR} 0 0 0 ${cx(1)} ${cy(0.5 + threeR)}`}
+        fill="none" stroke="#475569" strokeWidth={1}
+      />
+      {/* Right hoop */}
+      <circle cx={cx(0.944)} cy={cy(0.5)} r={5} fill="none" stroke="#f472b6" strokeWidth={1.5} />
+
+      {/* Landmark dots */}
+      {catalog.map((lm) => {
+        const pos = COURT_POSITIONS[lm.id];
+        if (!pos) return null;
+        const [nx, ny] = pos;
+        const x = cx(nx);
+        const y = cy(ny);
+        const color = getCatColor(lm.category);
+        const isPlaced = placedIds.has(lm.id);
+        const isSelected = lm.id === selectedLandmarkId;
+
+        return (
+          <g key={lm.id} onClick={() => onSelect(lm.id)} className="cursor-pointer">
+            {isSelected && (
+              <circle cx={x} cy={y} r={10} fill={color} fillOpacity={0.25} />
+            )}
+            <circle
+              cx={x} cy={y} r={isSelected ? 6 : 5}
+              fill={isPlaced ? color : "transparent"}
+              stroke={color}
+              strokeWidth={isSelected ? 2.5 : 1.5}
+              opacity={isPlaced || isSelected ? 1 : 0.5}
+            />
+            {/* Label — show for selected or placed */}
+            {(isSelected || isPlaced) && (
+              <text
+                x={x}
+                y={y - 9}
+                textAnchor="middle"
+                fontSize={7}
+                fill={color}
+                fontWeight={isSelected ? "bold" : "normal"}
+              >
+                {lm.label.split(" - ").pop()}
+              </text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ── Format time mm:ss ─────────────────────────────────────────────────────────
+function fmtTime(s: number) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
 
 // ── Main component ────────────────────────────────────────────────────────────
 
@@ -95,6 +252,11 @@ export default function AnnotatePage() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoError, setVideoError] = useState(false);
 
+  // Video playback state
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
   // Fetch catalog, existing annotation, and video URL on mount
   useEffect(() => {
     if (!id) return;
@@ -108,9 +270,7 @@ export default function AnnotatePage() {
 
     getGameAnnotation(id)
       .then((ann) => {
-        if (ann?.landmarks && ann.landmarks.length > 0) {
-          setPlaced(ann.landmarks);
-        }
+        if (ann?.landmarks && ann.landmarks.length > 0) setPlaced(ann.landmarks);
         if (ann?.camera_motion) setMotion(ann.camera_motion);
       })
       .catch(() => null);
@@ -134,7 +294,7 @@ export default function AnnotatePage() {
     }
   }, [id, motion]);
 
-  // Draw markers on canvas whenever placed landmarks change
+  // Draw markers on canvas whenever placed landmarks or currentTime change
   useEffect(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
@@ -147,10 +307,27 @@ export default function AnnotatePage() {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    placed.forEach((lm, idx) => {
+    // Show landmarks near the current playback time (within 0.5s)
+    const visiblePlaced = placed.filter(
+      (lm) => Math.abs(lm.frame_t - currentTime) < 0.5 || currentTime === 0
+    );
+
+    visiblePlaced.forEach((lm, idx) => {
       const cat = catalog.find((c) => c.id === lm.landmark_id);
       const color = getCatColor(cat?.category ?? "");
       const [x, y] = lm.pixel;
+      const isSelected = lm.landmark_id === selectedLandmarkId;
+
+      // Outer ring for selected
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(x, y, 14, 0, Math.PI * 2);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
       ctx.beginPath();
       ctx.arc(x, y, 8, 0, Math.PI * 2);
@@ -164,8 +341,14 @@ export default function AnnotatePage() {
       ctx.font = "bold 10px sans-serif";
       ctx.textAlign = "center";
       ctx.fillText(String(idx + 1), x, y + 4);
+
+      // Label
+      ctx.fillStyle = color;
+      ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(cat?.label.split(" - ").pop() ?? lm.landmark_id, x + 12, y + 4);
     });
-  }, [placed, catalog]);
+  }, [placed, catalog, currentTime, selectedLandmarkId]);
 
   // Handle canvas click → place landmark
   const handleCanvasClick = useCallback(
@@ -180,7 +363,6 @@ export default function AnnotatePage() {
       const frame_t = videoRef.current?.currentTime ?? 0;
 
       setPlaced((prev) => {
-        // If same landmark_id at the same frame_t already exists, update it
         const existingIdx = prev.findIndex(
           (p) => p.landmark_id === selectedLandmarkId && Math.abs(p.frame_t - frame_t) < 0.5
         );
@@ -192,7 +374,7 @@ export default function AnnotatePage() {
         return [...prev, { landmark_id: selectedLandmarkId, pixel: [x, y], frame_t }];
       });
 
-      // Auto-advance to the next unplaced landmark
+      // Auto-advance to next unplaced landmark
       const currentIdx = catalog.findIndex((c) => c.id === selectedLandmarkId);
       if (currentIdx >= 0 && currentIdx < catalog.length - 1) {
         setSelectedLandmarkId(catalog[currentIdx + 1].id);
@@ -200,6 +382,20 @@ export default function AnnotatePage() {
     },
     [selectedLandmarkId, catalog]
   );
+
+  // Custom video controls
+  const togglePlay = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); } else { v.pause(); }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = Number(e.target.value);
+    setCurrentTime(Number(e.target.value));
+  };
 
   const removeLandmark = (idx: number) => {
     setPlaced((prev) => prev.filter((_, i) => i !== idx));
@@ -245,7 +441,7 @@ export default function AnnotatePage() {
             <div>
               <h1 className="text-xl font-bold text-white">Annotate Court</h1>
               <p className="text-sm text-slate-400">
-                Click on the video to place court landmarks for homography calibration
+                Pause the video at a clear frame, then click to place each landmark.
               </p>
             </div>
           </div>
@@ -262,51 +458,38 @@ export default function AnnotatePage() {
                 : "bg-slate-700 text-slate-400 cursor-not-allowed"
             )}
           >
-            {saving ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : saved ? (
-              <CheckCircle2 size={14} />
-            ) : (
-              <Save size={14} />
-            )}
-            {saved ? "Saved!" : `Save (${placed.length}/4 min)`}
+            {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <CheckCircle2 size={14} /> : <Save size={14} />}
+            {saved ? "Guardado!" : `Guardar (${placed.length}/4 min)`}
           </button>
         </div>
 
-        {/* Motion detection banner */}
+        {/* Motion banner */}
         {(motion || detectingMotion) && (
-          <div
-            className={clsx(
-              "flex items-start gap-3 px-4 py-3 rounded-lg border text-sm",
-              detectingMotion
-                ? "bg-slate-700/40 border-slate-600/50 text-slate-400"
-                : MOTION_BANNER[motion!]?.bg ?? "bg-slate-700/40 border-slate-600/50"
-            )}
-          >
-            {detectingMotion ? (
-              <Loader2 size={16} className="text-slate-400 shrink-0 animate-spin mt-0.5" />
-            ) : (
-              <span className="mt-0.5">{MOTION_BANNER[motion!]?.icon}</span>
-            )}
+          <div className={clsx(
+            "flex items-start gap-3 px-4 py-3 rounded-lg border text-sm",
+            detectingMotion ? "bg-slate-700/40 border-slate-600/50 text-slate-400"
+              : MOTION_BANNER[motion!]?.bg ?? "bg-slate-700/40 border-slate-600/50"
+          )}>
+            {detectingMotion
+              ? <Loader2 size={16} className="text-slate-400 shrink-0 animate-spin mt-0.5" />
+              : <span className="mt-0.5">{MOTION_BANNER[motion!]?.icon}</span>}
             <span className="text-slate-200">
-              {detectingMotion
-                ? "Detecting camera motion…"
-                : MOTION_BANNER[motion!]?.msg}
+              {detectingMotion ? "Detecting camera motion…" : MOTION_BANNER[motion!]?.msg}
             </span>
           </div>
         )}
 
         {saveError && (
           <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-red-900/30 border border-red-700/50 text-sm text-red-300">
-            <AlertCircle size={14} />
-            {saveError}
+            <AlertCircle size={14} /> {saveError}
           </div>
         )}
 
-        {/* Main layout: video + sidebar */}
+        {/* Main layout */}
         <div className="flex gap-4">
-          {/* Video + canvas */}
-          <div className="flex-1 min-w-0">
+          {/* Left: video + controls + court diagram */}
+          <div className="flex-1 min-w-0 space-y-3">
+            {/* Video + canvas overlay */}
             <div
               ref={containerRef}
               className="relative bg-black rounded-xl overflow-hidden"
@@ -322,15 +505,23 @@ export default function AnnotatePage() {
                   <video
                     ref={videoRef}
                     src={videoUrl}
-                    controls
                     className="w-full h-full object-contain"
-                    onLoadedMetadata={handleVideoLoaded}
+                    onLoadedMetadata={() => {
+                      setDuration(videoRef.current?.duration ?? 0);
+                      handleVideoLoaded();
+                    }}
+                    onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime ?? 0)}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
                   />
                   <canvas
                     ref={canvasRef}
                     onClick={handleCanvasClick}
-                    className="absolute inset-0 w-full h-full cursor-crosshair"
-                    style={{ pointerEvents: selectedLandmarkId ? "auto" : "none" }}
+                    className="absolute inset-0 w-full h-full"
+                    style={{
+                      cursor: selectedLandmarkId ? "crosshair" : "default",
+                      pointerEvents: selectedLandmarkId ? "auto" : "none",
+                    }}
                   />
                 </>
               ) : (
@@ -341,97 +532,117 @@ export default function AnnotatePage() {
               )}
             </div>
 
-            {/* Tip */}
-            <p className="mt-2 text-xs text-slate-500">
-              Tip: pause the video at a frame where the court lines are clearly visible, then click
-              to place each landmark. For moving cameras, use{" "}
-              <strong className="text-slate-400">different timestamps</strong> for the same landmark
-              to create keyframes.
-            </p>
+            {/* Custom video controls */}
+            {videoUrl && (
+              <div className="bg-slate-800 rounded-xl border border-slate-700 px-4 py-3 space-y-2">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={togglePlay}
+                    className="p-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white transition-colors shrink-0"
+                  >
+                    {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={duration || 1}
+                    step={0.033}
+                    value={currentTime}
+                    onChange={handleSeek}
+                    className="flex-1 h-1.5 accent-blue-500 cursor-pointer"
+                  />
+                  <span className="text-xs text-slate-400 font-mono shrink-0">
+                    {fmtTime(currentTime)} / {fmtTime(duration)}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500">
+                  {selectedLandmarkId
+                    ? <>Modo anotación activo — <strong className="text-slate-300">haz clic en el video</strong> para colocar el punto seleccionado</>
+                    : "Selecciona un punto en el panel derecho para comenzar a anotar"}
+                </p>
+              </div>
+            )}
+
+            {/* Court diagram */}
+            <div className="space-y-2">
+              <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wide flex items-center gap-2">
+                <MapPin size={12} /> Referencia de cancha
+              </h2>
+              <CourtDiagram
+                catalog={catalog}
+                placed={placed}
+                selectedLandmarkId={selectedLandmarkId}
+                onSelect={setSelectedLandmarkId}
+              />
+              <p className="text-xs text-slate-500">
+                Haz clic en un punto del diagrama para seleccionarlo. Los puntos colocados aparecen rellenos.
+              </p>
+            </div>
           </div>
 
           {/* Sidebar */}
-          <div className="w-80 shrink-0 flex flex-col gap-4">
+          <div className="w-72 shrink-0 flex flex-col gap-4">
             {/* Landmark selector */}
             <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3">
               <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                <MapPin size={14} />
-                Select landmark to place
+                <MapPin size={14} /> Punto a colocar
               </h2>
-
               <select
                 value={selectedLandmarkId}
                 onChange={(e) => setSelectedLandmarkId(e.target.value)}
                 className="w-full bg-slate-700 border border-slate-600 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {Object.entries(catGroups).map(([cat, items]) => (
-                  <optgroup
-                    key={cat}
-                    label={cat.charAt(0).toUpperCase() + cat.slice(1)}
-                  >
+                  <optgroup key={cat} label={cat.charAt(0).toUpperCase() + cat.slice(1)}>
                     {items.map((lm) => (
-                      <option key={lm.id} value={lm.id}>
-                        {lm.label}
-                      </option>
+                      <option key={lm.id} value={lm.id}>{lm.label}</option>
                     ))}
                   </optgroup>
                 ))}
               </select>
-
               {selectedLandmarkId && (
                 <div className="flex items-center gap-2 text-xs text-slate-400">
                   <span
                     className="w-3 h-3 rounded-full shrink-0"
-                    style={{
-                      backgroundColor: getCatColor(
-                        catalog.find((c) => c.id === selectedLandmarkId)?.category ?? ""
-                      ),
-                    }}
+                    style={{ backgroundColor: getCatColor(catalog.find((c) => c.id === selectedLandmarkId)?.category ?? "") }}
                   />
-                  Click anywhere on the video to place
+                  Pausa el video y haz clic para colocar
                 </div>
               )}
             </div>
 
-            {/* Placed landmarks list */}
+            {/* Placed list */}
             <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3 flex-1 overflow-y-auto">
               <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                Placed landmarks
+                Puntos colocados
                 <span className="ml-auto text-xs font-normal text-slate-400">
                   {placed.length} / min 4
                 </span>
               </h2>
-
               {placed.length === 0 ? (
                 <p className="text-xs text-slate-500">
-                  No landmarks placed yet. Select one above and click the video.
+                  Aún no hay puntos. Selecciona uno arriba y haz clic en el video.
                 </p>
               ) : (
-                <ul className="space-y-2">
+                <ul className="space-y-1.5">
                   {placed.map((lm, idx) => {
                     const cat = catalog.find((c) => c.id === lm.landmark_id);
                     return (
                       <li
                         key={idx}
                         className={clsx(
-                          "flex items-center gap-2 px-3 py-2 rounded-lg border text-xs",
-                          "bg-slate-700/50 border-slate-600/50",
+                          "flex items-center gap-2 px-2.5 py-2 rounded-lg border text-xs",
+                          "bg-slate-700/50",
                           cat ? CAT_RING[cat.category] : "border-slate-600"
                         )}
                       >
-                        <span
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: getCatColor(cat?.category ?? "") }}
-                        />
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{ backgroundColor: getCatColor(cat?.category ?? "") }} />
                         <div className="flex-1 min-w-0">
-                          <div className="font-medium text-white truncate">
-                            {cat?.label ?? lm.landmark_id}
-                          </div>
+                          <div className="font-medium text-white truncate">{cat?.label ?? lm.landmark_id}</div>
                           <div className="text-slate-400">
                             [{Math.round(lm.pixel[0])}, {Math.round(lm.pixel[1])}]
-                            {lm.frame_t > 0 && (
-                              <> · {lm.frame_t.toFixed(1)}s</>
-                            )}
+                            {lm.frame_t > 0 && <> · {lm.frame_t.toFixed(1)}s</>}
                           </div>
                         </div>
                         <button
@@ -447,16 +658,13 @@ export default function AnnotatePage() {
               )}
             </div>
 
-            {/* Color legend */}
+            {/* Legend */}
             <div className="bg-slate-800 rounded-xl border border-slate-700 p-4">
-              <h2 className="text-xs font-semibold text-slate-400 mb-2">Legend</h2>
+              <h2 className="text-xs font-semibold text-slate-400 mb-2">Leyenda</h2>
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                 {Object.entries(CAT_COLORS).map(([cat, color]) => (
                   <div key={cat} className="flex items-center gap-1.5 text-xs text-slate-400">
-                    <span
-                      className="w-2.5 h-2.5 rounded-full shrink-0"
-                      style={{ backgroundColor: color }}
-                    />
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
                     {cat}
                   </div>
                 ))}
