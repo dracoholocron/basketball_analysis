@@ -24,10 +24,12 @@ from ..services.storage import get_storage
 
 
 class CvEventOut(BaseModel):
-    type: str
+    event_type: str
     frame: int
-    track_id: Optional[int] = None
-    confidence: Optional[float] = None
+    time_s: Optional[float] = None
+    team_id: Optional[int] = None
+    player_track_id: Optional[int] = None
+    description: Optional[str] = None
 
 
 class HighlightOut(BaseModel):
@@ -229,7 +231,21 @@ async def get_cv_events(
     if job is None:
         return []
     events = job.cv_events_json or []
-    return [CvEventOut(**e) for e in events if isinstance(e, dict)]
+    out = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        # Support both old "type" key and new "event_type" key
+        event_type = e.get("event_type") or e.get("type", "unknown")
+        out.append(CvEventOut(
+            event_type=event_type,
+            frame=int(e.get("frame", 0)),
+            time_s=e.get("time_s"),
+            team_id=e.get("team_id"),
+            player_track_id=e.get("player_track_id") or e.get("track_id"),
+            description=e.get("description"),
+        ))
+    return out
 
 
 @router.get("/{game_id}/highlights", response_model=List[HighlightOut])
@@ -251,18 +267,23 @@ async def list_highlights(
         return []
 
     try:
-        import json
-        obj = storage.get_object(api_settings.minio_bucket_videos, job.highlights_manifest_key)
-        manifest: list[dict] = json.loads(obj.read())
+        import json as _json
+        import io as _io
+        raw = storage._client.get_object(
+            Bucket=api_settings.minio_bucket_outputs,
+            Key=job.highlights_manifest_key,
+        )
+        manifest: list[dict] = _json.loads(raw["Body"].read())
         highlights = []
         for i, item in enumerate(manifest):
             clip_url = None
             if item.get("s3_key"):
                 try:
-                    clip_url = storage.presigned_get_object(
-                        api_settings.minio_bucket_videos,
+                    clip_url = storage.get_presigned_url(
+                        api_settings.minio_bucket_outputs,
                         item["s3_key"],
-                        expires=3600,
+                        expiry=3600,
+                        public=True,
                     )
                 except Exception:
                     pass
@@ -285,7 +306,7 @@ async def generate_highlights(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin", "coach")),
 ):
-    """(Re-)trigger highlight generation from the latest job's analysis results."""
+    """(Re-)trigger highlight generation from the latest job's CV events."""
     result = await db.execute(
         select(Job)
         .where(Job.game_id == game_id, Job.status == JobStatus.DONE)
@@ -296,16 +317,28 @@ async def generate_highlights(
     if job is None:
         raise HTTPException(status_code=404, detail="No completed analysis job found for this game")
     if not job.source_video_s3_key:
-        raise HTTPException(status_code=400, detail="Source video not available for highlight generation")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Source video not recorded for this job. "
+                "Re-run the analysis to regenerate with source tracking."
+            ),
+        )
+
+    cv_events = job.cv_events_json or []
+    if not cv_events:
+        raise HTTPException(
+            status_code=400,
+            detail="No CV events found. Re-run the analysis to generate event data first.",
+        )
 
     try:
-        from ..worker.gpu_tasks import run_pose_analysis_task
-        task = run_pose_analysis_task.delay(
-            training_session_id=str(game_id),
-            video_s3_key=job.source_video_s3_key,
-            pose_enabled=True,
-            highlight_event_types=["shot_attempt", "rebound", "steal"],
+        from ..worker.tasks import generate_highlights as generate_highlights_task
+        task = generate_highlights_task.delay(
+            job_id=str(job.id),
+            game_id=str(game_id),
+            portrait=portrait,
         )
-        return {"task_id": task.id, "status": "queued", "portrait": portrait}
+        return {"task_id": task.id, "status": "queued", "portrait": portrait, "events": len(cv_events)}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Could not enqueue task: {exc}")
