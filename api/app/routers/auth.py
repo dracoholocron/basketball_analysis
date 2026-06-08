@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_db
+from ..core.deps import get_current_user
 from ..core.security import create_access_token, hash_password, verify_password
 from ..models.user import User
 from ..schemas.auth import TokenResponse, UserCreate, UserRead
@@ -28,6 +29,11 @@ async def login(
         )
     token = create_access_token({"sub": str(user.id)})
     return TokenResponse(access_token=token)
+
+
+@router.get("/me", response_model=UserRead)
+async def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
 
 
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)

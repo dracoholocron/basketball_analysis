@@ -90,13 +90,29 @@ def run_pipeline(
     ball_detector_path: str | None = None,
     court_kp_detector_path: str = COURT_KEYPOINT_DETECTOR_PATH,
     court_profile: CourtProfile | None = None,
+    manual_landmarks: list[dict] | None = None,
+    camera_motion: str = "static",
+    on_progress=None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
 
-    Returns a dict with computed metrics (passes, interceptions, ball acquisition per team,
-    player distances and speeds) plus the path to the annotated output video.
+    Parameters
+    ----------
+    manual_landmarks : list[dict], optional
+        Manually annotated court landmarks from the UI.
+    camera_motion : str
+        "static" | "moderate" | "moving".
+    on_progress : callable, optional
+        Called as on_progress(stage: str, pct: int) at key milestones.
+        stage matches JobStage enum values (e.g. "player_tracking").
     """
+    def _progress(stage: str, pct: int) -> None:
+        if on_progress:
+            try:
+                on_progress(stage, pct)
+            except Exception:
+                pass
     # Resolve model paths: prefer YOLO11 multi-class model when available
     _player_path = player_detector_path or _resolve_detector_path(
         MULTICLASS_DETECTOR_PATH, PLAYER_DETECTOR_PATH
@@ -108,6 +124,7 @@ def run_pipeline(
     logger.info("Ball detector:   %s", _ball_path)
 
     logger.info("Reading video: %s", input_video)
+    _progress("reading_video", 8)
     video_frames = read_video(input_video)
     logger.info("Loaded %d frames", len(video_frames))
     frame_width = video_frames[0].shape[1] if video_frames else 1280
@@ -116,6 +133,7 @@ def run_pipeline(
     ball_tracker = BallTracker(_ball_path)
     court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path)
 
+    _progress("player_tracking", 12)
     player_tracks = player_tracker.get_object_tracks(
         video_frames,
         read_from_stub=use_stubs,
@@ -123,6 +141,7 @@ def run_pipeline(
     )
     logger.info("Player tracks done")
 
+    _progress("ball_tracking", 30)
     ball_tracks = ball_tracker.get_object_tracks(
         video_frames,
         read_from_stub=use_stubs,
@@ -130,6 +149,7 @@ def run_pipeline(
     )
     logger.info("Ball tracks done")
 
+    _progress("keypoint_detection", 45)
     court_keypoints_per_frame = court_keypoint_detector.get_court_keypoints(
         video_frames,
         read_from_stub=use_stubs,
@@ -140,6 +160,7 @@ def run_pipeline(
     ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
     ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
 
+    _progress("team_assignment", 55)
     team_assigner = TeamAssigner(
         team_1_class_name=team1_jersey,
         team_2_class_name=team2_jersey,
@@ -152,11 +173,13 @@ def run_pipeline(
     )
     logger.info("Team assignment done")
 
+    _progress("ball_acquisition", 65)
     ball_aquisition_detector = BallAquisitionDetector(frame_width=frame_width)
     ball_aquisition = ball_aquisition_detector.detect_ball_possession(
         player_tracks, ball_tracks
     )
 
+    _progress("pass_detection", 68)
     pass_and_interception_detector = PassAndInterceptionDetector()
     passes = pass_and_interception_detector.detect_passes(
         ball_aquisition, player_assignment
@@ -174,11 +197,14 @@ def run_pipeline(
             "Half-court detected — speed/distance metrics will be disabled for this video"
         )
 
+    _progress("tactical_view", 72)
     profile = court_profile or CourtProfile(CourtLevel.NBA)
 
     tactical_view_converter = TacticalViewConverter(
         court_image_path=court_image_path,
         court_profile=profile,
+        manual_landmarks=manual_landmarks,
+        camera_motion=camera_motion,
     )
     court_keypoints_per_frame = tactical_view_converter.validate_keypoints(
         court_keypoints_per_frame
@@ -218,6 +244,7 @@ def run_pipeline(
         )
     logger.info("Speed/distance done")
 
+    _progress("drawing", 78)
     player_tracks_drawer = PlayerTracksDrawer()
     ball_tracks_drawer = BallTracksDrawer()
     court_keypoint_drawer = CourtKeypointDrawer()
@@ -227,9 +254,14 @@ def run_pipeline(
     tactical_view_drawer = TacticalViewDrawer()
     speed_and_distance_drawer = SpeedAndDistanceDrawer()
 
+    # The first drawer creates output_video_frames from video_frames.
+    # We delete video_frames immediately after so only ONE full frame list exists at a time.
+    total_frames = len(video_frames)  # save count before deleting
     output_video_frames = player_tracks_drawer.draw(
         video_frames, player_tracks, player_assignment, ball_aquisition
     )
+    del video_frames  # free ~5-10 GB before continuing with remaining drawers
+
     output_video_frames = ball_tracks_drawer.draw(output_video_frames, ball_tracks)
     output_video_frames = court_keypoint_drawer.draw(
         output_video_frames, court_keypoints_per_frame
@@ -258,12 +290,11 @@ def run_pipeline(
         ball_aquisition,
     )
 
-    save_video(output_video_frames, output_video)
+    save_video(output_video_frames, output_video, fps=actual_fps)
+    del output_video_frames  # free memory before uploading/persisting
     logger.info("Saved annotated video to %s", output_video)
 
     # Build summary metrics
-    total_frames = len(video_frames)
-
     team1_pos = 0
     team2_pos = 0
     for frame_idx, holder_id in enumerate(ball_aquisition):

@@ -7,12 +7,15 @@ The class name 'Player' is accepted from both.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from ultralytics import YOLO
 import supervision as sv
 from utils import read_stub, save_stub
 from configs.settings import settings
+
+logger = logging.getLogger(__name__)
 
 _PLAYER_CLASS_NAMES: tuple[str, ...] = ("Player",)
 
@@ -27,7 +30,10 @@ class PlayerTracker:
     """
 
     def __init__(self, model_path: str, conf: float = 0.5) -> None:
+        self._device = settings.resolve_device()
         self.model = YOLO(model_path)
+        self.model.to(self._device)
+        logger.info("PlayerTracker loaded on device: %s", self._device)
         self.tracker = sv.ByteTrack()
         self.conf = conf
 
@@ -35,7 +41,12 @@ class PlayerTracker:
         batch_size = settings.yolo_batch_size
         detections: list = []
         for i in range(0, len(frames), batch_size):
-            batch = self.model.predict(frames[i : i + batch_size], conf=self.conf, verbose=False)
+            batch = self.model.predict(
+                frames[i : i + batch_size],
+                conf=self.conf,
+                verbose=False,
+                device=self._device,
+            )
             detections += batch
         return detections
 

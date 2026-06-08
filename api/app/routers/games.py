@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -88,14 +89,23 @@ async def get_game(
     return game
 
 
-@router.post("/{game_id}/video", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+class VideoAssetRead(BaseModel):
+    id: uuid.UUID
+    game_id: uuid.UUID
+    filename: str
+    file_size_bytes: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.post("/{game_id}/video", response_model=VideoAssetRead, status_code=status.HTTP_201_CREATED)
 async def upload_video(
     game_id: uuid.UUID,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("admin", "coach")),
 ):
-    """Upload a raw video and enqueue the analysis job."""
+    """Upload a raw video for a game (does NOT start analysis — call /analyze next)."""
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
@@ -117,7 +127,32 @@ async def upload_video(
         file_size_bytes=len(content),
     )
     db.add(video_asset)
-    await db.flush()
+    await db.commit()
+    await db.refresh(video_asset)
+    return video_asset
+
+
+@router.post("/{game_id}/analyze", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
+async def analyze_game(
+    game_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "coach")),
+):
+    """Start analysis of the latest uploaded video for this game."""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    # Find the latest video asset
+    va_result = await db.execute(
+        select(VideoAsset)
+        .where(VideoAsset.game_id == game_id)
+        .order_by(VideoAsset.uploaded_at.desc())
+        .limit(1)
+    )
+    video_asset = va_result.scalar_one_or_none()
+    if not video_asset:
+        raise HTTPException(status_code=400, detail="No video uploaded for this game. Upload a video first.")
 
     job = Job(
         game_id=game_id,
@@ -130,13 +165,12 @@ async def upload_video(
     await db.commit()
     await db.refresh(job)
 
-    # Enqueue Celery task
     try:
         from ..worker.tasks import run_analysis
         task = run_analysis.delay(
             job_id=str(job.id),
             game_id=str(game_id),
-            video_s3_key=s3_key,
+            video_s3_key=video_asset.s3_key,
             court_level=game.court_level,
             court_width_m=game.court_width_m,
             court_height_m=game.court_height_m,
@@ -149,6 +183,33 @@ async def upload_video(
         logging.getLogger(__name__).warning("Could not enqueue task: %s", exc)
 
     return job
+
+
+@router.get("/{game_id}/raw-video")
+async def get_raw_video_url(
+    game_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Return a pre-signed URL for the latest raw (uploaded) video of the game.
+
+    Returns JSON {"url": "..."} so that authenticated browser clients can obtain
+    the URL and pass it directly to a <video> element without CORS/auth issues.
+    The hostname in the URL is rewritten to the public MinIO endpoint so the
+    browser can reach MinIO directly.
+    """
+    result = await db.execute(
+        select(VideoAsset)
+        .where(VideoAsset.game_id == game_id)
+        .order_by(VideoAsset.uploaded_at.desc())
+        .limit(1)
+    )
+    va = result.scalar_one_or_none()
+    if not va:
+        raise HTTPException(status_code=404, detail="No video uploaded for this game")
+    storage = get_storage()
+    url = storage.get_presigned_url(api_settings.minio_bucket_videos, va.s3_key, public=True)
+    return {"url": url}
 
 
 @router.get("/{game_id}/cv-events", response_model=List[CvEventOut])

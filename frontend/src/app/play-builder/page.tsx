@@ -2,13 +2,17 @@
 
 export const dynamic = "force-dynamic";
 
-import React, { useState, useRef, useCallback, useEffect, useReducer } from "react";
+import React, { useState, useRef, useEffect, useReducer } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import AppShell from "@/components/layout/AppShell";
-import { listPlays, createPlay, updatePlay, getPlay } from "@/lib/api";
+import {
+  listPlays, createPlay, updatePlay, getPlay, deletePlay,
+  listPlaybooks, createPlaybook, deletePlaybook,
+} from "@/lib/api";
 import {
   Save, Download, Move, Share2, Check, Plus, Trash2, Play as PlayIcon,
   ChevronDown, ChevronUp, Upload, Undo2, Redo2, SlidersHorizontal, Pencil,
+  BookOpen, Book, X, Copy,
 } from "lucide-react";
 import { ArrowRight as Arrow } from "lucide-react";
 import { clsx } from "clsx";
@@ -19,6 +23,11 @@ import { api } from "@/lib/api";
 interface PlayEntry {
   id: string; name: string; category: string; description?: string;
   is_template: boolean; tags?: string[]; pace?: string;
+  playbook_id?: string | null;
+}
+
+interface PlaybookEntry {
+  id: string; name: string; description?: string; is_system: boolean; play_count: number;
 }
 
 const PLAYER_COLORS = ["#2563eb", "#7c3aed", "#16a34a", "#d97706", "#dc2626"];
@@ -264,11 +273,20 @@ function PlayBuilderContent() {
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   const [plays, setPlays] = useState<PlayEntry[]>([]);
+  const [playbooks, setPlaybooks] = useState<PlaybookEntry[]>([]);
+  const [activePlaybookId, setActivePlaybookId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingPlay, setSavingPlay] = useState(false);
   const [copied, setCopied] = useState(false);
   const [currentPlayId, setCurrentPlayId] = useState<string | null>(null);
   const [playName, setPlayName] = useState("New Play");
+
+  // Playbook modal state
+  const [showNewPlaybook, setShowNewPlaybook] = useState(false);
+  const [newPlaybookName, setNewPlaybookName] = useState("");
+  const [newPlaybookDesc, setNewPlaybookDesc] = useState("");
+  const [savingPlaybook, setSavingPlaybook] = useState(false);
+  const [deletingPlaybookId, setDeletingPlaybookId] = useState<string | null>(null);
 
   // Frames
   const [frames, setFrames] = useState<FrameData[]>([DEFAULT_FRAME]);
@@ -283,16 +301,27 @@ function PlayBuilderContent() {
     future: [],
   });
 
-  // Tools (A2: now controls the vertical panel)
+  // Tools
   const [tool, setTool] = useState<"select" | "arrow" | "freedraw" | "player" | "opponent">("select");
   const [arrowStyle, setArrowStyle] = useState<keyof typeof ARROW_STYLES>("pass");
-  const [showArrowMenu, setShowArrowMenu] = useState(false);
 
   // Filters
   const [showFilters, setShowFilters] = useState(false);
   const [filterType, setFilterType] = useState("all");
   const [filterPace, setFilterPace] = useState("all");
   const [filterTag, setFilterTag] = useState("all");
+
+  async function reloadPlays(pbId?: string | null) {
+    const d = await listPlays(undefined, 0, 200, pbId ?? undefined);
+    setPlays(d.items ?? d);
+  }
+
+  // Reload plays whenever the active playbook changes
+  useEffect(() => {
+    if (loading) return; // skip during initial load
+    reloadPlays(activePlaybookId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePlaybookId]);
 
   useEffect(() => {
     const encoded = searchParams.get("play");
@@ -306,8 +335,11 @@ function PlayBuilderContent() {
         if (decoded.name) setPlayName(decoded.name);
       } catch { /* ignore */ }
     }
-    listPlays()
-      .then((d) => setPlays(d.items ?? d))
+    Promise.all([listPlays(undefined, 0, 200), listPlaybooks()])
+      .then(([playsData, pbData]) => {
+        setPlays(playsData.items ?? playsData);
+        setPlaybooks(pbData);
+      })
       .catch(() => router.replace("/login"))
       .finally(() => setLoading(false));
   }, [router, searchParams]);
@@ -385,14 +417,78 @@ function PlayBuilderContent() {
         })),
       };
       if (currentPlayId) {
-        await updatePlay(currentPlayId, { name: playName, svg_data: svgData, svg_data_version: 2 });
+        await updatePlay(currentPlayId, {
+          name: playName, svg_data: svgData, svg_data_version: 2,
+          playbook_id: activePlaybookId ?? undefined,
+        });
       } else {
-        const created = await createPlay({ name: playName, category: "quick_hitter", svg_data: svgData, svg_data_version: 2 });
+        const created = await createPlay({
+          name: playName, category: "quick_hitter",
+          svg_data: svgData, svg_data_version: 2,
+          playbook_id: activePlaybookId ?? undefined,
+        });
         setCurrentPlayId(created.id);
         setPlays(prev => [created, ...prev]);
       }
     } catch (err) { console.error(err); }
     finally { setSavingPlay(false); }
+  }
+
+  async function handleDeletePlay(playId: string) {
+    if (!confirm("Delete this play?")) return;
+    try {
+      await deletePlay(playId);
+      setPlays(prev => prev.filter(p => p.id !== playId));
+      if (currentPlayId === playId) {
+        setCurrentPlayId(null);
+        setPlayName("New Play");
+        setFrames([DEFAULT_FRAME]);
+      }
+    } catch (err) { console.error(err); }
+  }
+
+  async function handleUseTemplate(play: PlayEntry) {
+    // Copy template as new play in active playbook
+    try {
+      const full = await getPlay(play.id);
+      const created = await createPlay({
+        name: `${play.name} (copy)`,
+        category: play.category ?? "quick_hitter",
+        svg_data: full.svg_data,
+        svg_data_version: 2,
+        playbook_id: activePlaybookId ?? undefined,
+        tags: play.tags,
+        pace: play.pace,
+      });
+      setPlays(prev => [created, ...prev]);
+      loadPlay(created);
+    } catch (err) { console.error(err); }
+  }
+
+  async function handleCreatePlaybook() {
+    if (!newPlaybookName.trim()) return;
+    setSavingPlaybook(true);
+    try {
+      const pb = await createPlaybook({ name: newPlaybookName.trim(), description: newPlaybookDesc.trim() || undefined });
+      setPlaybooks(prev => [...prev, pb]);
+      setActivePlaybookId(pb.id);
+      setShowNewPlaybook(false);
+      setNewPlaybookName("");
+      setNewPlaybookDesc("");
+    } catch (err) { console.error(err); }
+    finally { setSavingPlaybook(false); }
+  }
+
+  async function handleDeletePlaybook(pbId: string) {
+    if (!confirm("Delete this playbook? Its plays will be kept but unassigned.")) return;
+    setDeletingPlaybookId(pbId);
+    try {
+      await deletePlaybook(pbId);
+      setPlaybooks(prev => prev.filter(p => p.id !== pbId));
+      if (activePlaybookId === pbId) setActivePlaybookId(null);
+      await reloadPlays();
+    } catch (err) { console.error(err); }
+    finally { setDeletingPlaybookId(null); }
   }
 
   async function loadPlay(play: PlayEntry) {
@@ -466,15 +562,18 @@ function PlayBuilderContent() {
     e.target.value = "";
   }
 
-  const filteredPlays = plays.filter(p => {
+  const displayPlays = plays.filter(p => {
     if (filterType !== "all" && p.category !== filterType) return false;
     if (filterPace !== "all" && p.pace !== filterPace) return false;
     if (filterTag !== "all" && !(p.tags ?? []).includes(filterTag)) return false;
     return true;
   });
+  const templatePlays = displayPlays.filter(p => p.is_template);
+  // When a playbook is active, non-template plays shown are those from the server-filtered result
+  const myPlays = displayPlays.filter(p => !p.is_template);
   const allTags = Array.from(new Set(plays.flatMap(p => p.tags ?? [])));
 
-  // A2: vertical tool panel items
+  // vertical tool panel items
   const TOOL_ITEMS = [
     { id: "select" as const, icon: <Move size={14} />, label: "Select" },
     { id: "player" as const, icon: <span className="text-[11px] font-bold text-blue-600">T</span>, label: "Team" },
@@ -487,7 +586,84 @@ function PlayBuilderContent() {
       <div className="flex gap-4 max-w-[1400px] mx-auto">
 
         {/* ── Library Panel ──────────────────────────────────────────────────── */}
-        <div className="w-60 flex-shrink-0 space-y-3">
+        <div className="w-64 flex-shrink-0 space-y-3">
+
+          {/* Playbook selector */}
+          <div className="card p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+                <BookOpen size={11} /> Playbooks
+              </p>
+              <button onClick={() => setShowNewPlaybook(v => !v)}
+                className="btn-ghost btn-sm text-[10px] flex items-center gap-1">
+                <Plus size={11} /> New
+              </button>
+            </div>
+
+            {showNewPlaybook && (
+              <div className="space-y-1.5 pt-1 border-t border-slate-100">
+                <input
+                  className="input text-xs w-full py-1"
+                  placeholder="Playbook name…"
+                  value={newPlaybookName}
+                  onChange={e => setNewPlaybookName(e.target.value)}
+                />
+                <input
+                  className="input text-xs w-full py-1"
+                  placeholder="Description (optional)"
+                  value={newPlaybookDesc}
+                  onChange={e => setNewPlaybookDesc(e.target.value)}
+                />
+                <div className="flex gap-1">
+                  <button onClick={handleCreatePlaybook} disabled={savingPlaybook || !newPlaybookName.trim()}
+                    className="btn-primary btn-sm flex-1 text-xs">
+                    {savingPlaybook ? "…" : "Create"}
+                  </button>
+                  <button onClick={() => setShowNewPlaybook(false)} className="btn-ghost btn-sm">
+                    <X size={11} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-1 max-h-[140px] overflow-y-auto">
+              <button
+                onClick={() => setActivePlaybookId(null)}
+                className={clsx(
+                  "w-full text-left px-2 py-1.5 rounded-lg text-xs transition-colors flex items-center gap-1.5",
+                  activePlaybookId === null ? "bg-primary-50 text-primary-700 font-semibold" : "text-slate-600 hover:bg-slate-50"
+                )}>
+                <Book size={11} /> All Plays
+              </button>
+              {playbooks.map(pb => (
+                <div key={pb.id}
+                  className={clsx(
+                    "flex items-center gap-1 rounded-lg px-2 py-1.5 transition-colors group",
+                    activePlaybookId === pb.id ? "bg-primary-50" : "hover:bg-slate-50"
+                  )}>
+                  <button
+                    onClick={() => setActivePlaybookId(pb.id)}
+                    className={clsx(
+                      "flex-1 text-left text-xs truncate",
+                      activePlaybookId === pb.id ? "text-primary-700 font-semibold" : "text-slate-600"
+                    )}>
+                    {pb.is_system ? "⭐ " : ""}{pb.name}
+                    <span className="text-[9px] text-slate-400 ml-1">({pb.play_count})</span>
+                  </button>
+                  {!pb.is_system && (
+                    <button
+                      onClick={() => handleDeletePlaybook(pb.id)}
+                      disabled={deletingPlaybookId === pb.id}
+                      className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 transition-all"
+                      title="Delete playbook">
+                      <Trash2 size={10} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
           <label className="btn-secondary btn-sm w-full flex items-center gap-2 cursor-pointer">
             <Upload size={13} /> Import PDF
             <input type="file" accept=".pdf" className="sr-only" onChange={handleImportPDF} />
@@ -523,30 +699,73 @@ function PlayBuilderContent() {
             </div>
           )}
 
+          {/* Templates section */}
+          {templatePlays.length > 0 && (
+            <div className="card p-0 overflow-hidden">
+              <div className="px-3 py-2 border-b border-slate-50 bg-violet-50">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-violet-500">
+                  Templates ({templatePlays.length})
+                </p>
+              </div>
+              <div className="divide-y divide-slate-50 max-h-[250px] overflow-y-auto">
+                {templatePlays.map((p) => (
+                  <div key={p.id}
+                    className={clsx("flex items-start gap-1 px-2 py-2 hover:bg-slate-50 transition-colors group", currentPlayId === p.id && "bg-indigo-50")}>
+                    <button className="flex-1 text-left" onClick={() => loadPlay(p)}>
+                      <p className="text-xs font-medium text-slate-700 truncate">{p.name}</p>
+                      <div className="flex flex-wrap gap-1 mt-0.5">
+                        {p.pace && <span className="text-[9px] text-slate-400">{p.pace}</span>}
+                        {(p.tags ?? []).slice(0, 2).map(t => (
+                          <span key={t} className="text-[9px] bg-slate-100 text-slate-500 px-1 rounded">{t}</span>
+                        ))}
+                      </div>
+                    </button>
+                    <button onClick={() => handleUseTemplate(p)} title="Use as new play"
+                      className="opacity-0 group-hover:opacity-100 text-violet-500 hover:text-violet-700 transition-all pt-0.5">
+                      <Copy size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* My Plays section */}
           <div className="card p-0 overflow-hidden">
             <div className="px-3 py-2.5 border-b border-slate-50">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                Playbook ({filteredPlays.length})
+                {activePlaybookId
+                  ? `${playbooks.find(p => p.id === activePlaybookId)?.name ?? "Playbook"} (${myPlays.length})`
+                  : `My Plays (${myPlays.length})`}
               </p>
             </div>
             {loading ? (
               <div className="flex items-center justify-center py-8">
                 <div className="h-4 w-4 rounded-full border-2 border-primary-200 border-t-primary-600 animate-spin" />
               </div>
+            ) : myPlays.length === 0 ? (
+              <div className="px-3 py-5 text-center text-[11px] text-slate-400">
+                No plays yet. Save one above!
+              </div>
             ) : (
-              <div className="divide-y divide-slate-50 max-h-[500px] overflow-y-auto">
-                {filteredPlays.map((p) => (
-                  <button key={p.id} onClick={() => loadPlay(p)}
-                    className={clsx("w-full text-left px-3 py-2.5 hover:bg-slate-50 transition-colors", currentPlayId === p.id && "bg-indigo-50")}>
-                    <p className="text-xs font-medium text-slate-700 truncate">{p.name}</p>
-                    <div className="flex flex-wrap gap-1 mt-0.5">
-                      {p.is_template && <span className="text-[9px] text-violet-500 font-semibold">Template</span>}
-                      {p.pace && <span className="text-[9px] text-slate-400">{p.pace}</span>}
-                      {(p.tags ?? []).slice(0, 2).map(t => (
-                        <span key={t} className="text-[9px] bg-slate-100 text-slate-500 px-1 rounded">{t}</span>
-                      ))}
-                    </div>
-                  </button>
+              <div className="divide-y divide-slate-50 max-h-[400px] overflow-y-auto">
+                {myPlays.map((p) => (
+                  <div key={p.id}
+                    className={clsx("flex items-start gap-1 px-2 py-2 hover:bg-slate-50 transition-colors group", currentPlayId === p.id && "bg-indigo-50")}>
+                    <button className="flex-1 text-left" onClick={() => loadPlay(p)}>
+                      <p className="text-xs font-medium text-slate-700 truncate">{p.name}</p>
+                      <div className="flex flex-wrap gap-1 mt-0.5">
+                        {p.pace && <span className="text-[9px] text-slate-400">{p.pace}</span>}
+                        {(p.tags ?? []).slice(0, 1).map(t => (
+                          <span key={t} className="text-[9px] bg-slate-100 text-slate-500 px-1 rounded">{t}</span>
+                        ))}
+                      </div>
+                    </button>
+                    <button onClick={() => handleDeletePlay(p.id)} title="Delete play"
+                      className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-600 transition-all pt-0.5">
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}

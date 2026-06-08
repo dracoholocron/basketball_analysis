@@ -27,6 +27,7 @@ from .celery_app import celery_app
 from ..core.config import settings as api_settings
 from ..models.job import Job, JobStatus, JobStage
 from ..models.metrics import FrameMetric, PlayerMetric
+from ..models.game_annotation import GameAnnotation
 from ..services.storage import StorageService
 
 # Add engine path to sys.path so we can import the basketball_analysis package
@@ -51,7 +52,8 @@ def _update_job(session: Session, job_id: str, **kwargs) -> None:
         session.commit()
 
 
-@celery_app.task(bind=True, name="app.worker.tasks.run_analysis", max_retries=2)
+@celery_app.task(bind=True, name="app.worker.tasks.run_analysis", max_retries=0,
+                 acks_late=True, reject_on_worker_lost=False)
 def run_analysis(
     self: Task,
     job_id: str,
@@ -116,9 +118,58 @@ def run_analysis(
             half_court=is_half_court,
         )
 
-        # ── 4. Run pipeline ────────────────────────────────────────────────
+        # ── 4. Fetch manual annotation (if any) ───────────────────────────
+        manual_landmarks = None
+        camera_motion = "static"
+        with Session(engine) as db:
+            ann = db.get(GameAnnotation, None)  # query by game_id below
+            from sqlalchemy import select as sa_select
+            ann = db.execute(
+                sa_select(GameAnnotation).where(GameAnnotation.game_id == uuid.UUID(game_id))
+            ).scalar_one_or_none()
+            if ann is not None:
+                manual_landmarks = ann.landmarks  # list[dict] or None
+                camera_motion = ann.camera_motion or "static"
+                if manual_landmarks:
+                    logger.info(
+                        "Using %d manual landmarks for game %s (motion=%s)",
+                        len(manual_landmarks), game_id, camera_motion,
+                    )
+
+        # ── 5. Run pipeline ────────────────────────────────────────────────
         stub_dir = os.path.join(tmp, "stubs")
-        output_video = os.path.join(tmp, "output.avi")
+        output_video = os.path.join(tmp, "output.mp4")
+
+        # Enable cuDNN benchmark for faster repeated CUDA convolutions
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.backends.cudnn.benchmark = True
+                logger.info("cuDNN benchmark enabled — device: %s", torch.cuda.get_device_name(0))
+        except Exception:
+            pass
+
+        # Progress callback — updates DB at each pipeline stage
+        _STAGE_LABELS = {
+            "reading_video":     ("reading_video",     8),
+            "player_tracking":   ("player_tracking",  12),
+            "ball_tracking":     ("ball_tracking",    30),
+            "keypoint_detection":("keypoint_detection",45),
+            "team_assignment":   ("team_assignment",  55),
+            "ball_acquisition":  ("ball_acquisition", 65),
+            "pass_detection":    ("pass_detection",   68),
+            "tactical_view":     ("tactical_view",    72),
+            "speed_distance":    ("speed_distance",   76),
+            "drawing":           ("drawing",          78),
+        }
+
+        def _pipeline_progress(stage: str, pct: int) -> None:
+            entry = _STAGE_LABELS.get(stage, (stage, pct))
+            try:
+                with Session(engine) as db:
+                    _update_job(db, job_id, current_stage=entry[0], progress_pct=entry[1])
+            except Exception:
+                pass
 
         try:
             metrics = run_pipeline(
@@ -129,6 +180,9 @@ def run_analysis(
                 team1_jersey=team1_jersey,
                 team2_jersey=team2_jersey,
                 court_profile=profile,
+                manual_landmarks=manual_landmarks,
+                camera_motion=camera_motion,
+                on_progress=_pipeline_progress,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -146,7 +200,7 @@ def run_analysis(
             _update_job(db, job_id, current_stage=JobStage.SAVING_OUTPUT, progress_pct=85)
 
         # ── 5. Upload annotated video ──────────────────────────────────────
-        output_key = f"annotated/{game_id}/{job_id}.avi"
+        output_key = f"annotated/{game_id}/{job_id}.mp4"
         storage.upload_local_file(output_video, api_settings.minio_bucket_outputs, output_key)
         logger.info("Uploaded annotated video: %s", output_key)
 
@@ -155,8 +209,8 @@ def run_analysis(
         if host_outputs.exists():
             host_dir = host_outputs / str(game_id)
             host_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(output_video, host_dir / f"{job_id}.avi")
-            logger.info("Saved local copy: %s", host_dir / f"{job_id}.avi")
+            shutil.copy2(output_video, host_dir / f"{job_id}.mp4")
+            logger.info("Saved local copy: %s", host_dir / f"{job_id}.mp4")
 
         with Session(engine) as db:
             _update_job(
@@ -258,38 +312,48 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         tid: f"#{i + 1}" for i, tid in enumerate(ordered_tracks)
     }
 
-    # Build PlayerMetric rows
+    # Build PlayerMetric rows — cast everything to native Python types
     player_rows: list[PlayerMetric] = []
     for track_id in all_track_ids:
+        tid = int(track_id)
+        mt = majority_team(tid)
         row = PlayerMetric(
             job_id=j_uuid,
-            track_id=track_id,
-            display_label=display_labels.get(track_id),
-            team_id=majority_team(track_id),
+            track_id=tid,
+            display_label=display_labels.get(tid),
+            team_id=int(mt) if mt is not None else None,
             total_distance_m=float(player_distances.get(track_id, 0.0)),
             avg_speed_kmh=float(player_avg_speeds.get(track_id, 0.0)),
             max_speed_kmh=float(player_max_speeds.get(track_id, 0.0)),
-            possession_frames=possession_frames.get(track_id, 0),
-            passes_made=passes_made.get(track_id, 0),
-            interceptions_made=interceptions_made.get(track_id, 0),
+            possession_frames=int(possession_frames.get(tid, 0)),
+            passes_made=int(passes_made.get(tid, 0)),
+            interceptions_made=int(interceptions_made.get(tid, 0)),
         )
         player_rows.append(row)
 
     # Build FrameMetric rows with ball_holder_team resolved per frame
+    # Force all values to native Python int — numpy.int64 breaks psycopg2
     frame_rows: list[FrameMetric] = []
-    for frame_idx in range(total_frames):
-        holder_id = ball_acquisition[frame_idx] if frame_idx < len(ball_acquisition) else -1
+    for frame_idx in range(int(total_frames)):
+        raw_holder = ball_acquisition[frame_idx] if frame_idx < len(ball_acquisition) else -1
+        holder_id = int(raw_holder)
         holder_team: int | None = None
         if holder_id != -1 and frame_idx < len(player_assignment):
-            raw = player_assignment[frame_idx].get(holder_id)
-            holder_team = int(raw) if raw is not None else None
+            raw_team = player_assignment[frame_idx].get(holder_id)
+            if raw_team is None:
+                # key might be stored as numpy int — try lookup
+                raw_team = next(
+                    (v for k, v in player_assignment[frame_idx].items() if int(k) == holder_id),
+                    None,
+                )
+            holder_team = int(raw_team) if raw_team is not None else None
 
         frame_rows.append(
             FrameMetric(
                 job_id=j_uuid,
-                frame_number=frame_idx,
-                ball_holder_track_id=holder_id if holder_id != -1 else None,
-                ball_holder_team=holder_team,
+                frame_number=int(frame_idx),
+                ball_holder_track_id=int(holder_id) if holder_id != -1 else None,
+                ball_holder_team=int(holder_team) if holder_team is not None else None,
             )
         )
 

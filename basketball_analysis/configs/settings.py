@@ -188,6 +188,16 @@ class EngineSettings(BaseSettings):
         description="Hard cap on per-frame speed (km/h) to filter homography noise",
     )
 
+    # ── Device / hardware ───────────────────────────────────────────────────────
+    device: str = Field(
+        default="auto",
+        description=(
+            "Inference device for YOLO models. "
+            "'auto' selects CUDA when available, else CPU. "
+            "Can also be set to 'cuda', 'cuda:0', or 'cpu'. Env: BA_DEVICE"
+        ),
+    )
+
     # ── Batch sizes ────────────────────────────────────────────────────────────
     yolo_batch_size: int = Field(
         default=16,
@@ -210,6 +220,16 @@ class EngineSettings(BaseSettings):
 
     # ── Logging ────────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", description="Python logging level")
+
+    def resolve_device(self) -> str:
+        """Resolve 'auto' to 'cuda' or 'cpu' based on torch availability."""
+        if self.device.lower() != "auto":
+            return self.device
+        try:
+            import torch
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            return "cpu"
 
     def configure_logging(self) -> None:
         logging.basicConfig(

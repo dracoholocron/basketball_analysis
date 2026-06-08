@@ -1,3 +1,4 @@
+import logging
 import os
 
 from ultralytics import YOLO
@@ -6,6 +7,8 @@ import numpy as np
 import pandas as pd
 from utils import read_stub, save_stub
 from configs.settings import settings
+
+logger = logging.getLogger(__name__)
 
 # When BA_DUMMY_MODELS=true the real ball detector is replaced by a yolov8n.pt
 # checkpoint trained on COCO.  COCO does not have a "Ball" class; instead we
@@ -38,7 +41,10 @@ class BallTracker:
         conf: float | None = None,
         iou: float | None = None,
     ) -> None:
+        self._device = settings.resolve_device()
         self.model = YOLO(model_path)
+        self.model.to(self._device)
+        logger.info("BallTracker loaded on device: %s", self._device)
         self.conf = conf if conf is not None else settings.ball_detector_conf
         self.iou = iou if iou is not None else settings.ball_detector_nms
 
@@ -59,6 +65,7 @@ class BallTracker:
                 frames[i : i + batch_size],
                 conf=self.conf,
                 iou=self.iou,
+                device=self._device,
             )
             detections += batch_results
         return detections

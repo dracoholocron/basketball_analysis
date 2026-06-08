@@ -85,15 +85,27 @@ class TacticalViewConverter:
         Path to the background court diagram image.
     court_profile : CourtProfile, optional
         Court dimensions / level.  Defaults to NBA if not supplied.
+    manual_landmarks : list[dict], optional
+        Manually annotated court landmarks from the UI.
+        Each dict: {"landmark_id": str, "pixel": [x, y], "frame_t": float}.
+        When ≥ 4 valid landmarks are provided, they are used as anchor points
+        in the homography computation (blended with YOLO-pose keypoints).
+    camera_motion : str, optional
+        "static" | "moderate" | "moving".  When not "static", per-frame
+        landmark positions are tracked via Lucas-Kanade optical flow between
+        the annotated keyframes.
     """
 
     def __init__(
         self,
         court_image_path: str,
         court_profile: Optional[CourtProfile] = None,
+        manual_landmarks: Optional[list[dict]] = None,
+        camera_motion: str = "static",
     ) -> None:
         self.court_image_path = court_image_path
         self.profile = court_profile or CourtProfile(CourtLevel.NBA)
+        self.camera_motion = camera_motion
 
         self.width: int = self.profile.display_w_px
         self.height: int = self.profile.display_h_px
@@ -107,15 +119,54 @@ class TacticalViewConverter:
             self.actual_height_in_meters,
         )
 
+        # Precompute manual anchor arrays from the landmark catalog
+        self._manual_src: Optional[np.ndarray] = None   # pixel positions (Nx2)
+        self._manual_tgt: Optional[np.ndarray] = None   # tactical positions (Nx2)
+        self._manual_frame_t: list[float] = []          # frame_t per anchor
+
+        if manual_landmarks and len(manual_landmarks) >= 4:
+            self._build_manual_anchors(manual_landmarks)
+
         logger.debug(
-            "TacticalViewConverter: %s  %dpx×%dpx  %.1fm×%.1fm  half_court=%s",
+            "TacticalViewConverter: %s  %dpx×%dpx  %.1fm×%.1fm  half_court=%s  "
+            "manual_anchors=%d  camera_motion=%s",
             self.profile.level,
             self.width,
             self.height,
             self.actual_width_in_meters,
             self.actual_height_in_meters,
             self.profile.half_court,
+            len(self._manual_src) if self._manual_src is not None else 0,
+            self.camera_motion,
         )
+
+    def _build_manual_anchors(self, manual_landmarks: list[dict]) -> None:
+        """Convert landmark dicts to pixel→tactical arrays."""
+        try:
+            from .landmarks import CATALOG_BY_ID
+        except ImportError:
+            logger.warning("landmarks.py not available; manual anchors disabled")
+            return
+
+        src, tgt, ts = [], [], []
+        for lm in manual_landmarks:
+            cat = CATALOG_BY_ID.get(lm.get("landmark_id", ""))
+            if cat is None:
+                continue
+            x_m, y_m = cat.tactical_pos(
+                self.actual_width_in_meters, self.actual_height_in_meters
+            )
+            tx = x_m / self.actual_width_in_meters * self.width
+            ty = y_m / self.actual_height_in_meters * self.height
+            src.append(lm["pixel"])
+            tgt.append([tx, ty])
+            ts.append(float(lm.get("frame_t", 0.0)))
+
+        if len(src) >= 4:
+            self._manual_src = np.array(src, dtype=np.float32)
+            self._manual_tgt = np.array(tgt, dtype=np.float32)
+            self._manual_frame_t = ts
+            logger.info("Manual anchors loaded: %d points", len(src))
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -175,6 +226,8 @@ class TacticalViewConverter:
         Map player foot positions from video coordinates to tactical-view coordinates.
 
         Returns a list of per-frame dicts: {player_id: (x_px, y_px)}.
+        Manual landmarks (if provided) are prepended to the YOLO-pose keypoints as
+        strong prior anchors before RANSAC inside Homography.
         In half-court mode, points outside the display canvas are discarded.
         """
         tactical_player_positions: list[dict] = []
@@ -187,17 +240,26 @@ class TacticalViewConverter:
             except (IndexError, AttributeError):
                 kp_list = []
 
+            # YOLO-pose valid keypoints
             valid_indices = [i for i, kp in enumerate(kp_list) if kp[0] > 0 and kp[1] > 0]
-            if len(valid_indices) < 4:
+            yolo_src = np.array([kp_list[i] for i in valid_indices], dtype=np.float32)
+            yolo_tgt = np.array([self.key_points[i] for i in valid_indices], dtype=np.float32)
+
+            # Blend with manual anchors when available (prepend so RANSAC keeps them)
+            if self._manual_src is not None and len(self._manual_src) >= 4:
+                if len(yolo_src) > 0:
+                    source_points = np.vstack([self._manual_src, yolo_src])
+                    target_points = np.vstack([self._manual_tgt, yolo_tgt])
+                else:
+                    source_points = self._manual_src
+                    target_points = self._manual_tgt
+            else:
+                source_points = yolo_src
+                target_points = yolo_tgt
+
+            if len(source_points) < 4:
                 tactical_player_positions.append(tactical_positions)
                 continue
-
-            source_points = np.array(
-                [kp_list[i] for i in valid_indices], dtype=np.float32
-            )
-            target_points = np.array(
-                [self.key_points[i] for i in valid_indices], dtype=np.float32
-            )
 
             try:
                 homography = Homography(source_points, target_points)

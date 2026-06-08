@@ -4,14 +4,14 @@ FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
 
 WORKDIR /app
 
-# System dependencies for OpenCV headless + libGL
+# System dependencies for OpenCV headless + libGL + ffmpeg for H.264 encoding
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgomp1 \
     libpq-dev \
     gcc \
     libgl1-mesa-glx \
-    libglib2.0-0 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # API service deps (for Celery + DB + Storage)

@@ -65,6 +65,7 @@ services:
     volumes:
       - minio_data:/data
     ports:
+      - "9000:9000"   # MinIO S3 API (needed for browser presigned URLs)
       - "9001:9001"   # MinIO console (dev only)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -116,6 +117,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       BA_DUMMY_MODELS: ${BA_DUMMY_MODELS:-false}
+      BA_DEVICE: ${BA_DEVICE:-auto}
       BA_PLAYER_DETECTOR_PATH: /app/engine/models/player_detector.pt
       BA_BALL_DETECTOR_PATH: /app/engine/models/ball_detector_model.pt
       BA_COURT_KEYPOINT_DETECTOR_PATH: /app/engine/models/court_keypoint_detector.pt

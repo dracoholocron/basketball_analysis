@@ -16,6 +16,9 @@ class Play(Base):
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    playbook_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("playbooks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     linked_matchup_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("matchups.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -31,4 +34,8 @@ class Play(Base):
     shared: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    playbook: Mapped["Playbook | None"] = relationship(  # type: ignore[name-defined]  # noqa: F821
+        "Playbook", back_populates="plays", foreign_keys=[playbook_id]
     )

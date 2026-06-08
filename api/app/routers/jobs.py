@@ -51,18 +51,43 @@ async def get_job(
     return job
 
 
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Delete a job record. Intended for clearing failed or stuck jobs."""
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status == JobStatus.RUNNING:
+        # Mark as failed first so any still-running Celery task knows to stop
+        job.status = JobStatus.FAILED
+        job.error_message = "Cancelled by user"
+        await db.commit()
+    await db.delete(job)
+    await db.commit()
+
+
 @router.get("/{job_id}/annotated-video")
 async def get_annotated_video(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Return a pre-signed URL for the annotated output video."""
+    """Return a pre-signed URL for the annotated output video as JSON.
+
+    Returns {"url": "..."} with the hostname rewritten to the public MinIO
+    endpoint so the browser can reach MinIO directly without auth headers.
+    """
     job = await db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not job.output_s3_key:
         raise HTTPException(status_code=404, detail="Annotated video not yet available")
     storage = get_storage()
-    url = storage.get_presigned_url(api_settings.minio_bucket_outputs, job.output_s3_key)
-    return RedirectResponse(url=url)
+    url = storage.get_presigned_url(
+        api_settings.minio_bucket_outputs, job.output_s3_key, public=True
+    )
+    return {"url": url}

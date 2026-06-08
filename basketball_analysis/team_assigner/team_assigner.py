@@ -53,15 +53,21 @@ class TeamAssigner:
 
         self._model: CLIPModel | None = None
         self._processor: CLIPProcessor | None = None
+        self._device: str = "cpu"
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
         if self._model is None:
-            logger.info("Loading FashionCLIP model…")
-            self._model = CLIPModel.from_pretrained("patrickjohncyh/fashion-clip")
+            try:
+                import torch
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                self._device = "cpu"
+            logger.info("Loading FashionCLIP model on %s…", self._device)
+            self._model = CLIPModel.from_pretrained("patrickjohncyh/fashion-clip").to(self._device)
             self._processor = CLIPProcessor.from_pretrained("patrickjohncyh/fashion-clip")
-            logger.info("FashionCLIP ready")
+            logger.info("FashionCLIP ready on %s", self._device)
 
     def _jersey_crop(self, frame: np.ndarray, bbox: list) -> np.ndarray:
         """Return the upper-half of the player bbox (jersey region)."""
@@ -82,6 +88,9 @@ class TeamAssigner:
             inputs = self._processor(
                 text=classes, images=pil_img, return_tensors="pt", padding=True
             )
+            # Move inputs to same device as model
+            device = getattr(self, "_device", "cpu")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             outputs = self._model(**inputs)
             probs = outputs.logits_per_image.softmax(dim=1)[0]
             return float(probs[0].item())
@@ -156,9 +165,17 @@ class TeamAssigner:
         player_tracks: list,
         read_from_stub: bool = False,
         stub_path: str | None = None,
+        clip_sample_every: int = 10,
     ) -> list[dict[int, int]]:
         """
         Assign teams to all players across all frames with optional stub caching.
+
+        Parameters
+        ----------
+        clip_sample_every : int
+            Run CLIP inference only every Nth frame for each player.
+            Intermediate frames reuse the last known vote result.
+            Default 10 = ~3x faster for 30fps video.
 
         Returns a list of dicts: [{player_id: team_id, …}, …] indexed by frame.
         """
@@ -169,15 +186,33 @@ class TeamAssigner:
 
         self._load_model()
         player_assignment: list[dict[int, int]] = []
+        total = len(player_tracks)
+        last_known: dict[int, int] = {}  # player_id -> last team assignment
 
         for frame_num, player_track in enumerate(player_tracks):
             frame_assignments: dict[int, int] = {}
-            for player_id, track in player_track.items():
-                team = self.get_player_team(
-                    video_frames[frame_num], track["bbox"], player_id
+
+            # Log progress every 500 frames
+            if frame_num % 500 == 0:
+                logger.info(
+                    "TeamAssigner: frame %d / %d (%.0f%%)",
+                    frame_num, total, frame_num / total * 100,
                 )
+
+            for player_id, track in player_track.items():
+                if frame_num % clip_sample_every == 0 or player_id not in last_known:
+                    # Run CLIP inference on sampled frames or first appearance
+                    team = self.get_player_team(
+                        video_frames[frame_num], track["bbox"], player_id
+                    )
+                    last_known[player_id] = team
+                else:
+                    # Reuse last known assignment (no CLIP call)
+                    team = last_known[player_id]
+
                 frame_assignments[player_id] = team
             player_assignment.append(frame_assignments)
 
+        logger.info("TeamAssigner: done — %d frames processed", total)
         save_stub(stub_path, player_assignment)
         return player_assignment

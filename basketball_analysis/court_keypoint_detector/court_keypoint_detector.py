@@ -1,7 +1,11 @@
+import logging
+
 from ultralytics import YOLO
 import supervision as sv
 from utils import read_stub, save_stub
 from configs.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class CourtKeypointDetector:
@@ -10,9 +14,12 @@ class CourtKeypointDetector:
     It also provides functionality to draw these detected keypoints on the frames.
     """
     def __init__(self, model_path):
+        self._device = settings.resolve_device()
         self.model = YOLO(model_path)
+        self.model.to(self._device)
+        logger.info("CourtKeypointDetector loaded on device: %s", self._device)
     
-    def get_court_keypoints(self, frames,read_from_stub=False, stub_path=None):
+    def get_court_keypoints(self, frames, read_from_stub=False, stub_path=None):
         """
         Detect court keypoints for a batch of frames using the YOLO model. If requested, 
         attempts to read previously detected keypoints from a stub file before running the model.
@@ -27,18 +34,22 @@ class CourtKeypointDetector:
         Returns:
             list: A list of detected keypoints for each input frame.
         """
-        court_keypoints = read_stub(read_from_stub,stub_path)
+        court_keypoints = read_stub(read_from_stub, stub_path)
         if court_keypoints is not None:
             if len(court_keypoints) == len(frames):
                 return court_keypoints
         
         batch_size = settings.yolo_batch_size
         court_keypoints = []
-        for i in range(0,len(frames),batch_size):
-            detections_batch = self.model.predict(frames[i:i+batch_size],conf=0.5)
+        for i in range(0, len(frames), batch_size):
+            detections_batch = self.model.predict(
+                frames[i:i + batch_size],
+                conf=0.5,
+                device=self._device,
+            )
             for detection in detections_batch:
                 court_keypoints.append(detection.keypoints)
 
-        save_stub(stub_path,court_keypoints)
+        save_stub(stub_path, court_keypoints)
         
         return court_keypoints

@@ -11,9 +11,11 @@ from .matchup import Matchup
 from .game_event import GameEvent
 from .box_score import BoxScore, PlayerBoxScore
 from .play import Play
+from .playbook import Playbook
 from .scouting_report import ScoutingReport, PlayerScoutingNote
 from .simulation import GameSimulation, KeyToVictory, SituationalAdjustment
 from .training import TrainingSession, PoseKeypoints, ShootingFormMetric
+from .game_annotation import GameAnnotation
 
 __all__ = [
     "Organization",
@@ -34,6 +36,7 @@ __all__ = [
     "BoxScore",
     "PlayerBoxScore",
     "Play",
+    "Playbook",
     "ScoutingReport",
     "PlayerScoutingNote",
     "GameSimulation",
@@ -42,4 +45,5 @@ __all__ = [
     "TrainingSession",
     "PoseKeypoints",
     "ShootingFormMetric",
+    "GameAnnotation",
 ]

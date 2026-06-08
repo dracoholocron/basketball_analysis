@@ -78,20 +78,46 @@ def iter_video_chunks(
 
 # ── Legacy in-memory loader (kept for small videos / stubs workflows) ──────────
 
-def read_video(video_path: str) -> list[np.ndarray]:
+def read_video(
+    video_path: str,
+    max_height: int = 720,
+    frame_step: int = 1,
+    max_frames: int = 6000,
+) -> list[np.ndarray]:
     """
-    Load all video frames into a list.
+    Load video frames into a list with built-in memory guards:
 
-    .. warning::
-        For long videos this loads the entire video into RAM.
-        Prefer :func:`iter_video_frames` or :func:`iter_video_chunks` for large inputs.
+    - ``max_height``: Downscale frames if their height exceeds this value (default 720p).
+    - ``frame_step``:  Only keep every N-th frame (default 1 → all frames).
+    - ``max_frames``:  Hard cap on total frames loaded (default 6 000 ≈ ~3 min at 30 fps).
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
+
     frames: list[np.ndarray] = []
-    for frame in iter_video_frames(video_path):
+    for idx, frame in enumerate(iter_video_frames(video_path)):
+        if idx % frame_step != 0:
+            continue
+        if frame.shape[0] > max_height:
+            scale = max_height / frame.shape[0]
+            new_w = int(frame.shape[1] * scale)
+            frame = cv2.resize(frame, (new_w, max_height), interpolation=cv2.INTER_AREA)
         frames.append(frame)
-    logger.debug("read_video: loaded %d frames from %s", len(frames), video_path)
+        if len(frames) >= max_frames:
+            logger.warning(
+                "read_video: reached max_frames=%d cap — truncating '%s'",
+                max_frames,
+                video_path,
+            )
+            break
+
+    logger.info(
+        "read_video: loaded %d frames from '%s' (step=%d, max_h=%d)",
+        len(frames),
+        video_path,
+        frame_step,
+        max_height,
+    )
     return frames
 
 
@@ -107,29 +133,74 @@ def save_video(
     output_video_frames: list[np.ndarray],
     output_video_path: str,
     fps: float = 24.0,
-    codec: str = "XVID",
+    codec: str | None = None,
 ) -> None:
     """
     Save a list of annotated frames to a video file.
+
+    For .mp4 output, first writes with mp4v via OpenCV then re-encodes to
+    H.264 using ffmpeg (if available) for browser compatibility.
 
     Args:
         output_video_frames: Frames in BGR format.
         output_video_path:   Destination file path (.avi or .mp4).
         fps:                 Output frame rate.
-        codec:               FourCC codec string (default XVID for AVI).
+        codec:               FourCC codec string override (rarely needed).
     """
+    import shutil
+    import subprocess
+    import tempfile
+
     if not output_video_frames:
         raise ValueError("output_video_frames is empty — nothing to save")
 
+    is_mp4 = output_video_path.lower().endswith(".mp4")
+
+    if codec is None:
+        codec = "mp4v" if is_mp4 else "XVID"
+
     _ensure_dir(output_video_path)
     h, w = output_video_frames[0].shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*codec)
-    out = cv2.VideoWriter(output_video_path, fourcc, fps, (w, h))
-    try:
-        for frame in output_video_frames:
-            out.write(frame)
-    finally:
-        out.release()
+
+    # Write frames using OpenCV
+    if is_mp4 and shutil.which("ffmpeg"):
+        # Write raw frames to a temp file, then re-encode to H.264 with ffmpeg
+        tmp_path = output_video_path + ".tmp.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(tmp_path, fourcc, fps, (w, h))
+        try:
+            for frame in output_video_frames:
+                out.write(frame)
+        finally:
+            out.release()
+        # Re-encode to H.264 for browser compatibility
+        cmd = [
+            "ffmpeg", "-y", "-i", tmp_path,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-movflags", "+faststart",  # enables progressive streaming
+            output_video_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        try:
+            import os
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        if result.returncode != 0:
+            logger.warning("ffmpeg re-encode failed: %s", result.stderr.decode())
+            # Rename tmp as output if ffmpeg failed
+            import os
+            if os.path.exists(tmp_path):
+                os.rename(tmp_path, output_video_path)
+    else:
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        out = cv2.VideoWriter(output_video_path, fourcc, fps, (w, h))
+        try:
+            for frame in output_video_frames:
+                out.write(frame)
+        finally:
+            out.release()
+
     logger.debug("save_video: wrote %d frames to %s", len(output_video_frames), output_video_path)
 
 

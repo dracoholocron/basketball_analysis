@@ -110,6 +110,19 @@ async def auth_headers(admin_token: str) -> dict[str, str]:
 
 
 @pytest_asyncio.fixture
+async def auth_client(db_session: AsyncSession, admin_token: str) -> AsyncGenerator[AsyncClient, None]:
+    """Authenticated AsyncClient for admin user — convenience fixture."""
+    async def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=headers) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
 async def coach_headers(coach_token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {coach_token}"}
 

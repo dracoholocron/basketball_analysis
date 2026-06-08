@@ -12,7 +12,9 @@ class PlayCreate(BaseModel):
     category: str = "quick_hitter"
     description: str | None = None
     svg_data: dict[str, Any] | None = None
+    svg_data_version: int | None = None
     organization_id: uuid.UUID | None = None
+    playbook_id: uuid.UUID | None = None
     linked_matchup_id: uuid.UUID | None = None
     tags: list[str] | None = None
     pace: str | None = None
@@ -25,6 +27,7 @@ class PlayUpdate(BaseModel):
     description: str | None = None
     svg_data: dict[str, Any] | None = None
     svg_data_version: int | None = None
+    playbook_id: uuid.UUID | None = None
     linked_matchup_id: uuid.UUID | None = None
     tags: list[str] | None = None
     pace: str | None = None
@@ -44,6 +47,7 @@ class PlayRead(BaseModel):
     is_template: bool
     shared: bool
     organization_id: uuid.UUID | None
+    playbook_id: uuid.UUID | None
     linked_matchup_id: uuid.UUID | None
     created_at: datetime
 

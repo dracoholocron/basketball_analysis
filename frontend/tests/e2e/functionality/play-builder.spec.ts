@@ -1,13 +1,30 @@
 import { test, expect } from "@playwright/test";
 import { loginAs } from "../helpers";
 
+const MOCK_PLAYBOOKS = [
+  { id: "pb1", name: "My Playbook", description: null, is_system: false, play_count: 2 },
+  { id: "sys1", name: "Plantillas del Sistema", description: null, is_system: true, play_count: 12 },
+];
+
+const MOCK_PLAYS = [
+  { id: "play1", name: "Pick & Roll", category: "set_play", is_template: true, tags: ["Offensive Set"], pace: "medium", playbook_id: "sys1" },
+  { id: "play2", name: "My Play 1", category: "quick_hitter", is_template: false, tags: [], pace: null, playbook_id: "pb1" },
+];
+
 test.describe("Play Builder", () => {
   test.beforeEach(async ({ page }) => {
     await page.route("**/api/v1/plays*", (route) =>
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify([]),
+        body: JSON.stringify(MOCK_PLAYS),
+      })
+    );
+    await page.route("**/api/v1/playbooks*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(MOCK_PLAYBOOKS),
       })
     );
     await loginAs(page);
@@ -77,6 +94,24 @@ test.describe("Play Builder", () => {
     const cutBtn = toolPanel.getByRole("button", { name: /Cut/i });
     await expect(passBtn).toBeVisible({ timeout: 5000 });
     await expect(cutBtn).toBeVisible({ timeout: 5000 });
+  });
+
+  // ── Playbook UI ────────────────────────────────────────────────────────────
+
+  test("playbook panel is visible with playbook list", async ({ page }) => {
+    // The Playbooks panel should list the mocked playbooks
+    await expect(page.getByText("Playbooks")).toBeVisible({ timeout: 8000 });
+    await expect(page.getByText("My Playbook")).toBeVisible({ timeout: 8000 });
+  });
+
+  test("template plays appear in Templates section", async ({ page }) => {
+    await expect(page.getByText("Templates")).toBeVisible({ timeout: 8000 });
+    await expect(page.getByText("Pick & Roll")).toBeVisible({ timeout: 8000 });
+  });
+
+  test("my plays appear in My Plays section", async ({ page }) => {
+    await expect(page.getByText("My Plays")).toBeVisible({ timeout: 8000 });
+    await expect(page.getByText("My Play 1")).toBeVisible({ timeout: 8000 });
   });
 
   // ── A3: Notes per frame ───────────────────────────────────────────────────

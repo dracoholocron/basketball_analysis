@@ -1,0 +1,43 @@
+# Python cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.mypy_cache
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+
+# Large training artifacts (NOT the inference models in models/)
+basketball_analysis/runs/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.cursor/
+.vscode/
+*.code-workspace
+
+# Docs and misc
+*.md
+docs/
+*.log
+
+# Test stubs / output files
+**/*_stub.pkl
+**/stubs/
+output*.avi
+output*.mp4
+
+# OS artifacts
+.DS_Store
+Thumbs.db

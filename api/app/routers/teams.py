@@ -55,8 +55,14 @@ async def create_team(
     _=Depends(_admin),
     org_id: uuid.UUID | None = Depends(get_current_org_id),
 ):
-    # Auto-assign org if user belongs to one and none provided in payload
-    resolved_org = payload.organization_id or org_id
+    # User's org always takes precedence — prevents cross-org team creation.
+    # Fall back to payload.organization_id only for super-admins (org_id is None).
+    resolved_org = org_id or payload.organization_id
+    if resolved_org is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="organization_id is required",
+        )
     team = Team(
         organization_id=resolved_org,
         name=payload.name,

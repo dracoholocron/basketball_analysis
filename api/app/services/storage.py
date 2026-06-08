@@ -73,12 +73,26 @@ class StorageService:
         bucket: str,
         key: str,
         expiry: int = 3600,
+        public: bool = False,
     ) -> str:
-        return self._client.generate_presigned_url(
+        """Generate a presigned GET URL.
+
+        When *public=True*, the internal docker hostname in the URL is replaced
+        with ``settings.minio_public_endpoint`` so the URL is reachable from
+        outside the Docker network (e.g. a browser).
+        """
+        url = self._client.generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": key},
             ExpiresIn=expiry,
         )
+        if public:
+            url = url.replace(
+                settings.minio_endpoint,
+                settings.minio_public_endpoint,
+                1,
+            )
+        return url
 
     def delete_object(self, bucket: str, key: str) -> None:
         self._client.delete_object(Bucket=bucket, Key=key)

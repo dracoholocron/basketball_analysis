@@ -10,55 +10,77 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.database import get_db
 from ..core.deps import require_role, get_current_org_id
 from ..models.play import Play
+from ..models.playbook import Playbook
 from ..schemas.play import PlayCreate, PlayRead, PlayUpdate
+from ..services.play_library import build_template_seed_data, build_master_playbook_data
 
 router = APIRouter(prefix="/plays", tags=["plays"])
 
 _admin = require_role("admin")
 _staff = require_role("admin", "coach")
 
-SEED_PLAYS = [
-    {"name": "Pick & Roll", "category": "set_play", "description": "Classic ball-handler pick and roll action", "tags": ["Offensive Set", "P&R"], "pace": "medium-to-fast"},
-    {"name": "Horns", "category": "set_play", "description": "Two bigs at the elbows with guards at corners", "tags": ["Offensive Set", "Horns"], "pace": "medium"},
-    {"name": "Flex", "category": "set_play", "description": "Continuous flex cuts and down screens", "tags": ["Offensive Set", "Flex"], "pace": "slow-to-medium"},
-    {"name": "Princeton", "category": "set_play", "description": "Back-door cuts from the high post", "tags": ["Offensive Set", "Princeton"], "pace": "slow"},
-    {"name": "Motion Offense", "category": "system", "description": "5-out motion with spacing principles", "tags": ["System", "5-out"], "pace": "medium"},
-    {"name": "Floppy", "category": "set_play", "description": "Off-ball screens to free shooters", "tags": ["Offensive Set", "Shooter"], "pace": "medium"},
-    {"name": "Spain Pick & Roll", "category": "set_play", "description": "Pick & roll with back screen on roller", "tags": ["Offensive Set", "P&R"], "pace": "fast"},
-    {"name": "Hammer", "category": "set_play", "description": "Corner shooter off baseline cut from DHO", "tags": ["Offensive Set", "Shooter"], "pace": "medium-to-fast"},
-    {"name": "Zipper", "category": "set_play", "description": "Guard cuts to ball on wing for action", "tags": ["Offensive Set"], "pace": "medium"},
-    {"name": "Pin Down", "category": "set_play", "description": "Big screens for shooter cutting up from corner", "tags": ["Offensive Set", "Shooter"], "pace": "slow-to-medium"},
-    {"name": "Blob (Baseline OB)", "category": "inbound", "description": "Baseline out-of-bounds play", "tags": ["Inbound", "Baseline"], "pace": "medium"},
-    {"name": "Slob (Sideline OB)", "category": "inbound", "description": "Sideline out-of-bounds play", "tags": ["Inbound", "Sideline"], "pace": "medium"},
-    {"name": "Zone Attack", "category": "set_play", "description": "vs 2-3 zone — skip passes and hi-lo", "tags": ["Offensive Set", "vs Zone"], "pace": "slow"},
-    {"name": "Press Break", "category": "system", "description": "Full-court press breaker with outlets", "tags": ["System", "Press Break"], "pace": "fast"},
-]
+# Seed version — bump to force re-seed when content changes
+_SEED_VERSION = 2
 
 
 async def _seed_plays(db: AsyncSession) -> None:
-    """Seed the database with template plays if none exist."""
-    result = await db.execute(select(Play).where(Play.is_template == True).limit(1))
-    if result.scalar_one_or_none() is None:
-        for p in SEED_PLAYS:
-            play = Play(
-                name=p["name"],
-                category=p["category"],
-                description=p["description"],
-                tags=p.get("tags"),
-                pace=p.get("pace"),
-                is_template=True,
-                shared=True,
-                svg_data={"version": 1, "players": [], "arrows": [], "freeform_paths": []},
-            )
+    """Idempotent seed: upsert 12 multi-frame templates + Master Playbook 2026.
+
+    Uses svg_data_version==2 as the marker. Templates already at v2 are skipped.
+    On first run or after a version bump the full frame data is written.
+    """
+    # ── 1. System Templates playbook ────────────────────────────────────────
+    tmpl_pb_result = await db.execute(
+        select(Playbook).where(Playbook.is_system == True, Playbook.name == "Plantillas del Sistema")
+    )
+    tmpl_pb = tmpl_pb_result.scalar_one_or_none()
+    if tmpl_pb is None:
+        tmpl_pb = Playbook(name="Plantillas del Sistema", is_system=True,
+                           description="Official play templates with full multi-frame diagrams")
+        db.add(tmpl_pb)
+        await db.flush()
+
+    # ── 2. Upsert 12 templates ────────────────────────────────────────────
+    for seed in build_template_seed_data():
+        result = await db.execute(
+            select(Play).where(Play.name == seed["name"], Play.is_template == True)
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            play = Play(**seed, playbook_id=tmpl_pb.id)
             db.add(play)
-        await db.commit()
+        elif existing.svg_data_version < _SEED_VERSION:
+            existing.svg_data = seed["svg_data"]
+            existing.svg_data_version = 2
+            existing.description = seed["description"]
+            existing.tags = seed["tags"]
+            existing.pace = seed["pace"]
+            if existing.playbook_id is None:
+                existing.playbook_id = tmpl_pb.id
+
+    # ── 3. Master Playbook 2026 ──────────────────────────────────────────
+    master_pb_result = await db.execute(
+        select(Playbook).where(Playbook.name == "Master Playbook 2026")
+    )
+    master_pb = master_pb_result.scalar_one_or_none()
+    if master_pb is None:
+        playbook_meta, plays_data = build_master_playbook_data()
+        master_pb = Playbook(**playbook_meta)
+        db.add(master_pb)
+        await db.flush()
+        for pd in plays_data:
+            play = Play(**pd, playbook_id=master_pb.id)
+            db.add(play)
+
+    await db.commit()
 
 
 @router.get("", response_model=list[PlayRead])
 async def list_plays(
     skip: int = 0,
-    limit: int = 50,
+    limit: int = 100,
     matchup_id: uuid.UUID | None = None,
+    playbook_id: uuid.UUID | None = None,
     category: str | None = None,
     pace: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -68,9 +90,18 @@ async def list_plays(
     await _seed_plays(db)
     q = select(Play).order_by(Play.is_template.desc(), Play.name)
     if org_id is not None:
-        q = q.where(or_(Play.organization_id == org_id, Play.is_template == True))
+        # When filtering by playbook, also allow plays inside that playbook
+        # regardless of organization (handles system playbooks like Master Playbook 2026)
+        if playbook_id is not None:
+            q = q.where(
+                or_(Play.organization_id == org_id, Play.is_template == True, Play.playbook_id == playbook_id)
+            )
+        else:
+            q = q.where(or_(Play.organization_id == org_id, Play.is_template == True))
     if matchup_id is not None:
         q = q.where(Play.linked_matchup_id == matchup_id)
+    if playbook_id is not None:
+        q = q.where(Play.playbook_id == playbook_id)
     if category is not None:
         q = q.where(Play.category == category)
     if pace is not None:
@@ -124,8 +155,12 @@ async def create_play(
     payload: PlayCreate,
     db: AsyncSession = Depends(get_db),
     _=Depends(_staff),
+    org_id: uuid.UUID | None = Depends(get_current_org_id),
 ):
-    play = Play(**payload.model_dump())
+    data = payload.model_dump()
+    # User's org always takes precedence so the play is visible in list_plays
+    data["organization_id"] = org_id or data.get("organization_id")
+    play = Play(**data)
     db.add(play)
     await db.commit()
     await db.refresh(play)

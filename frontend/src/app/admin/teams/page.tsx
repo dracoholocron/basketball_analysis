@@ -3,46 +3,54 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
-import { listTeams, createTeam, listOrganizations } from "@/lib/api";
-import { PlusCircle, Users, ChevronLeft, AlertCircle } from "lucide-react";
+import { listTeams, createTeam, listOrganizations, getMe } from "@/lib/api";
+import { PlusCircle, Users, ChevronLeft, AlertCircle, Building2 } from "lucide-react";
 
-interface Team { id: string; name: string; level?: string; jersey_description?: string; }
+interface Team { id: string; name: string; level?: string; jersey_description?: string; organization_id: string; }
 interface Org { id: string; name: string; }
 
 const LEVELS = ["mini_basket", "primaria", "secundaria", "juvenil", "nba"];
 
 export default function TeamsPage() {
   const [teams, setTeams] = useState<Team[]>([]);
-  const [orgs, setOrgs] = useState<Org[]>([]);
-  const [form, setForm] = useState({ name: "", organization_id: "", jersey_description: "", level: "" });
+  const [currentOrg, setCurrentOrg] = useState<Org | null>(null);
+  const [form, setForm] = useState({ name: "", jersey_description: "", level: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = () => {
-    listTeams().then((d) => setTeams(d.items ?? d)).catch(() => null);
-    listOrganizations().then((d) => {
-      const items = d.items ?? d;
-      setOrgs(items);
-      if (items.length && !form.organization_id) setForm(f => ({ ...f, organization_id: items[0].id }));
-    }).catch(() => null);
-  };
+  useEffect(() => {
+    // Load current user's org name for display
+    getMe().then((me) =>
+      listOrganizations().then((orgs: Org[]) => {
+        const org = (orgs as Org[]).find((o) => o.id === me.organization_id);
+        setCurrentOrg(org ?? { id: me.organization_id, name: me.organization_id });
+      }).catch(() => null)
+    ).catch(() => null);
 
-  useEffect(() => { reload(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+    listTeams().then((d: Team[] | { items: Team[] }) => {
+      setTeams(Array.isArray(d) ? d : (d.items ?? []));
+    }).catch(() => null);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSaving(true); setError(null);
+    setSaving(true);
+    setError(null);
     try {
       await createTeam({
         name: form.name,
-        organization_id: form.organization_id || undefined,
         jersey_description: form.jersey_description || undefined,
         level: form.level || undefined,
       });
-      setForm(f => ({ ...f, name: "", jersey_description: "", level: "" }));
-      await reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create team");
+      setForm({ name: "", jersey_description: "", level: "" });
+      // Refresh list
+      const d = await listTeams();
+      setTeams(Array.isArray(d) ? d : (d.items ?? []));
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        (err instanceof Error ? err.message : "Failed to create team");
+      setError(typeof msg === "string" ? msg : JSON.stringify(msg));
     } finally {
       setSaving(false);
     }
@@ -56,8 +64,15 @@ export default function TeamsPage() {
         </Link>
 
         {error && (
-          <div className="flex items-center gap-2 rounded-xl bg-danger-50 px-4 py-3 text-sm text-danger-600 ring-1 ring-danger-100">
+          <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-600 ring-1 ring-red-100">
             <AlertCircle size={15} /> {error}
+          </div>
+        )}
+
+        {currentOrg && (
+          <div className="flex items-center gap-2 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-700 ring-1 ring-blue-100">
+            <Building2 size={15} />
+            Teams are created under your organization: <strong>{currentOrg.name}</strong>
           </div>
         )}
 
@@ -92,30 +107,36 @@ export default function TeamsPage() {
           )}
 
           <form onSubmit={handleSubmit} className="grid grid-cols-1 gap-3 sm:grid-cols-2 border-t border-slate-100 pt-5">
-            <div>
+            <div className="sm:col-span-2">
               <label className="label">Name *</label>
-              <input className="input" required placeholder="Home Team" value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div>
-              <label className="label">Organization</label>
-              <select className="input" value={form.organization_id}
-                onChange={(e) => setForm({ ...form, organization_id: e.target.value })}>
-                <option value="">— none —</option>
-                {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-              </select>
+              <input
+                className="input"
+                required
+                placeholder="Home Team"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
             </div>
             <div>
               <label className="label">Jersey Description</label>
-              <input className="input" placeholder="white jersey" value={form.jersey_description}
-                onChange={(e) => setForm({ ...form, jersey_description: e.target.value })} />
+              <input
+                className="input"
+                placeholder="white jersey"
+                value={form.jersey_description}
+                onChange={(e) => setForm({ ...form, jersey_description: e.target.value })}
+              />
             </div>
             <div>
               <label className="label">Level</label>
-              <select className="input" value={form.level}
-                onChange={(e) => setForm({ ...form, level: e.target.value })}>
+              <select
+                className="input"
+                value={form.level}
+                onChange={(e) => setForm({ ...form, level: e.target.value })}
+              >
                 <option value="">— none —</option>
-                {LEVELS.map((l) => <option key={l} value={l}>{l.replace("_", " ")}</option>)}
+                {LEVELS.map((l) => (
+                  <option key={l} value={l}>{l.replace("_", " ")}</option>
+                ))}
               </select>
             </div>
             <div className="sm:col-span-2 flex justify-end">

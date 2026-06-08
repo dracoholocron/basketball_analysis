@@ -27,6 +27,9 @@ class APISettings(BaseSettings):
 
     # MinIO / S3
     minio_endpoint: str = Field(default="minio:9000")
+    # Public endpoint used to rewrite presigned URLs for browser access.
+    # Should be set to the hostname:port accessible from the user's browser.
+    minio_public_endpoint: str = Field(default="localhost:9000")
     minio_access_key: str = Field(default="minioadmin")
     minio_secret_key: str = Field(default="minioadmin")
     minio_bucket_videos: str = Field(default="videos")

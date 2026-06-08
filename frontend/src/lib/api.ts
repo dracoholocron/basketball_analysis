@@ -30,6 +30,11 @@ export function logout() {
   Cookies.remove("access_token");
 }
 
+export async function getMe() {
+  const { data } = await api.get("/auth/me");
+  return data as { id: string; email: string; full_name: string | null; role: string; organization_id: string; is_active: boolean };
+}
+
 // ── Games ─────────────────────────────────────────────────────────────────────
 export async function listGames(skip = 0, limit = 20) {
   const { data } = await api.get("/games", { params: { skip, limit } });
@@ -46,17 +51,108 @@ export async function getGame(id: string) {
   return data;
 }
 
+/** Upload a video file. Returns the VideoAsset — does NOT start analysis. */
 export async function uploadVideo(gameId: string, file: File) {
   const form = new FormData();
   form.append("file", file);
   const { data } = await api.post(`/games/${gameId}/video`, form, {
     headers: { "Content-Type": "multipart/form-data" },
   });
+  return data as { id: string; game_id: string; filename: string; file_size_bytes: number | null };
+}
+
+/** Start analysis of the already-uploaded video for a game. Returns a Job. */
+export async function analyzeGame(gameId: string) {
+  const { data } = await api.post(`/games/${gameId}/analyze`);
   return data;
+}
+
+export async function deleteJob(jobId: string): Promise<void> {
+  await api.delete(`/jobs/${jobId}`);
+}
+
+/** Check if a game has a video uploaded (non-throwing). */
+export async function hasGameVideo(gameId: string): Promise<boolean> {
+  try {
+    await api.head(`/games/${gameId}/raw-video`);
+    return true;
+  } catch {
+    // HEAD on the redirect doesn't work well; try GET instead
+    try {
+      await api.get(`/games/${gameId}/raw-video`, { maxRedirects: 0 });
+      return true;
+    } catch (err: unknown) {
+      // 302 redirect = video exists, 404 = no video
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status && status >= 300 && status < 400) return true;
+      return false;
+    }
+  }
 }
 
 export async function getGameMetrics(gameId: string) {
   const { data } = await api.get(`/games/${gameId}/metrics`);
+  return data;
+}
+
+// ── Annotations / homography calibration ──────────────────────────────────────
+
+export interface LandmarkPoint {
+  landmark_id: string;
+  pixel: [number, number];
+  frame_t: number;
+}
+
+export interface GameAnnotation {
+  id: string;
+  game_id: string;
+  landmarks: LandmarkPoint[] | null;
+  camera_motion: "static" | "moderate" | "moving" | "unknown" | null;
+}
+
+export interface LandmarkCatalogItem {
+  id: string;
+  label: string;
+  category: "corner" | "circle" | "line" | "key" | "hoop";
+}
+
+export async function getGameVideoUrl(gameId: string): Promise<string> {
+  const { data } = await api.get<{ url: string }>(`/games/${gameId}/raw-video`);
+  return data.url;
+}
+
+export async function getGameAnnotation(gameId: string): Promise<GameAnnotation | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/annotation`);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function putGameAnnotation(
+  gameId: string,
+  landmarks: LandmarkPoint[],
+  camera_motion?: string,
+): Promise<GameAnnotation> {
+  const { data } = await api.put(`/games/${gameId}/annotation`, {
+    landmarks,
+    camera_motion: camera_motion ?? null,
+  });
+  return data;
+}
+
+export async function detectCameraMotion(gameId: string): Promise<{
+  motion: string;
+  ssim_avg: number | null;
+  ssim_samples: number[];
+}> {
+  const { data } = await api.post(`/games/${gameId}/detect-motion`);
+  return data;
+}
+
+export async function getLandmarkCatalog(): Promise<LandmarkCatalogItem[]> {
+  const { data } = await api.get("/landmarks/catalog");
   return data;
 }
 
@@ -266,8 +362,10 @@ export async function triggerHalftimeResim(matchupId: string) {
 }
 
 // ── Plays ─────────────────────────────────────────────────────────────────────
-export async function listPlays(matchupId?: string, skip = 0, limit = 100) {
-  const { data } = await api.get("/plays", { params: { matchup_id: matchupId, skip, limit } });
+export async function listPlays(matchupId?: string, skip = 0, limit = 100, playbookId?: string) {
+  const { data } = await api.get("/plays", {
+    params: { matchup_id: matchupId, skip, limit, playbook_id: playbookId },
+  });
   return data;
 }
 
@@ -288,6 +386,26 @@ export async function updatePlay(playId: string, payload: Record<string, unknown
 
 export async function deletePlay(playId: string) {
   await api.delete(`/plays/${playId}`);
+}
+
+// ── Playbooks ─────────────────────────────────────────────────────────────────
+export async function listPlaybooks() {
+  const { data } = await api.get("/playbooks");
+  return data;
+}
+
+export async function getPlaybook(playbookId: string) {
+  const { data } = await api.get(`/playbooks/${playbookId}`);
+  return data;
+}
+
+export async function createPlaybook(payload: { name: string; description?: string }) {
+  const { data } = await api.post("/playbooks", payload);
+  return data;
+}
+
+export async function deletePlaybook(playbookId: string) {
+  await api.delete(`/playbooks/${playbookId}`);
 }
 
 // ── Box Scores ────────────────────────────────────────────────────────────────
@@ -378,11 +496,14 @@ export async function getTrainingCvEvents(sessionId: string) {
 // ── Polling ───────────────────────────────────────────────────────────────────
 export async function pollJobUntilDone(
   jobId: string,
-  onProgress?: (job: { status: string; progress_pct: number; current_stage: string }) => void,
-  intervalMs = 3000,
+  onProgress?: (job: { status: string; progress_pct: number; current_stage: string; error_message?: string | null }) => void,
+  intervalMs = 4000,
   timeoutMs = 3_600_000,
 ): Promise<unknown> {
   const start = Date.now();
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 10; // tolerate ~40s of network outage
+
   return new Promise((resolve, reject) => {
     const timer = setInterval(async () => {
       if (Date.now() - start > timeoutMs) {
@@ -392,6 +513,7 @@ export async function pollJobUntilDone(
       }
       try {
         const job = await getJob(jobId);
+        consecutiveErrors = 0; // reset on success
         onProgress?.(job);
         if (job.status === "done") {
           clearInterval(timer);
@@ -400,9 +522,14 @@ export async function pollJobUntilDone(
           clearInterval(timer);
           reject(new Error(job.error_message ?? "Job failed"));
         }
-      } catch (err) {
-        clearInterval(timer);
-        reject(err);
+      } catch {
+        // Transient network error — keep polling unless too many in a row
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          clearInterval(timer);
+          reject(new Error("Lost connection to server. Refresh the page to check status."));
+        }
+        // Otherwise silently retry
       }
     }, intervalMs);
   });
