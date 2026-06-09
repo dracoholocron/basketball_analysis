@@ -51,9 +51,11 @@ class HoopDetector:
         conf: float = 0.4,
         dummy: bool = False,
     ) -> None:
+        from configs.settings import settings as _s
         self._dummy = dummy or _DUMMY_MODE
         self._model = None
         self.conf = conf
+        self._device = _s.resolve_device()
 
         if not self._dummy:
             path = model_path or _find_model("yolo11_multiclass.pt") or _find_model("player_detector.pt")
@@ -112,14 +114,37 @@ class HoopDetector:
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
-    def _detect_yolo(self, frame: np.ndarray) -> Optional[list[float]]:
-        results = self._model.predict(frame, conf=self.conf, verbose=False)
-        if not results:
-            return None
-        det = results[0]
-        names = det.names
-        names_inv = {v.lower(): k for k, v in names.items()}
+    def detect_frames_streaming(
+        self, video_path: str, max_height: int = 720
+    ) -> list[Optional[list[float]]]:
+        """Detect hoop in every frame using batched iter_video_frames at max_height."""
+        if self._dummy:
+            return []
+        from utils.video_utils import iter_video_frames
+        from configs.settings import settings as _s
 
+        results: list[Optional[list[float]]] = []
+        batch: list = []
+        batch_size = _s.yolo_batch_size
+
+        def _flush(frames: list) -> None:
+            for r in self._model.predict(frames, conf=self.conf, verbose=False, device=self._device):
+                results.append(self._hoop_from_result(r))
+
+        for frame in iter_video_frames(video_path, max_height=max_height):
+            batch.append(frame)
+            if len(batch) == batch_size:
+                _flush(batch)
+                batch = []
+        if batch:
+            _flush(batch)
+
+        log.info("HoopDetector.detect_frames_streaming: %d frames (max_h=%d)", len(results), max_height)
+        return results
+
+    def _hoop_from_result(self, det) -> Optional[list[float]]:
+        """Extract best hoop bbox from a YOLO result object."""
+        names_inv = {v.lower(): k for k, v in det.names.items()}
         best_bbox = None
         best_conf = 0.0
         for hoop_name in _HOOP_CLASS_NAMES:
@@ -130,8 +155,13 @@ class HoopDetector:
                 if int(box.cls[0]) == cls_id and float(box.conf[0]) > best_conf:
                     best_conf = float(box.conf[0])
                     best_bbox = box.xyxy[0].tolist()
-
         return best_bbox
+
+    def _detect_yolo(self, frame: np.ndarray) -> Optional[list[float]]:
+        results = self._model.predict(frame, conf=self.conf, verbose=False)
+        if not results:
+            return None
+        return self._hoop_from_result(results[0])
 
     def _dummy_hoop(self, frame: np.ndarray) -> list[float]:
         h, w = frame.shape[:2]

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -18,7 +18,7 @@ from ..models.game import Game
 from ..models.job import Job, JobStatus, JobStage
 from ..models.video_asset import VideoAsset
 from ..models.user import User
-from ..schemas.game import GameCreate, GameList, GameRead
+from ..schemas.game import AnalysisOptions, GameCreate, GameList, GameRead
 from ..schemas.job import JobRead
 from ..services.storage import get_storage
 
@@ -72,6 +72,8 @@ async def create_game(
         court_width_m=payload.court_width_m,
         court_height_m=payload.court_height_m,
         is_half_court=payload.is_half_court,
+        home_team1_jersey=payload.home_team1_jersey,
+        away_team2_jersey=payload.away_team2_jersey,
     )
     db.add(game)
     await db.commit()
@@ -88,6 +90,31 @@ async def get_game(
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
+    return game
+
+
+class GameUpdate(BaseModel):
+    show_poses: Optional[bool] = None
+    court_level: Optional[str] = None
+    is_half_court: Optional[bool] = None
+    home_team1_jersey: Optional[str] = None
+    away_team2_jersey: Optional[str] = None
+
+
+@router.patch("/{game_id}", response_model=GameRead)
+async def update_game(
+    game_id: uuid.UUID,
+    payload: GameUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin", "coach")),
+):
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    for field, value in payload.model_dump(exclude_none=True).items():
+        setattr(game, field, value)
+    await db.commit()
+    await db.refresh(game)
     return game
 
 
@@ -137,6 +164,7 @@ async def upload_video(
 @router.post("/{game_id}/analyze", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_game(
     game_id: uuid.UUID,
+    opts: AnalysisOptions = Body(default_factory=AnalysisOptions),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("admin", "coach")),
 ):
@@ -177,6 +205,10 @@ async def analyze_game(
             court_width_m=game.court_width_m,
             court_height_m=game.court_height_m,
             is_half_court=game.is_half_court,
+            show_poses=game.show_poses,
+            team1_jersey=game.home_team1_jersey,
+            team2_jersey=game.away_team2_jersey,
+            pose_player_filter=opts.pose_player_filter,
         )
         job.celery_task_id = task.id
         await db.commit()

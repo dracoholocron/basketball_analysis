@@ -207,6 +207,10 @@ class EngineSettings(BaseSettings):
         default=8,
         description="Batch size for CLIP team assigner inference. Env: BA_CLIP_BATCH_SIZE",
     )
+    clip_sample_every: int = Field(
+        default=30,
+        description="Run CLIP inference every N frames per player; intermediate frames reuse last vote. Env: BA_CLIP_SAMPLE_EVERY",
+    )
     fps: float = Field(
         default=24.0,
         description="Video frame rate — overridden by actual video FPS when available",
@@ -216,6 +220,16 @@ class EngineSettings(BaseSettings):
     court_level: CourtLevel = Field(
         default=CourtLevel.NBA,
         description="Court profile level (nba|fiba_juvenil|primaria|mini_basket)",
+    )
+
+    # ── Streaming / chunked inference ─────────────────────────────────────────
+    chunk_size: int = Field(
+        default=500,
+        description=(
+            "Number of frames loaded into RAM at once during inference. "
+            "Keeps peak RAM at ~chunk_size × 2.76 MB instead of all_frames × 2.76 MB. "
+            "Set to 0 to disable chunking (legacy read_video path). Env: BA_CHUNK_SIZE"
+        ),
     )
 
     # ── Logging ────────────────────────────────────────────────────────────────

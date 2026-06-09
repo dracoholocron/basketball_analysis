@@ -6,6 +6,9 @@ torchvision>=0.22
 # Computer vision — headless only (no GUI deps conflict)
 opencv-python-headless>=4.9.0
 
+# ONNX Runtime with CUDA 12.x support (RTMPose pose estimation backend)
+onnxruntime-gpu>=1.19
+
 numpy>=1.24,<2.0
 pandas>=2.0
 Pillow>=10.0

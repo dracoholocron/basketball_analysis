@@ -26,6 +26,9 @@ class PlayerMetric(Base):
     possession_frames: Mapped[int] = mapped_column(Integer, default=0)
     passes_made: Mapped[int] = mapped_column(Integer, default=0)
     interceptions_made: Mapped[int] = mapped_column(Integer, default=0)
+    shots_attempted: Mapped[int] = mapped_column(Integer, default=0)
+    rebounds: Mapped[int] = mapped_column(Integer, default=0)
+    steals_cv: Mapped[int] = mapped_column(Integer, default=0)
 
     job: Mapped["Job"] = relationship(back_populates="player_metrics")
     player: Mapped["Player | None"] = relationship(back_populates="metrics")

@@ -17,6 +17,7 @@ class GameCreate(BaseModel):
     is_half_court: bool = False
     home_team1_jersey: str = "white shirt"
     away_team2_jersey: str = "dark blue shirt"
+    show_poses: bool = True
 
 
 class GameRead(BaseModel):
@@ -28,6 +29,9 @@ class GameRead(BaseModel):
     location: Optional[str]
     court_level: str
     is_half_court: bool
+    show_poses: bool
+    home_team1_jersey: str
+    away_team2_jersey: str
     home_score: Optional[int]
     away_score: Optional[int]
 
@@ -37,3 +41,11 @@ class GameRead(BaseModel):
 class GameList(BaseModel):
     items: list[GameRead]
     total: int
+
+
+class AnalysisOptions(BaseModel):
+    """Optional per-analysis parameters sent in the body of POST /games/{id}/analyze."""
+    pose_player_filter: Optional[list[int]] = Field(
+        default=None,
+        description="Track IDs to limit pose drawing to. None = draw all players.",
+    )

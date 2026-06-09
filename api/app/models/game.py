@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime, timezone
-from sqlalchemy import Date, DateTime, Float, ForeignKey, String
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..core.database import Base
 
@@ -26,6 +26,9 @@ class Game(Base):
     court_width_m: Mapped[float | None] = mapped_column(Float)
     court_height_m: Mapped[float | None] = mapped_column(Float)
     is_half_court: Mapped[bool] = mapped_column(default=False)
+    show_poses: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    home_team1_jersey: Mapped[str] = mapped_column(String(120), nullable=False, default="white shirt")
+    away_team2_jersey: Mapped[str] = mapped_column(String(120), nullable=False, default="dark blue shirt")
     home_score: Mapped[int | None] = mapped_column()
     away_score: Mapped[int | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(

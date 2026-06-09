@@ -48,15 +48,24 @@ async def get_game_metrics(
     t2_poss = sum(p.possession_frames for p in player_metrics if p.team_id == 2)
     total_poss = t1_poss + t2_poss or 1
 
+    t1 = [p for p in player_metrics if p.team_id == 1]
+    t2 = [p for p in player_metrics if p.team_id == 2]
+
     return GameMetrics(
         game_id=game_id,
         job_id=job.id,
         total_frames=total_frames,
         team1_possession_pct=round(100 * t1_poss / total_poss, 1),
         team2_possession_pct=round(100 * t2_poss / total_poss, 1),
-        team1_passes=sum(p.passes_made for p in player_metrics if p.team_id == 1),
-        team2_passes=sum(p.passes_made for p in player_metrics if p.team_id == 2),
-        team1_interceptions=sum(p.interceptions_made for p in player_metrics if p.team_id == 1),
-        team2_interceptions=sum(p.interceptions_made for p in player_metrics if p.team_id == 2),
+        team1_passes=sum(p.passes_made for p in t1),
+        team2_passes=sum(p.passes_made for p in t2),
+        team1_interceptions=sum(p.interceptions_made for p in t1),
+        team2_interceptions=sum(p.interceptions_made for p in t2),
+        team1_shots_attempted=sum(p.shots_attempted for p in t1),
+        team2_shots_attempted=sum(p.shots_attempted for p in t2),
+        team1_rebounds=sum(p.rebounds for p in t1),
+        team2_rebounds=sum(p.rebounds for p in t2),
+        team1_steals_cv=sum(p.steals_cv for p in t1),
+        team2_steals_cv=sum(p.steals_cv for p in t2),
         players=[PlayerMetricRead.model_validate(p) for p in player_metrics],
     )
