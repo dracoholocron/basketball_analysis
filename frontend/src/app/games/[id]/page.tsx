@@ -14,16 +14,17 @@ import {
   getLatestActiveJobForGame,
   getGameAnnotation,
   deleteJob,
+  updateGameSettings,
   api,
 } from "@/lib/api";
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000") + "/api/v1";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
 } from "recharts";
 import {
-  Activity, AlertCircle, CheckCircle2, Crosshair, Film, Loader2, Target, Upload, X, Zap,
+  Activity, AlertCircle, CheckCircle2, Crosshair, EyeOff, Film, Loader2,
+  Settings2, Target, Upload, X, Zap,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -90,11 +91,22 @@ export default function GameDetailPage() {
   const [annotationStatus, setAnnotationStatus] = useState<"none" | "partial" | "done">("none");
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [annotatedVideoUrl, setAnnotatedVideoUrl] = useState<string | null>(null);
+  const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
+  const [poseFilterInput, setPoseFilterInput] = useState("");
+  const [updatingPoses, setUpdatingPoses] = useState(false);
+  const [jerseyTeam1, setJerseyTeam1] = useState("");
+  const [jerseyTeam2, setJerseyTeam2] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const showPoses = (game?.show_poses as boolean) ?? true;
 
   useEffect(() => {
     if (!id) return;
-    getGame(id).then(setGame);
+    getGame(id).then(g => {
+      setGame(g);
+      setJerseyTeam1((g?.home_team1_jersey as string) ?? "white shirt");
+      setJerseyTeam2((g?.away_team2_jersey as string) ?? "dark blue shirt");
+    });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
   }, [id]);
@@ -192,13 +204,42 @@ export default function GameDetailPage() {
     }
   }
 
+  async function handleTogglePoses(value: boolean) {
+    if (!id) return;
+    setUpdatingPoses(true);
+    try {
+      const updated = await updateGameSettings(id, { show_poses: value });
+      setGame(updated);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setUpdatingPoses(false);
+    }
+  }
+
   async function handleAnalyze() {
     if (!id) return;
+    setShowAnalyzeModal(false);
+
+    const posePlayerFilter = poseFilterInput.trim()
+      ? poseFilterInput.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
+      : undefined;
+
+    // Persist any jersey changes before starting analysis
+    const t1 = jerseyTeam1.trim() || "white shirt";
+    const t2 = jerseyTeam2.trim() || "dark blue shirt";
+    if (t1 !== (game?.home_team1_jersey as string) || t2 !== (game?.away_team2_jersey as string)) {
+      try {
+        const updated = await updateGameSettings(id, { home_team1_jersey: t1, away_team2_jersey: t2 });
+        setGame(updated);
+      } catch { /* non-fatal */ }
+    }
+
     setAnalyzing(true);
     setHasActiveJob(true);
     setAnnotatedVideoUrl(null);
     try {
-      const job = await analyzeGame(id);
+      const job = await analyzeGame(id, { pose_player_filter: posePlayerFilter });
       setJobStatus({ status: job.status, progress_pct: 0, current_stage: job.current_stage, id: job.id });
       await pollJobUntilDone(job.id, (j) => {
         setJobStatus({ ...j, id: job.id });
@@ -233,8 +274,6 @@ export default function GameDetailPage() {
   const shotCount    = cvEvents.filter(e => e.event_type === "shot_attempt").length;
   const reboundCount = cvEvents.filter(e => e.event_type === "rebound").length;
   const stealCount   = cvEvents.filter(e => e.event_type === "steal").length;
-  const passCount    = cvEvents.filter(e => e.event_type === "pass").length;
-  const stealCvCount = cvEvents.filter(e => e.event_type === "steal").length;
 
   return (
     <AppShell>
@@ -307,9 +346,9 @@ export default function GameDetailPage() {
                 {/* Step 2: Analyze */}
                 <button
                   className="flex items-center gap-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium disabled:opacity-50"
-                  onClick={handleAnalyze}
+                  onClick={() => setShowAnalyzeModal(true)}
                   disabled={!videoReady || analyzing || hasActiveJob}
-                  title={!videoReady ? "Sube un video primero" : hasActiveJob ? "Análisis en progreso" : "Iniciar análisis"}
+                  title={!videoReady ? "Sube un video primero" : hasActiveJob ? "Análisis en progreso" : "Opciones de análisis"}
                 >
                   {analyzing ? <Loader2 size={14} className="animate-spin" /> : <Activity size={14} />}
                   {analyzing ? "Analizando…" : jobStatus?.status === "done" ? "Re-analizar" : "Analizar"}
@@ -468,6 +507,133 @@ export default function GameDetailPage() {
                   className="px-4 py-2 text-sm rounded-lg bg-red-600 hover:bg-red-500 text-white font-medium transition-colors"
                 >
                   {jobStatus?.status === "running" ? "Sí, cancelar" : "Descartar"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Analyze options modal */}
+        {showAnalyzeModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 max-w-md w-full mx-4 shadow-2xl space-y-5">
+              <div className="flex items-center gap-2">
+                <Settings2 size={18} className="text-blue-400" />
+                <h3 className="font-semibold text-white text-base">Opciones de análisis</h3>
+              </div>
+
+              {/* Jersey descriptions — critical for FashionCLIP team classification */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Camisetas de equipos</p>
+                <p className="text-xs text-slate-400">
+                  Describe el color/estilo de cada camiseta para que FashionCLIP clasifique correctamente los equipos.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Equipo 1 (local)</label>
+                    <input
+                      type="text"
+                      value={jerseyTeam1}
+                      onChange={e => setJerseyTeam1(e.target.value)}
+                      placeholder="ej: white shirt"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Equipo 2 (visitante)</label>
+                    <input
+                      type="text"
+                      value={jerseyTeam2}
+                      onChange={e => setJerseyTeam2(e.target.value)}
+                      placeholder="ej: dark blue shirt"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Pose skeleton toggle */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-white">Poses de jugadores</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Proyecta el esqueleto COCO-17 en el video de salida (añade ~6 min al análisis)
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleTogglePoses(!showPoses)}
+                    disabled={updatingPoses}
+                    className={clsx(
+                      "relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-60",
+                      showPoses ? "bg-blue-600" : "bg-slate-600"
+                    )}
+                    title={showPoses ? "Desactivar poses" : "Activar poses"}
+                  >
+                    <span
+                      className={clsx(
+                        "inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform",
+                        showPoses ? "translate-x-6" : "translate-x-1"
+                      )}
+                    />
+                  </button>
+                </div>
+                {updatingPoses && (
+                  <p className="text-xs text-slate-500 flex items-center gap-1">
+                    <Loader2 size={10} className="animate-spin" /> Guardando…
+                  </p>
+                )}
+              </div>
+
+              {/* Player filter input — only shown when poses are enabled */}
+              {showPoses && (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-white block">
+                    Filtrar poses por jugador <span className="text-slate-400 font-normal">(opcional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={poseFilterInput}
+                    onChange={e => setPoseFilterInput(e.target.value)}
+                    placeholder="Ej: 107, 182, 139"
+                    className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                  <p className="text-xs text-slate-400">
+                    IDs separados por coma. Déjalo vacío para mostrar poses de todos los jugadores.
+                    Los IDs de jugadores se muestran sobre cada jugador en el video anterior.
+                  </p>
+                  {poseFilterInput.trim() && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {poseFilterInput.split(",").map(s => s.trim()).filter(Boolean).map((id, i) => (
+                        <span key={i} className="px-2 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs font-mono">
+                          #{id}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!showPoses && (
+                <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-700/50 rounded-lg px-3 py-2">
+                  <EyeOff size={12} />
+                  El video de salida no incluirá esqueletos de poses.
+                </div>
+              )}
+
+              <div className="flex gap-3 justify-end pt-1">
+                <button
+                  onClick={() => setShowAnalyzeModal(false)}
+                  className="px-4 py-2 text-sm rounded-lg bg-slate-700 hover:bg-slate-600 text-white transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleAnalyze}
+                  className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition-colors"
+                >
+                  <Activity size={14} />
+                  Iniciar análisis
                 </button>
               </div>
             </div>

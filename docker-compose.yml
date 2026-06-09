@@ -118,10 +118,15 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       BA_DUMMY_MODELS: ${BA_DUMMY_MODELS:-false}
       BA_DEVICE: ${BA_DEVICE:-auto}
+      BA_CHUNK_SIZE: "3000"
+      BA_YOLO_BATCH_SIZE: "32"
+      BA_BALL_DETECTOR_CONF: "0.25"
+      BA_SPEED_MAX_KMH: "25"
       BA_PLAYER_DETECTOR_PATH: /app/engine/models/player_detector.pt
       BA_BALL_DETECTOR_PATH: /app/engine/models/ball_detector_model.pt
       BA_COURT_KEYPOINT_DETECTOR_PATH: /app/engine/models/court_keypoint_detector.pt
       BA_COURT_IMAGE_PATH: /app/engine/images/basketball_court.png
+      LD_LIBRARY_PATH: "/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cufft/lib:/opt/conda/lib/python3.11/site-packages/nvidia/curand/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusolver/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusparse/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/opt/conda/lib/python3.11/site-packages/nvidia/nvjitlink/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
       BA_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-basketball}:${POSTGRES_PASSWORD:-basketball}@db:5432/${POSTGRES_DB:-basketball}
       BA_REDIS_URL: redis://redis:6379/0
       BA_MINIO_ENDPOINT: minio:9000
@@ -131,6 +136,7 @@ services:
     volumes:
       - models_data:/app/engine/models     # persist downloaded .pt models
       - stubs_data:/app/engine/stubs
+      - hf_cache:/root/.cache/huggingface  # persist FashionCLIP + HF models
       - ./basketball_analysis/output_videos:/app/host_outputs:rw
     depends_on:
       db:
@@ -193,5 +199,6 @@ volumes:
   minio_data:
   models_data:
   stubs_data:
+  hf_cache:
   caddy_data:
   caddy_config:

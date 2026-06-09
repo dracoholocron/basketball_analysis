@@ -245,14 +245,22 @@ class TacticalViewConverter:
             yolo_src = np.array([kp_list[i] for i in valid_indices], dtype=np.float32)
             yolo_tgt = np.array([self.key_points[i] for i in valid_indices], dtype=np.float32)
 
-            # Blend with manual anchors when available (prepend so RANSAC keeps them)
-            if self._manual_src is not None and len(self._manual_src) >= 4:
-                if len(yolo_src) > 0:
-                    source_points = np.vstack([self._manual_src, yolo_src])
-                    target_points = np.vstack([self._manual_tgt, yolo_tgt])
-                else:
-                    source_points = self._manual_src
-                    target_points = self._manual_tgt
+            # Select source/target points for homography:
+            # ≥6 manual anchors → use ONLY manual (stable, no per-frame YOLO noise)
+            # 4-5 manual anchors → blend with YOLO
+            # <4 manual anchors → YOLO only
+            if self._manual_src is not None and len(self._manual_src) >= 6:
+                source_points = self._manual_src
+                target_points = self._manual_tgt
+            elif self._manual_src is not None and len(self._manual_src) >= 4:
+                source_points = (
+                    np.vstack([self._manual_src, yolo_src]) if len(yolo_src) > 0
+                    else self._manual_src
+                )
+                target_points = (
+                    np.vstack([self._manual_tgt, yolo_tgt]) if len(yolo_src) > 0
+                    else self._manual_tgt
+                )
             else:
                 source_points = yolo_src
                 target_points = yolo_tgt

@@ -61,9 +61,28 @@ export async function uploadVideo(gameId: string, file: File) {
   return data as { id: string; game_id: string; filename: string; file_size_bytes: number | null };
 }
 
+export interface AnalysisOptions {
+  pose_player_filter?: number[];
+}
+
 /** Start analysis of the already-uploaded video for a game. Returns a Job. */
-export async function analyzeGame(gameId: string) {
-  const { data } = await api.post(`/games/${gameId}/analyze`);
+export async function analyzeGame(gameId: string, opts: AnalysisOptions = {}) {
+  const { data } = await api.post(`/games/${gameId}/analyze`, opts);
+  return data;
+}
+
+/** Update game settings (show_poses, jerseys, court_level, etc.). */
+export async function updateGameSettings(
+  gameId: string,
+  payload: {
+    show_poses?: boolean;
+    court_level?: string;
+    is_half_court?: boolean;
+    home_team1_jersey?: string;
+    away_team2_jersey?: string;
+  }
+) {
+  const { data } = await api.patch(`/games/${gameId}`, payload);
   return data;
 }
 

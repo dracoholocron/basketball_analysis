@@ -76,27 +76,40 @@ class TeamAssigner:
         return frame[y1:mid_y, x1:x2]
 
     def _clip_team_probability(self, crop: np.ndarray) -> float:
+        """Run FashionCLIP on a single crop. Falls back to 0.5 on errors."""
+        results = self._clip_team_probabilities_batch([crop])
+        return results[0]
+
+    def _clip_team_probabilities_batch(self, crops: list[np.ndarray]) -> list[float]:
         """
-        Run FashionCLIP and return P(team_1).  Falls back to 0.5 on errors.
+        Batch CLIP inference: N crops → N P(team_1) values in one forward pass.
+
+        Skips empty crops (returns 0.5 for them) and processes the rest together,
+        which is ~N× faster than calling the model N times individually.
         """
-        if crop.size == 0:
-            return 0.5
+        result = [0.5] * len(crops)
+        valid_indices = [i for i, c in enumerate(crops) if c.size > 0]
+        if not valid_indices:
+            return result
         try:
-            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(rgb)
+            import torch
+            pil_images = [
+                Image.fromarray(cv2.cvtColor(crops[i], cv2.COLOR_BGR2RGB))
+                for i in valid_indices
+            ]
             classes = [self.team_1_class_name, self.team_2_class_name]
             inputs = self._processor(
-                text=classes, images=pil_img, return_tensors="pt", padding=True
+                text=classes, images=pil_images, return_tensors="pt", padding=True
             )
-            # Move inputs to same device as model
-            device = getattr(self, "_device", "cpu")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            outputs = self._model(**inputs)
-            probs = outputs.logits_per_image.softmax(dim=1)[0]
-            return float(probs[0].item())
+            inputs = {k: v.to(self._device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = self._model(**inputs)
+            probs = outputs.logits_per_image.softmax(dim=1)[:, 0].tolist()
+            for idx, p in zip(valid_indices, probs):
+                result[idx] = float(p)
         except Exception as exc:
-            logger.debug("CLIP error: %s", exc)
-            return 0.5
+            logger.debug("CLIP batch error: %s", exc)
+        return result
 
     def _hsv_hue_mean(self, crop: np.ndarray) -> float:
         """Return mean hue [0-180] of the jersey crop in HSV space."""
@@ -165,17 +178,17 @@ class TeamAssigner:
         player_tracks: list,
         read_from_stub: bool = False,
         stub_path: str | None = None,
-        clip_sample_every: int = 10,
+        clip_sample_every: int | None = None,
     ) -> list[dict[int, int]]:
         """
         Assign teams to all players across all frames with optional stub caching.
 
         Parameters
         ----------
-        clip_sample_every : int
+        clip_sample_every : int | None
             Run CLIP inference only every Nth frame for each player.
+            None uses settings.clip_sample_every (default 30).
             Intermediate frames reuse the last known vote result.
-            Default 10 = ~3x faster for 30fps video.
 
         Returns a list of dicts: [{player_id: team_id, …}, …] indexed by frame.
         """
@@ -184,10 +197,11 @@ class TeamAssigner:
             logger.debug("TeamAssigner: loaded from stub %s", stub_path)
             return cached
 
+        _sample_every = clip_sample_every if clip_sample_every is not None else settings.clip_sample_every
         self._load_model()
         player_assignment: list[dict[int, int]] = []
         total = len(player_tracks)
-        last_known: dict[int, int] = {}  # player_id -> last team assignment
+        last_known: dict[int, int] = {}
 
         for frame_num, player_track in enumerate(player_tracks):
             frame_assignments: dict[int, int] = {}
@@ -199,20 +213,94 @@ class TeamAssigner:
                     frame_num, total, frame_num / total * 100,
                 )
 
-            for player_id, track in player_track.items():
-                if frame_num % clip_sample_every == 0 or player_id not in last_known:
-                    # Run CLIP inference on sampled frames or first appearance
-                    team = self.get_player_team(
-                        video_frames[frame_num], track["bbox"], player_id
-                    )
-                    last_known[player_id] = team
-                else:
-                    # Reuse last known assignment (no CLIP call)
-                    team = last_known[player_id]
+            # Separate players needing inference from those reusing last vote
+            needs_inference: list[int] = []
+            for player_id in player_track:
+                if frame_num % _sample_every == 0 or player_id not in last_known:
+                    needs_inference.append(player_id)
 
-                frame_assignments[player_id] = team
+            if needs_inference:
+                # Batch all crops for this frame into one forward pass
+                crops = [
+                    self._jersey_crop(video_frames[frame_num], player_track[pid]["bbox"])
+                    for pid in needs_inference
+                ]
+                probs = self._clip_team_probabilities_batch(crops)
+                for player_id, p_team1 in zip(needs_inference, probs):
+                    hue = self._hsv_hue_mean(self._jersey_crop(video_frames[frame_num], player_track[player_id]["bbox"])) if 0.35 <= p_team1 <= 0.65 else 90.0
+                    obs = 1 if p_team1 > 0.65 else (2 if p_team1 < 0.35 else (1 if hue < 90 else 2))
+                    team = self._vote(player_id, obs)
+                    last_known[player_id] = team
+
+            for player_id, track in player_track.items():
+                frame_assignments[player_id] = last_known.get(player_id, 1)
             player_assignment.append(frame_assignments)
 
         logger.info("TeamAssigner: done — %d frames processed", total)
+        save_stub(stub_path, player_assignment)
+        return player_assignment
+
+    def get_player_teams_streaming(
+        self,
+        video_path: str,
+        player_tracks: list[dict],
+        chunk_size: int,
+        read_from_stub: bool = False,
+        stub_path: str | None = None,
+        clip_sample_every: int | None = None,
+    ) -> list[dict[int, int]]:
+        """
+        Assign teams across all frames in memory-efficient chunks.
+
+        Re-reads the video chunk by chunk so only `chunk_size` frames are in RAM
+        at once. Vote state (_vote_history, _stable_assignment) persists on self
+        between chunks automatically, maintaining identity continuity.
+        """
+        cached = read_stub(read_from_stub, stub_path)
+        if cached is not None and len(cached) == len(player_tracks):
+            logger.debug("TeamAssigner: loaded from stub %s", stub_path)
+            return cached
+
+        _sample_every = clip_sample_every if clip_sample_every is not None else settings.clip_sample_every
+        self._load_model()
+        player_assignment: list[dict[int, int]] = []
+        last_known: dict[int, int] = {}
+        total = len(player_tracks)
+
+        from utils.video_utils import iter_video_frames
+
+        for frame_num, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+            if frame_num >= total:
+                break
+
+            player_track = player_tracks[frame_num]
+            frame_assignments: dict[int, int] = {}
+
+            if frame_num % 500 == 0:
+                logger.info(
+                    "TeamAssigner (streaming): frame %d / %d (%.0f%%)",
+                    frame_num, total, frame_num / total * 100,
+                )
+
+            needs_inference = [
+                pid for pid in player_track
+                if frame_num % _sample_every == 0 or pid not in last_known
+            ]
+            if needs_inference:
+                crops = [
+                    self._jersey_crop(frame, player_track[pid]["bbox"])
+                    for pid in needs_inference
+                ]
+                probs = self._clip_team_probabilities_batch(crops)
+                for pid, p_team1 in zip(needs_inference, probs):
+                    hue = self._hsv_hue_mean(self._jersey_crop(frame, player_track[pid]["bbox"])) if 0.35 <= p_team1 <= 0.65 else 90.0
+                    obs = 1 if p_team1 > 0.65 else (2 if p_team1 < 0.35 else (1 if hue < 90 else 2))
+                    last_known[pid] = self._vote(pid, obs)
+
+            for player_id in player_track:
+                frame_assignments[player_id] = last_known.get(player_id, 1)
+            player_assignment.append(frame_assignments)
+
+        logger.info("TeamAssigner (streaming): done — %d frames processed", total)
         save_stub(stub_path, player_assignment)
         return player_assignment

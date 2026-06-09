@@ -65,6 +65,8 @@ def run_analysis(
     is_half_court: bool = False,
     team1_jersey: str = "white shirt",
     team2_jersey: str = "dark blue shirt",
+    show_poses: bool = True,
+    pose_player_filter: list[int] | None = None,
 ):
     """Run the full analysis pipeline for one game video."""
     engine = _sync_engine()
@@ -156,6 +158,9 @@ def run_analysis(
             "ball_tracking":     ("ball_tracking",    30),
             "keypoint_detection":("keypoint_detection",45),
             "team_assignment":   ("team_assignment",  55),
+            "pose_estimation":   ("pose_estimation",  62),
+            "hoop_detection":    ("hoop_detection",   63),
+            "event_detection":   ("event_detection",  66),
             "ball_acquisition":  ("ball_acquisition", 65),
             "pass_detection":    ("pass_detection",   68),
             "tactical_view":     ("tactical_view",    72),
@@ -183,6 +188,8 @@ def run_analysis(
                 manual_landmarks=manual_landmarks,
                 camera_motion=camera_motion,
                 on_progress=_pipeline_progress,
+                show_poses=show_poses,
+                pose_player_filter=pose_player_filter,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -309,6 +316,18 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
             if interceptor_id != -1:
                 interceptions_made[int(interceptor_id)] += 1
 
+    # Per-player: shots / rebounds / steals from pose-based event detectors
+    from collections import defaultdict as _dd
+    shots_attempted: dict[int, int] = _dd(int)
+    rebounds_made: dict[int, int] = _dd(int)
+    steals_cv_made: dict[int, int] = _dd(int)
+    for ev in metrics.get("shot_events", []):
+        shots_attempted[int(ev["track_id"])] += 1
+    for ev in metrics.get("rebound_events", []):
+        rebounds_made[int(ev["track_id"])] += 1
+    for ev in metrics.get("steal_events", []):
+        steals_cv_made[int(ev["track_id"])] += 1
+
     # Generate display labels: sort by first frame of appearance → #1, #2, …
     ordered_tracks = sorted(
         all_track_ids,
@@ -336,6 +355,9 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
             possession_frames=int(possession_frames.get(tid, 0)),
             passes_made=int(passes_made.get(tid, 0)),
             interceptions_made=int(interceptions_made.get(tid, 0)),
+            shots_attempted=int(shots_attempted.get(tid, 0)),
+            rebounds=int(rebounds_made.get(tid, 0)),
+            steals_cv=int(steals_cv_made.get(tid, 0)),
         )
         player_rows.append(row)
 
@@ -421,6 +443,36 @@ def _build_cv_events(metrics: dict) -> list[dict]:
             "team_id": int(team_id),
             "player_track_id": interceptor_id,
             "description": f"Robo / pérdida — equipo {team_id + 1}",
+        })
+
+    # Shot attempt events (pose-based: wrist elevated + ball near wrist)
+    for ev in metrics.get("shot_events", []):
+        events.append({
+            "event_type": "shot_attempt",
+            "frame": int(ev["frame"]),
+            "time_s": frame_to_s(ev["frame"]),
+            "player_track_id": int(ev["track_id"]),
+            "description": f"Intento de tiro — jugador {ev['track_id']}",
+        })
+
+    # Rebound events (pose-based: ball descending then reversing + player proximity)
+    for ev in metrics.get("rebound_events", []):
+        events.append({
+            "event_type": "rebound",
+            "frame": int(ev["frame"]),
+            "time_s": frame_to_s(ev["frame"]),
+            "player_track_id": int(ev["track_id"]),
+            "description": f"Rebote — jugador {ev['track_id']}",
+        })
+
+    # Steal events (pose-based: wrist proximity + possession change)
+    for ev in metrics.get("steal_events", []):
+        events.append({
+            "event_type": "steal_pose",
+            "frame": int(ev["frame"]),
+            "time_s": frame_to_s(ev["frame"]),
+            "player_track_id": int(ev["track_id"]),
+            "description": f"Robo — jugador {ev['track_id']} de jugador {ev.get('from_track_id', '?')}",
         })
 
     # Sort by frame

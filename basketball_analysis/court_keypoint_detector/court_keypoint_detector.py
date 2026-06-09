@@ -51,5 +51,40 @@ class CourtKeypointDetector:
                 court_keypoints.append(detection.keypoints)
 
         save_stub(stub_path, court_keypoints)
-        
+
         return court_keypoints
+
+    def get_court_keypoints_streaming(
+        self, video_path: str, chunk_size: int, max_height: int = 720
+    ) -> list:
+        """
+        Detect court keypoints over the full video using frame-by-frame iteration.
+
+        Reads frames via iter_video_frames (max_height=720 by default) so that
+        keypoint coordinates are always in the same 720p space as the draw pass.
+        """
+        from utils.video_utils import iter_video_frames
+
+        keypoints = []
+        batch: list = []
+        batch_size = settings.yolo_batch_size
+
+        def _flush(frames: list) -> None:
+            for r in self.model.predict(
+                frames, conf=0.5, verbose=False, device=self._device
+            ):
+                keypoints.append(r.keypoints)
+
+        for frame in iter_video_frames(video_path, max_height=max_height):
+            batch.append(frame)
+            if len(batch) == batch_size:
+                _flush(batch)
+                batch = []
+        if batch:
+            _flush(batch)
+
+        logger.info(
+            "CourtKeypointDetector.get_court_keypoints_streaming: %d frames (max_h=%d)",
+            len(keypoints), max_height,
+        )
+        return keypoints

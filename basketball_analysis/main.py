@@ -2,7 +2,8 @@ import os
 import argparse
 import logging
 
-from utils import read_video, save_video, get_video_properties, CourtModeDetector
+from utils import read_video, save_video, iter_video_frames, get_video_properties, CourtModeDetector
+from utils import read_stub, save_stub
 from trackers import PlayerTracker, BallTracker
 from team_assigner import TeamAssigner
 from court_keypoint_detector import CourtKeypointDetector
@@ -19,6 +20,7 @@ from drawers import (
     PassInterceptionDrawer,
     TacticalViewDrawer,
     SpeedAndDistanceDrawer,
+    PoseDrawer,
 )
 from configs import (
     STUBS_DEFAULT_PATH,
@@ -85,7 +87,7 @@ def run_pipeline(
     use_stubs: bool = True,
     team1_jersey: str = "white shirt",
     team2_jersey: str = "dark blue shirt",
-    court_image_path: str = "./images/basketball_court.png",
+    court_image_path: str | None = None,
     player_detector_path: str | None = None,
     ball_detector_path: str | None = None,
     court_kp_detector_path: str = COURT_KEYPOINT_DETECTOR_PATH,
@@ -93,6 +95,9 @@ def run_pipeline(
     manual_landmarks: list[dict] | None = None,
     camera_motion: str = "static",
     on_progress=None,
+    chunk_size: int | None = None,
+    show_poses: bool = True,
+    pose_player_filter: list[int] | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -106,13 +111,25 @@ def run_pipeline(
     on_progress : callable, optional
         Called as on_progress(stage: str, pct: int) at key milestones.
         stage matches JobStage enum values (e.g. "player_tracking").
+    chunk_size : int | None
+        Frames loaded into RAM per chunk during inference. None → use
+        BA_CHUNK_SIZE env var (default 500). Set to 0 for legacy all-at-once
+        path (requires enough RAM for the full video).
     """
+    from configs.settings import settings as _settings
+
+    _court_image_path = court_image_path or _settings.court_image_path
+
     def _progress(stage: str, pct: int) -> None:
         if on_progress:
             try:
                 on_progress(stage, pct)
             except Exception:
                 pass
+
+    # Resolve chunk_size: explicit arg > env var > default 500
+    _chunk_size: int = chunk_size if chunk_size is not None else _settings.chunk_size
+
     # Resolve model paths: prefer YOLO11 multi-class model when available
     _player_path = player_detector_path or _resolve_detector_path(
         MULTICLASS_DETECTOR_PATH, PLAYER_DETECTOR_PATH
@@ -123,55 +140,244 @@ def run_pipeline(
     logger.info("Player detector: %s", _player_path)
     logger.info("Ball detector:   %s", _ball_path)
 
-    logger.info("Reading video: %s", input_video)
+    # Read video metadata upfront so both paths have fps + dimensions
     _progress("reading_video", 8)
-    video_frames = read_video(input_video)
-    logger.info("Loaded %d frames", len(video_frames))
-    frame_width = video_frames[0].shape[1] if video_frames else 1280
+    try:
+        _vid_props = get_video_properties(input_video)
+        actual_fps = _vid_props["fps"] or 24.0
+        frame_width = _vid_props["width"] or 1280
+        _total_frames_hint = _vid_props["total_frames"]
+    except Exception:
+        actual_fps = 24.0
+        frame_width = 1280
+        _total_frames_hint = 0
 
     player_tracker = PlayerTracker(_player_path)
     ball_tracker = BallTracker(_ball_path)
     court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path)
 
-    _progress("player_tracking", 12)
-    player_tracks = player_tracker.get_object_tracks(
-        video_frames,
-        read_from_stub=use_stubs,
-        stub_path=os.path.join(stub_path, "player_track_stubs.pkl"),
-    )
-    logger.info("Player tracks done")
+    _player_stub = os.path.join(stub_path, "player_track_stubs.pkl")
+    _ball_stub = os.path.join(stub_path, "ball_track_stubs.pkl")
+    _court_stub = os.path.join(stub_path, "court_key_points_stub.pkl")
+    _assign_stub = os.path.join(stub_path, "player_assignment_stub.pkl")
 
-    _progress("ball_tracking", 30)
-    ball_tracks = ball_tracker.get_object_tracks(
-        video_frames,
-        read_from_stub=use_stubs,
-        stub_path=os.path.join(stub_path, "ball_track_stubs.pkl"),
-    )
-    logger.info("Ball tracks done")
+    if _chunk_size > 0:
+        # ── Chunked inference path (O(chunk_size) peak RAM) ─────────────────
+        logger.info(
+            "Chunked inference mode: chunk_size=%d (~%.0f MB/chunk at 720p)",
+            _chunk_size,
+            _chunk_size * 2.76,
+        )
 
-    _progress("keypoint_detection", 45)
-    court_keypoints_per_frame = court_keypoint_detector.get_court_keypoints(
-        video_frames,
-        read_from_stub=use_stubs,
-        stub_path=os.path.join(stub_path, "court_key_points_stub.pkl"),
-    )
-    logger.info("Court keypoints done")
+        _progress("player_tracking", 12)
+        _ref_stub = os.path.join(stub_path, "referee_tracks_stub.pkl")
+        player_tracks = read_stub(use_stubs, _player_stub)
+        referee_tracks: list = read_stub(use_stubs, _ref_stub) or []
+        if player_tracks is None:
+            sv_player = player_tracker.detect_frames_streaming(input_video, _chunk_size)
+            player_tracks = player_tracker.build_tracks_from_sv_detections(sv_player)
+            if not referee_tracks:
+                referee_tracks = player_tracker.build_referee_tracks_from_sv_detections(sv_player)
+                save_stub(_ref_stub, referee_tracks)
+            del sv_player
+            save_stub(_player_stub, player_tracks)
+        logger.info(
+            "Player tracks done (%d frames, %d referee detections)",
+            len(player_tracks), sum(len(f) for f in referee_tracks),
+        )
 
-    ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
-    ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+        _progress("ball_tracking", 30)
+        ball_tracks = read_stub(use_stubs, _ball_stub)
+        if ball_tracks is None:
+            sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
+            ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
+            del sv_ball
+            save_stub(_ball_stub, ball_tracks)
+        logger.info("Ball tracks done (%d frames)", len(ball_tracks))
 
-    _progress("team_assignment", 55)
-    team_assigner = TeamAssigner(
-        team_1_class_name=team1_jersey,
-        team_2_class_name=team2_jersey,
+        _progress("keypoint_detection", 45)
+        court_keypoints_per_frame = read_stub(use_stubs, _court_stub)
+        if court_keypoints_per_frame is None:
+            court_keypoints_per_frame = court_keypoint_detector.get_court_keypoints_streaming(
+                input_video, _chunk_size
+            )
+            save_stub(_court_stub, court_keypoints_per_frame)
+        logger.info("Court keypoints done (%d frames)", len(court_keypoints_per_frame))
+
+        _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
+        if _missing_before_sahi > 0:
+            ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
+        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+
+        _progress("team_assignment", 55)
+        team_assigner = TeamAssigner(
+            team_1_class_name=team1_jersey,
+            team_2_class_name=team2_jersey,
+        )
+        player_assignment = team_assigner.get_player_teams_streaming(
+            input_video,
+            player_tracks,
+            _chunk_size,
+            read_from_stub=use_stubs,
+            stub_path=_assign_stub,
+        )
+        logger.info("Team assignment done")
+
+        _progress("pose_estimation", 62)
+        if show_poses:
+            _pose_stub = os.path.join(stub_path, "pose_sequence_stub.pkl")
+            pose_sequence = read_stub(use_stubs, _pose_stub)
+            if pose_sequence is None:
+                try:
+                    from pose_estimator import PoseEstimator
+                    _pe = PoseEstimator()
+                    logger.info("Running pose estimation (backend=%s)…", _pe._backend)
+                    pose_sequence = _pe.estimate_sequence_streaming(
+                        input_video, player_tracks, _chunk_size
+                    )
+                    save_stub(_pose_stub, pose_sequence)
+                except Exception as exc:
+                    logger.warning("PoseEstimator failed: %s — skipping pose", exc)
+                    pose_sequence = [{} for _ in range(len(player_tracks))]
+            logger.info("Pose estimation done (%d frames)", len(pose_sequence))
+        else:
+            logger.info("Pose estimation skipped (show_poses=False)")
+            pose_sequence = [{} for _ in range(len(player_tracks))]
+
+        total_frames = len(player_tracks)  # actual frame count after loading
+
+    else:
+        # ── Legacy all-at-once path (small videos or when BA_CHUNK_SIZE=0) ──
+        logger.info("Legacy inference mode: loading all frames into RAM")
+        video_frames = read_video(input_video)
+        logger.info("Loaded %d frames", len(video_frames))
+        frame_width = video_frames[0].shape[1] if video_frames else frame_width
+
+        _progress("player_tracking", 12)
+        _ref_stub = os.path.join(stub_path, "referee_tracks_stub.pkl")
+        referee_tracks: list = read_stub(use_stubs, _ref_stub) or []
+        player_tracks = player_tracker.get_object_tracks(
+            video_frames,
+            read_from_stub=use_stubs,
+            stub_path=_player_stub,
+        )
+        logger.info("Player tracks done")
+
+        _progress("ball_tracking", 30)
+        ball_tracks = ball_tracker.get_object_tracks(
+            video_frames,
+            read_from_stub=use_stubs,
+            stub_path=_ball_stub,
+        )
+        logger.info("Ball tracks done")
+
+        _progress("keypoint_detection", 45)
+        court_keypoints_per_frame = court_keypoint_detector.get_court_keypoints(
+            video_frames,
+            read_from_stub=use_stubs,
+            stub_path=_court_stub,
+        )
+        logger.info("Court keypoints done")
+
+        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+
+        _progress("team_assignment", 55)
+        team_assigner = TeamAssigner(
+            team_1_class_name=team1_jersey,
+            team_2_class_name=team2_jersey,
+        )
+        player_assignment = team_assigner.get_player_teams_across_frames(
+            video_frames,
+            player_tracks,
+            read_from_stub=use_stubs,
+            stub_path=_assign_stub,
+        )
+        logger.info("Team assignment done")
+
+        _progress("pose_estimation", 62)
+        if show_poses:
+            _pose_stub = os.path.join(stub_path, "pose_sequence_stub.pkl")
+            pose_sequence = read_stub(use_stubs, _pose_stub)
+            if pose_sequence is None:
+                try:
+                    from pose_estimator import PoseEstimator
+                    _pe = PoseEstimator()
+                    logger.info("Running pose estimation (backend=%s)…", _pe._backend)
+                    pose_sequence = _pe.estimate_sequence(video_frames, player_tracks)
+                    save_stub(_pose_stub, pose_sequence)
+                except Exception as exc:
+                    logger.warning("PoseEstimator failed: %s — skipping pose", exc)
+                    pose_sequence = [{} for _ in range(len(video_frames))]
+            logger.info("Pose estimation done (%d frames)", len(pose_sequence))
+        else:
+            logger.info("Pose estimation skipped (show_poses=False)")
+            pose_sequence = [{} for _ in range(len(video_frames))]
+
+        total_frames = len(video_frames)  # actual frame count after loading
+        del video_frames  # free before draw pass
+
+    # ── Hoop Detection ──────────────────────────────────────────────────────────
+    _progress("hoop_detection", 63)
+    _hoop_stub = os.path.join(stub_path, "hoop_tracks_stub.pkl")
+    hoop_tracks: list = read_stub(use_stubs, _hoop_stub) or []
+    if not hoop_tracks:
+        try:
+            from hoop_detector import HoopDetector
+            _hd = HoopDetector()
+            logger.info("Running hoop detection…")
+            hoop_tracks = _hd.detect_frames_streaming(input_video)
+            hoop_tracks = (hoop_tracks + [None] * total_frames)[:total_frames]
+            save_stub(_hoop_stub, hoop_tracks)
+        except Exception as exc:
+            logger.warning("HoopDetector failed: %s — skipping", exc)
+            hoop_tracks = [None] * total_frames
+    logger.info(
+        "Hoop detection done (%d frames, %d with hoop)",
+        len(hoop_tracks), sum(1 for h in hoop_tracks if h is not None),
     )
-    player_assignment = team_assigner.get_player_teams_across_frames(
-        video_frames,
-        player_tracks,
-        read_from_stub=use_stubs,
-        stub_path=os.path.join(stub_path, "player_assignment_stub.pkl"),
+
+    # ── CV Event Detection (shot, rebound, steal) ───────────────────────────────
+    _progress("event_detection", 66)
+    _event_stub = os.path.join(stub_path, "cv_events_stub.pkl")
+    _ev_cached = read_stub(use_stubs, _event_stub)
+    if _ev_cached is not None:
+        shot_events = _ev_cached.get("shot_events", [])
+        rebound_events = _ev_cached.get("rebound_events", [])
+        steal_events = _ev_cached.get("steal_events", [])
+    else:
+        shot_events: list = []
+        rebound_events: list = []
+        steal_events: list = []
+        try:
+            from event_detector import ShotDetector, ReboundDetector, StealTurnoverDetector
+            shot_events = ShotDetector().process_sequence(pose_sequence, ball_tracks)
+            rebound_events = ReboundDetector().process_sequence(
+                pose_sequence, ball_tracks, player_tracks
+            )
+            steal_events = StealTurnoverDetector().process_sequence(pose_sequence, ball_tracks)
+            save_stub(_event_stub, {
+                "shot_events": shot_events,
+                "rebound_events": rebound_events,
+                "steal_events": steal_events,
+            })
+        except Exception as exc:
+            logger.warning("Event detection failed: %s — skipping", exc)
+    logger.info(
+        "CV events: %d shots, %d rebounds, %d steals",
+        len(shot_events), len(rebound_events), len(steal_events),
     )
-    logger.info("Team assignment done")
+
+    # ── DualResolution event windows ────────────────────────────────────────────
+    try:
+        from dual_resolution import DualResolutionPipeline
+        _drp = DualResolutionPipeline()
+        event_windows = _drp.find_event_windows(ball_tracks, player_tracks)
+        logger.info("DualRes: %d high-action event windows identified", len(event_windows))
+    except Exception as exc:
+        logger.warning("DualResolutionPipeline failed: %s — skipping", exc)
+        event_windows = []
 
     _progress("ball_acquisition", 65)
     ball_aquisition_detector = BallAquisitionDetector(frame_width=frame_width)
@@ -201,7 +407,7 @@ def run_pipeline(
     profile = court_profile or CourtProfile(CourtLevel.NBA)
 
     tactical_view_converter = TacticalViewConverter(
-        court_image_path=court_image_path,
+        court_image_path=_court_image_path,
         court_profile=profile,
         manual_landmarks=manual_landmarks,
         camera_motion=camera_motion,
@@ -215,13 +421,6 @@ def run_pipeline(
         )
     )
 
-    # Read actual FPS from the video
-    try:
-        vid_props = get_video_properties(input_video)
-        actual_fps = vid_props["fps"] or 24.0
-    except Exception:
-        actual_fps = 24.0
-
     speed_and_distance_calculator = SpeedAndDistanceCalculator(
         tactical_view_converter.width,
         tactical_view_converter.height,
@@ -233,8 +432,8 @@ def run_pipeline(
 
     if is_half_court:
         # Disable global speed/distance in half-court mode
-        player_distances_per_frame = [{} for _ in range(len(video_frames))]
-        player_speed_per_frame = [{} for _ in range(len(video_frames))]
+        player_distances_per_frame = [{} for _ in range(total_frames)]
+        player_speed_per_frame = [{} for _ in range(total_frames)]
     else:
         player_distances_per_frame = speed_and_distance_calculator.calculate_distance(
             tactical_player_positions
@@ -245,53 +444,125 @@ def run_pipeline(
     logger.info("Speed/distance done")
 
     _progress("drawing", 78)
-    player_tracks_drawer = PlayerTracksDrawer()
-    ball_tracks_drawer = BallTracksDrawer()
-    court_keypoint_drawer = CourtKeypointDrawer()
-    team_ball_control_drawer = TeamBallControlDrawer()
-    frame_number_drawer = FrameNumberDrawer()
+    player_tracks_drawer      = PlayerTracksDrawer()
+    pose_drawer               = PoseDrawer(player_filter=pose_player_filter)
+    ball_tracks_drawer        = BallTracksDrawer()
+    court_keypoint_drawer     = CourtKeypointDrawer(
+        manual_src=tactical_view_converter._manual_src
+    )
+    team_ball_control_drawer  = TeamBallControlDrawer()
+    frame_number_drawer       = FrameNumberDrawer()
     pass_and_interceptions_drawer = PassInterceptionDrawer()
-    tactical_view_drawer = TacticalViewDrawer()
+    tactical_view_drawer      = TacticalViewDrawer()
     speed_and_distance_drawer = SpeedAndDistanceDrawer()
 
-    # The first drawer creates output_video_frames from video_frames.
-    # We delete video_frames immediately after so only ONE full frame list exists at a time.
-    total_frames = len(video_frames)  # save count before deleting
-    output_video_frames = player_tracks_drawer.draw(
-        video_frames, player_tracks, player_assignment, ball_aquisition
-    )
-    del video_frames  # free ~5-10 GB before continuing with remaining drawers
-
-    output_video_frames = ball_tracks_drawer.draw(output_video_frames, ball_tracks)
-    output_video_frames = court_keypoint_drawer.draw(
-        output_video_frames, court_keypoints_per_frame
-    )
-    output_video_frames = frame_number_drawer.draw(output_video_frames)
-    output_video_frames = team_ball_control_drawer.draw(
-        output_video_frames, player_assignment, ball_aquisition
-    )
-    output_video_frames = pass_and_interceptions_drawer.draw(
-        output_video_frames, passes, interceptions
-    )
-    output_video_frames = speed_and_distance_drawer.draw(
-        output_video_frames,
-        player_tracks,
-        player_distances_per_frame,
-        player_speed_per_frame,
-    )
-    output_video_frames = tactical_view_drawer.draw(
-        output_video_frames,
-        tactical_view_converter.court_image_path,
-        tactical_view_converter.width,
-        tactical_view_converter.height,
-        tactical_view_converter.key_points,
-        tactical_player_positions,
-        player_assignment,
-        ball_aquisition,
+    # Pre-compute team_ball_control array (cheap — just ints, no images)
+    team_ball_control = team_ball_control_drawer.get_team_ball_control(
+        player_assignment, ball_aquisition
     )
 
-    save_video(output_video_frames, output_video, fps=actual_fps)
-    del output_video_frames  # free memory before uploading/persisting
+    # Pre-load court image once so tactical drawer doesn't re-read it per frame
+    import numpy as _np
+    import cv2 as _cv2
+    _court_path = tactical_view_converter.court_image_path
+    _tac_w = tactical_view_converter.width
+    _tac_h = tactical_view_converter.height
+    court_image_loaded = _cv2.imread(_court_path) if _court_path else None
+    if court_image_loaded is None or court_image_loaded.size == 0:
+        court_image_loaded = _np.zeros((_tac_h, _tac_w, 3), dtype=_np.uint8)
+        court_image_loaded[:] = (40, 80, 40)
+    else:
+        court_image_loaded = _cv2.resize(court_image_loaded, (_tac_w, _tac_h))
+
+    # ── Streaming draw pass ──────────────────────────────────────────────────
+    # Re-read the source video one frame at a time — no large buffer in memory.
+
+    import shutil as _shutil
+    import subprocess as _subprocess
+    _is_mp4 = output_video.lower().endswith(".mp4")
+    _use_ffmpeg = _is_mp4 and bool(_shutil.which("ffmpeg"))
+    _tmp_video = output_video + ".raw.mp4" if _use_ffmpeg else None
+
+    # Determine output frame size from first frame (after potential downscaling)
+    _first_frame = None
+    for _f in iter_video_frames(input_video):
+        if _f.shape[0] > 720:
+            _scale = 720 / _f.shape[0]
+            _f = _cv2.resize(_f, (int(_f.shape[1] * _scale), 720), interpolation=_cv2.INTER_AREA)
+        _first_frame = _f
+        break
+
+    if _first_frame is None:
+        raise RuntimeError("Could not read any frame from source video for drawing")
+
+    _out_h, _out_w = _first_frame.shape[:2]
+    _fourcc = _cv2.VideoWriter_fourcc(*"mp4v")
+    _writer_path = _tmp_video if _use_ffmpeg else output_video
+    _writer = _cv2.VideoWriter(_writer_path, _fourcc, actual_fps, (_out_w, _out_h))
+
+    _streaming_distances: dict = {}  # accumulated for SpeedAndDistanceDrawer
+
+    for _frame_idx, _frame in enumerate(iter_video_frames(input_video)):
+        if _frame_idx >= total_frames:
+            break
+
+        # Apply same downscaling as read_video
+        if _frame.shape[0] > 720:
+            _scale = 720 / _frame.shape[0]
+            _frame = _cv2.resize(
+                _frame, (int(_frame.shape[1] * _scale), 720),
+                interpolation=_cv2.INTER_AREA,
+            )
+
+        # Apply all drawers in sequence (each modifies a single frame)
+        _frame = player_tracks_drawer.draw_frame(
+            _frame, _frame_idx, player_tracks, player_assignment, ball_aquisition
+        )
+        if show_poses:
+            _frame = pose_drawer.draw_frame(_frame, _frame_idx, pose_sequence)
+        _frame = ball_tracks_drawer.draw_frame(_frame, _frame_idx, ball_tracks)
+        _frame = court_keypoint_drawer.draw_frame(_frame, _frame_idx, court_keypoints_per_frame)
+        _frame = frame_number_drawer.draw_frame(_frame, _frame_idx)
+        _frame = team_ball_control_drawer.draw_frame(_frame, _frame_idx, team_ball_control)
+        _frame = pass_and_interceptions_drawer.draw_frame(
+            _frame, _frame_idx, passes, interceptions
+        )
+        _frame = speed_and_distance_drawer.draw_frame(
+            _frame, _frame_idx,
+            player_tracks, player_distances_per_frame, player_speed_per_frame,
+            _streaming_distances,
+        )
+        _frame = tactical_view_drawer.draw_frame(
+            _frame, _frame_idx,
+            court_image_loaded, _tac_w, _tac_h,
+            tactical_view_converter.key_points,
+            tactical_player_positions,
+            player_assignment,
+            ball_aquisition,
+        )
+
+        _writer.write(_frame)
+
+    _writer.release()
+    logger.info("Streaming draw complete: %d frames written", _frame_idx + 1)
+
+    # Re-encode to H.264 for browser compatibility
+    if _use_ffmpeg and _tmp_video and os.path.exists(_tmp_video):
+        _cmd = [
+            "ffmpeg", "-y", "-i", _tmp_video,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-movflags", "+faststart",
+            output_video,
+        ]
+        _result = _subprocess.run(_cmd, capture_output=True)
+        try:
+            os.remove(_tmp_video)
+        except OSError:
+            pass
+        if _result.returncode != 0:
+            logger.warning("ffmpeg re-encode failed: %s", _result.stderr.decode())
+            if os.path.exists(_tmp_video):
+                os.rename(_tmp_video, output_video)
     logger.info("Saved annotated video to %s", output_video)
 
     # Build summary metrics
@@ -356,6 +627,16 @@ def run_pipeline(
         "interceptions": interceptions,               # list[int] — team_id that intercepted, -1 if none
         "fps": actual_fps,
         "is_half_court": is_half_court,
+        # CV event lists from pose-based detectors
+        "shot_events": shot_events,
+        "rebound_events": rebound_events,
+        "steal_events": steal_events,
+        # Per-frame hoop bbox (or None when not detected)
+        "hoop_tracks": hoop_tracks,
+        # Per-frame referee bboxes (negative track IDs to avoid collision)
+        "referee_tracks": referee_tracks,
+        # High-action frame windows from ball movement analysis [(start, end), ...]
+        "event_windows": event_windows,
     }
 
     return metrics

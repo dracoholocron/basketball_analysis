@@ -16,6 +16,9 @@ class PlayerMetricRead(BaseModel):
     possession_frames: int
     passes_made: int
     interceptions_made: int
+    shots_attempted: int = 0
+    rebounds: int = 0
+    steals_cv: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -30,4 +33,10 @@ class GameMetrics(BaseModel):
     team2_passes: int
     team1_interceptions: int
     team2_interceptions: int
+    team1_shots_attempted: int = 0
+    team2_shots_attempted: int = 0
+    team1_rebounds: int = 0
+    team2_rebounds: int = 0
+    team1_steals_cv: int = 0
+    team2_steals_cv: int = 0
     players: list[PlayerMetricRead]

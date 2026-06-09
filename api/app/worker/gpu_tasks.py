@@ -97,7 +97,7 @@ def run_pose_analysis_task(
 
         # ── 2. Import engine ───────────────────────────────────────────────
         try:
-            from utils import read_video, get_video_properties
+            from utils import get_video_properties
             from trackers import PlayerTracker, BallTracker
             from configs.settings import settings as engine_settings
             from configs import MULTICLASS_DETECTOR_PATH, PLAYER_DETECTOR_PATH, BALL_DETECTOR_PATH
@@ -105,11 +105,11 @@ def run_pose_analysis_task(
             logger.error("Engine import failed: %s", exc)
             return {"error": str(exc), "session_id": training_session_id}
 
-        # ── 3. Read video + detect ─────────────────────────────────────────
-        logger.info("Reading video frames...")
-        frames = read_video(local_video)
-        fps, total_frames = get_video_properties(local_video)
-        logger.info("Loaded %d frames at %.1f fps", len(frames), fps)
+        # ── 3. Video properties + streaming detection ──────────────────────
+        vid_props = get_video_properties(local_video)
+        fps = vid_props["fps"] or 24.0
+        total_frames = vid_props["total_frames"] or 0
+        logger.info("Video: %d frames at %.1f fps", total_frames, fps)
 
         detector_path = (
             MULTICLASS_DETECTOR_PATH
@@ -123,34 +123,46 @@ def run_pose_analysis_task(
             else BALL_DETECTOR_PATH
         )
 
-        logger.info("Running player detection...")
-        player_tracks = player_tracker.get_object_tracks(frames)
-        logger.info("Running ball detection...")
-        ball_tracks = ball_tracker.get_object_tracks(frames)
+        from configs.settings import settings as engine_settings
+        chunk_size = engine_settings.chunk_size or 500
+
+        logger.info("Running player detection (streaming)...")
+        sv_player = player_tracker.detect_frames_streaming(local_video, chunk_size)
+        player_tracks = player_tracker.build_tracks_from_sv_detections(sv_player)
+        del sv_player
+
+        logger.info("Running ball detection (streaming)...")
+        sv_ball = ball_tracker.detect_frames_streaming(local_video, chunk_size)
+        ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
+        del sv_ball
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+        total_frames = len(player_tracks)
 
         # ── 4. Hoop detection ──────────────────────────────────────────────
         hoop_bbox = None
         try:
             from hoop_detector import HoopDetector
+            from utils.video_utils import iter_video_frames
             hoop_det = HoopDetector()
-            # Detect hoop on a sample of frames, use first successful detection
-            for frame in frames[::10]:
-                hoop_bbox = hoop_det.detect(frame)
-                if hoop_bbox:
-                    break
+            for i, frame in enumerate(iter_video_frames(local_video, max_height=720)):
+                if i % 10 == 0:
+                    hoop_bbox = hoop_det.detect(frame)
+                    if hoop_bbox:
+                        break
             logger.info("Hoop detected: %s", hoop_bbox)
         except Exception as exc:
             logger.warning("HoopDetector failed: %s", exc)
 
         # ── 5. Pose estimation ─────────────────────────────────────────────
-        pose_sequence: list[dict] = [{} for _ in frames]
+        pose_sequence: list[dict] = [{} for _ in range(total_frames)]
         if pose_enabled:
             try:
                 from pose_estimator import PoseEstimator
                 pe = PoseEstimator()
                 logger.info("Running pose estimation (backend=%s)...", pe._backend)
-                pose_sequence = pe.estimate_sequence(frames, player_tracks)
+                pose_sequence = pe.estimate_sequence_streaming(
+                    local_video, player_tracks, chunk_size
+                )
                 logger.info("Pose estimation complete")
             except Exception as exc:
                 logger.warning("PoseEstimator failed: %s — skipping pose", exc)
@@ -217,7 +229,7 @@ def run_pose_analysis_task(
 
         result = {
             "session_id": training_session_id,
-            "total_frames": len(frames),
+            "total_frames": total_frames,
             "fps": fps,
             "hoop_bbox": hoop_bbox,
             "cv_events": cv_events,

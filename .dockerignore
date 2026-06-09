@@ -35,8 +35,17 @@ docs/
 # Test stubs / output files
 **/*_stub.pkl
 **/stubs/
+
+# Output videos from analysis runs (large, runtime-generated)
+basketball_analysis/output_videos/
 output*.avi
 output*.mp4
+**/*.avi
+**/*.mp4
+
+# Training data / model artifacts (large binaries)
+train_workspace/
+samples/
 
 # OS artifacts
 .DS_Store

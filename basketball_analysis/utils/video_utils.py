@@ -42,8 +42,21 @@ def get_video_properties(video_path: str) -> dict:
 
 # ── Streaming generators ───────────────────────────────────────────────────────
 
-def iter_video_frames(video_path: str) -> Generator[np.ndarray, None, None]:
-    """Yield video frames one at a time, never holding more than one in memory."""
+def iter_video_frames(
+    video_path: str,
+    max_height: int = 0,
+) -> Generator[np.ndarray, None, None]:
+    """
+    Yield video frames one at a time, never holding more than one in memory.
+
+    Parameters
+    ----------
+    max_height : int
+        If > 0, downscale frames whose height exceeds this value while
+        preserving aspect ratio.  Pass 720 in all streaming detection passes
+        so that bounding-box coordinates stay in the same 720p space that the
+        draw pass uses.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise IOError(f"Cannot open video: {video_path}")
@@ -52,6 +65,10 @@ def iter_video_frames(video_path: str) -> Generator[np.ndarray, None, None]:
             ret, frame = cap.read()
             if not ret:
                 break
+            if max_height > 0 and frame.shape[0] > max_height:
+                scale = max_height / frame.shape[0]
+                new_w = int(frame.shape[1] * scale)
+                frame = cv2.resize(frame, (new_w, max_height), interpolation=cv2.INTER_AREA)
             yield frame
     finally:
         cap.release()
@@ -78,18 +95,23 @@ def iter_video_chunks(
 
 # ── Legacy in-memory loader (kept for small videos / stubs workflows) ──────────
 
+# Honour BA_MAX_FRAMES env var (0 or unset = no limit).
+_ENV_MAX_FRAMES: Optional[int] = int(os.environ.get("BA_MAX_FRAMES", "0")) or None
+
+
 def read_video(
     video_path: str,
     max_height: int = 720,
     frame_step: int = 1,
-    max_frames: int = 6000,
+    max_frames: Optional[int] = _ENV_MAX_FRAMES,
 ) -> list[np.ndarray]:
     """
-    Load video frames into a list with built-in memory guards:
+    Load video frames into a list with optional memory guards:
 
     - ``max_height``: Downscale frames if their height exceeds this value (default 720p).
     - ``frame_step``:  Only keep every N-th frame (default 1 → all frames).
-    - ``max_frames``:  Hard cap on total frames loaded (default 6 000 ≈ ~3 min at 30 fps).
+    - ``max_frames``:  Cap on total frames loaded. ``None`` (default) means no limit.
+                       Override at runtime with the ``BA_MAX_FRAMES`` env var.
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
@@ -103,7 +125,7 @@ def read_video(
             new_w = int(frame.shape[1] * scale)
             frame = cv2.resize(frame, (new_w, max_height), interpolation=cv2.INTER_AREA)
         frames.append(frame)
-        if len(frames) >= max_frames:
+        if max_frames is not None and len(frames) >= max_frames:
             logger.warning(
                 "read_video: reached max_frames=%d cap — truncating '%s'",
                 max_frames,

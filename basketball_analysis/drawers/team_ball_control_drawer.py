@@ -80,14 +80,14 @@ class TeamBallControlDrawer:
         
         # Overlay Position
         frame_height, frame_width = overlay.shape[:2]
-        rect_x1 = int(frame_width * 0.60) 
-        rect_y1 = int(frame_height * 0.75)
-        rect_x2 = int(frame_width * 0.99)  
-        rect_y2 = int(frame_height * 0.90)
+        rect_x1 = int(frame_width * 0.60)
+        rect_y1 = int(frame_height * 0.02)
+        rect_x2 = int(frame_width * 0.99)
+        rect_y2 = int(frame_height * 0.15)
         # Text positions
-        text_x = int(frame_width * 0.63)  
-        text_y1 = int(frame_height * 0.80)  
-        text_y2 = int(frame_height * 0.88)
+        text_x = int(frame_width * 0.63)
+        text_y1 = int(frame_height * 0.07)
+        text_y2 = int(frame_height * 0.12)
 
 
         cv2.rectangle(overlay, (rect_x1, rect_y1), (rect_x2, rect_y2), (255,255,255), -1 )

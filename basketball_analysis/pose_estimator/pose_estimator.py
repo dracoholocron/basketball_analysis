@@ -87,7 +87,11 @@ def _load_rtmpose() -> Optional[object]:
                 if "CUDAExecutionProvider" in ort.get_available_providers()
                 else ["CPUExecutionProvider"]
             )
-        sess = ort.InferenceSession(str(onnx_path), providers=providers)
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        opts.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+        opts.intra_op_num_threads = 4
+        sess = ort.InferenceSession(str(onnx_path), sess_options=opts, providers=providers)
         log.info("RTMPose loaded: %s  (providers=%s)", onnx_path.name, providers)
         return sess
     except Exception as exc:
@@ -393,6 +397,33 @@ class PoseEstimator:
             self.estimate_frame(frame, player_tracks)
             for frame, player_tracks in zip(frames, tracks)
         ]
+
+    def estimate_sequence_streaming(
+        self,
+        video_path: str,
+        player_tracks: list[dict[int, dict]],
+        chunk_size: int,
+        max_height: int = 720,
+    ) -> list[dict[int, np.ndarray]]:
+        """
+        Run pose estimation over the full video in memory-efficient chunks.
+
+        Reads frames at max_height=720 so player bbox crops align with the same
+        720p coordinate space used by detection and the draw pass.
+        """
+        from utils.video_utils import iter_video_frames
+
+        pose_sequence: list[dict[int, np.ndarray]] = []
+        total = len(player_tracks)
+
+        for frame_num, frame in enumerate(iter_video_frames(video_path, max_height=max_height)):
+            if frame_num >= total:
+                break
+            pose_sequence.append(
+                self.estimate_frame(frame, player_tracks[frame_num])
+            )
+
+        return pose_sequence
 
     # ── Backend implementations ────────────────────────────────────────────────
 

@@ -56,26 +56,33 @@ class DualResolutionPipeline:
         ball_tracks: list[dict],
         player_tracks: list[dict],
         min_ball_movement_px: float = 30.0,
+        stride: int = 10,
     ) -> list[tuple[int, int]]:
         """
         Identify frame windows where significant ball movement occurs.
 
+        Uses stride-based distance (frame N vs frame N-stride) instead of
+        consecutive-frame distance so that smoothly interpolated positions — where
+        per-frame movement is very small — still trigger correctly.
+
         Returns a list of (start_frame, end_frame) tuples (merged, non-overlapping).
         """
         candidate_frames: list[int] = []
-        prev_center: Optional[tuple[float, float]] = None
 
         for i, ball in enumerate(ball_tracks):
+            if i < stride:
+                continue
             bbox = ball.get(1, {}).get("bbox", [])
             if len(bbox) < 4:
-                prev_center = None
+                continue
+            ref_bbox = ball_tracks[i - stride].get(1, {}).get("bbox", [])
+            if len(ref_bbox) < 4:
                 continue
             cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
-            if prev_center is not None:
-                dist = np.hypot(cx - prev_center[0], cy - prev_center[1])
-                if dist > min_ball_movement_px:
-                    candidate_frames.append(i)
-            prev_center = (cx, cy)
+            rx, ry = (ref_bbox[0] + ref_bbox[2]) / 2, (ref_bbox[1] + ref_bbox[3]) / 2
+            dist = np.hypot(cx - rx, cy - ry)
+            if dist > min_ball_movement_px:
+                candidate_frames.append(i)
 
         return self._merge_windows(candidate_frames, len(ball_tracks))
 

@@ -39,29 +39,20 @@ class PlayerTracksDrawer:
 
         output_video_frames= []
         for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
-
-            player_dict = tracks[frame_num]
-
-            player_assignment_for_frame = player_assignment[frame_num]
-
-            player_id_has_ball = ball_aquisition[frame_num]
-
-            # Draw Players
-            for track_id, player in player_dict.items():
-                team_id = player_assignment_for_frame.get(track_id,self.default_player_team_id)
-
-                if team_id == 1:
-                    color = self.team_1_color
-                else:
-                    color = self.team_2_color
-
-                frame = draw_ellipse(frame, player["bbox"],color, track_id)
-
-                if track_id == player_id_has_ball:
-                    frame = draw_traingle(frame, player["bbox"],(0,0,255))
-
+            frame = self.draw_frame(frame, frame_num, tracks, player_assignment, ball_aquisition)
             output_video_frames.append(frame)
-
         return output_video_frames
+
+    def draw_frame(self, frame, frame_num, tracks, player_assignment, ball_aquisition):
+        frame = frame.copy()
+        player_dict = tracks[frame_num] if frame_num < len(tracks) else {}
+        player_assignment_for_frame = player_assignment[frame_num] if frame_num < len(player_assignment) else {}
+        player_id_has_ball = ball_aquisition[frame_num] if frame_num < len(ball_aquisition) else -1
+        for track_id, player in player_dict.items():
+            team_id = player_assignment_for_frame.get(track_id, self.default_player_team_id)
+            color = self.team_1_color if team_id == 1 else self.team_2_color
+            frame = draw_ellipse(frame, player["bbox"], color, track_id)
+            if track_id == player_id_has_ball:
+                frame = draw_traingle(frame, player["bbox"], (0, 0, 255))
+        return frame
         
