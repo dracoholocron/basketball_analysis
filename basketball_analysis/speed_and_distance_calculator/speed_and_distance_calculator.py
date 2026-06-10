@@ -28,23 +28,35 @@ class SpeedAndDistanceCalculator:
         self.max_speed_kmh = (
             max_speed_kmh if max_speed_kmh is not None else settings.speed_max_kmh
         )
+        self.deadband_m = getattr(settings, "speed_deadband_m", 0.08)
+        self.smooth_alpha = getattr(settings, "speed_smooth_alpha", 0.4)
 
     def calculate_distance(self, tactical_player_positions: list) -> list:
         previous_players_position: dict = {}
+        smoothed: dict = {}  # per-player EMA-smoothed position
         output_distances: list = []
+        a = self.smooth_alpha
 
         for frame_number, tactical_player_position_frame in enumerate(
             tactical_player_positions
         ):
             output_distances.append({})
-            for player_id, current_player_position in tactical_player_position_frame.items():
+            for player_id, raw_pos in tactical_player_position_frame.items():
+                # EMA-smooth the tactical position to remove homography jitter.
+                if player_id in smoothed and a < 1.0:
+                    sx = a * raw_pos[0] + (1 - a) * smoothed[player_id][0]
+                    sy = a * raw_pos[1] + (1 - a) * smoothed[player_id][1]
+                    cur = [sx, sy]
+                else:
+                    cur = [raw_pos[0], raw_pos[1]]
+                smoothed[player_id] = cur
+
                 if player_id in previous_players_position:
-                    previous_position = previous_players_position[player_id]
                     meter_distance = self._calculate_meter_distance(
-                        previous_position, current_player_position
+                        previous_players_position[player_id], cur
                     )
                     output_distances[frame_number][player_id] = meter_distance
-                previous_players_position[player_id] = current_player_position
+                previous_players_position[player_id] = cur
 
         return output_distances
 
@@ -61,8 +73,11 @@ class SpeedAndDistanceCalculator:
         curr_m_x = curr_x * self.width_in_meters / self.width_in_pixels
         curr_m_y = curr_y * self.height_in_meters / self.height_in_pixels
 
-        dist = measure_distance((curr_m_x, curr_m_y), (prev_m_x, prev_m_y))
-        return dist * self.calibration_factor
+        dist = measure_distance((curr_m_x, curr_m_y), (prev_m_x, prev_m_y)) * self.calibration_factor
+        # Deadband: sub-threshold motion is jitter, not real displacement.
+        if dist < self.deadband_m:
+            return 0.0
+        return dist
 
     # Keep old name for backwards compatibility
     def calculate_meter_distance(self, previous_pixel_position, current_pixel_position):

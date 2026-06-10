@@ -55,7 +55,7 @@ def _extract_rates(stats: dict[str, Any]) -> dict[str, float]:
     avg_tov = stats.get("avg_tov", 12.0) or 12.0
     avg_oreb = stats.get("avg_reb", 20.0) or 20.0
 
-    return {
+    rates = {
         "fg_pct": fgm / fga if fga > 0 else 0.43,
         "fg3_rate": fg3a / fga if fga > 0 else 0.37,
         "fg3_pct": fg3m / fg3a if fg3a > 0 else 0.33,
@@ -64,6 +64,11 @@ def _extract_rates(stats: dict[str, Any]) -> dict[str, float]:
         "tov_rate": avg_tov / 70 if avg_tov else 0.15,
         "oreb_rate": avg_oreb / 40 if avg_oreb else 0.25,
     }
+    # When there is no box score, fall back to CV rim-shooting % so the sim still
+    # reflects the analyzed games instead of a generic league-average default.
+    if not stats.get("avg_fga") and stats.get("cv_fg_pct"):
+        rates["fg_pct"] = float(stats["cv_fg_pct"])
+    return rates
 
 
 def simulate_game(
@@ -201,15 +206,41 @@ def compute_adjusted_win_pct(
     return sigmoid(base_log_odds + delta)
 
 
+def _estimate_possessions(own_stats: dict[str, Any], opp_stats: dict[str, Any],
+                          default: int = 70) -> int:
+    """Pace: prefer the box-score possession estimate (FGA + 0.44·FTA + TOV − OREB);
+    fall back to CV shot attempts per game; else default."""
+    def poss(s: dict[str, Any]) -> float | None:
+        fga = s.get("avg_fga"); fta = s.get("avg_fta", 0) or 0
+        tov = s.get("avg_tov", 0) or 0; oreb = s.get("avg_oreb", 0) or 0
+        if fga:
+            return fga + 0.44 * fta + tov - oreb
+        if s.get("cv_possessions"):
+            return float(s["cv_possessions"])
+        return None
+    vals = [v for v in (poss(own_stats), poss(opp_stats)) if v]
+    return int(round(sum(vals) / len(vals))) if vals else default
+
+
 def run_monte_carlo(
     own_stats: dict[str, Any],
     opp_stats: dict[str, Any],
     n_runs: int = 1000,
-    possessions: int = 70,
+    possessions: int | None = None,
 ) -> dict[str, Any]:
-    """Run n_runs simulated games and return aggregated results + per-run features."""
+    """Run n_runs simulated games and return aggregated results + per-run features.
+
+    Pace (possessions) is derived from box-score/CV stats when not given. CV defensive
+    pressure (`cv_def_pressure`) raises the OPPONENT's turnover rate — i.e. a team that
+    forces many steals on tape makes its opponent cough up more possessions."""
+    if possessions is None:
+        possessions = _estimate_possessions(own_stats, opp_stats)
+
     own_rates = _extract_rates(own_stats)
     opp_rates = _extract_rates(opp_stats)
+    # Defensive pressure from CV: each side inflicts extra turnovers on the other.
+    own_rates["tov_rate"] = min(0.5, own_rates["tov_rate"] + (opp_stats.get("cv_def_pressure", 0.0) or 0.0))
+    opp_rates["tov_rate"] = min(0.5, opp_rates["tov_rate"] + (own_stats.get("cv_def_pressure", 0.0) or 0.0))
 
     results = [simulate_game(own_rates, opp_rates, possessions) for _ in range(n_runs)]
 

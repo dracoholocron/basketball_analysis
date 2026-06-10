@@ -213,13 +213,16 @@ def _preprocess_rtmpose(
 
 
 def _simcc_confidence(simcc_x_row: np.ndarray, simcc_y_row: np.ndarray) -> float:
-    """Geometric mean of 1-D softmax peaks (standard SimCC score)."""
-    def _peak_prob(row: np.ndarray) -> float:
-        row = row - row.max()
-        exp = np.exp(row)
-        return float(exp[np.argmax(row)] / np.sum(exp))
+    """
+    SimCC keypoint score, mmpose `get_simcc_maximum` convention: the mean of the
+    raw per-axis maxima of the (un-softmaxed) SimCC responses.
 
-    return float((_peak_prob(simcc_x_row) * _peak_prob(simcc_y_row)) ** 0.5)
+    The previous implementation used the softmax *peak probability* over hundreds
+    of bins, which yields tiny values (~0.002) — far below any usable threshold —
+    so every joint was filtered out and no skeletons were ever drawn. The raw
+    maxima are in a usable ~0..1 range comparable to a confidence threshold.
+    """
+    return float(0.5 * (float(simcc_x_row.max()) + float(simcc_y_row.max())))
 
 
 def _pair_simcc_xy(
@@ -344,12 +347,20 @@ class PoseEstimator:
 
     @staticmethod
     def _try_load_yolo(model_path: Optional[str] = None) -> Optional[object]:
-        yolo_path = model_path or _find_model_path("yolov8n-pose.pt")
-        if yolo_path is None:
-            return None
+        # Prefer a bundled model file; otherwise fall back to the model name so
+        # ultralytics auto-downloads it. yolo11n-pose is robust on small/distant
+        # players where the RTMPose ONNX decode collapses the upper body.
+        yolo_path = (
+            model_path
+            or _find_model_path("yolo11n-pose.pt")
+            or _find_model_path("yolov8n-pose.pt")
+            or "yolo11n-pose.pt"
+        )
         try:
             from ultralytics import YOLO
-            return YOLO(str(yolo_path))
+            model = YOLO(str(yolo_path))
+            log.info("YOLO-pose loaded: %s", yolo_path)
+            return model
         except Exception as exc:
             log.warning("Could not load YOLO-pose: %s", exc)
             return None
@@ -452,10 +463,17 @@ class PoseEstimator:
         frame: np.ndarray,
         player_tracks: dict[int, dict],
     ) -> dict[int, np.ndarray]:
-        results: dict[int, np.ndarray] = {}
         if not player_tracks:
-            return results
+            return {}
+        try:
+            from configs.settings import settings as _s
+            topdown = getattr(_s, "pose_topdown", True)
+        except Exception:
+            topdown = True
+        if topdown:
+            return self._yolo_frame_topdown(frame, player_tracks)
 
+        results: dict[int, np.ndarray] = {}
         yolo_results = self._yolo_model.predict(frame, verbose=False)
         if not yolo_results or yolo_results[0].keypoints is None:
             return results
@@ -467,15 +485,71 @@ class PoseEstimator:
             bbox = info.get("bbox", [])
             if len(bbox) < 4:
                 continue
-            # Match track bbox to the nearest YOLO detection
             best_idx, best_iou = -1, 0.0
             for i, yolo_box in enumerate(boxes_all):
                 iou = _box_iou(bbox, yolo_box.tolist())
                 if iou > best_iou:
                     best_iou, best_idx = iou, i
             if best_idx >= 0 and best_iou > 0.1:
-                results[track_id] = kps_all[best_idx]  # (17, 3)
+                results[track_id] = kps_all[best_idx]
+        return results
 
+    def _yolo_frame_topdown(
+        self,
+        frame: np.ndarray,
+        player_tracks: dict[int, dict],
+    ) -> dict[int, np.ndarray]:
+        """Run YOLO-pose on each tracked player's (padded, upscaled) crop so small
+        distant players still produce a skeleton. Keypoints are mapped back to
+        full-frame coordinates."""
+        import cv2
+
+        results: dict[int, np.ndarray] = {}
+        H, W = frame.shape[:2]
+        crops, metas = [], []
+        for track_id, info in player_tracks.items():
+            bbox = info.get("bbox", [])
+            if len(bbox) < 4:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+            bw, bh = x2 - x1, y2 - y1
+            if bw < 2 or bh < 2:
+                continue
+            # pad 20% and clip
+            px, py = bw * 0.2, bh * 0.2
+            cx1 = max(0, int(x1 - px)); cy1 = max(0, int(y1 - py))
+            cx2 = min(W, int(x2 + px)); cy2 = min(H, int(y2 + py))
+            crop = frame[cy1:cy2, cx1:cx2]
+            if crop.size == 0:
+                continue
+            # upscale small crops so the pose model has enough pixels
+            ch = cy2 - cy1
+            scale = 1.0
+            if ch < 256:
+                scale = 256.0 / ch
+                crop = cv2.resize(crop, (int((cx2 - cx1) * scale), int(ch * scale)),
+                                  interpolation=cv2.INTER_LINEAR)
+            crops.append(crop)
+            metas.append((track_id, cx1, cy1, scale))
+
+        if not crops:
+            return results
+
+        preds = self._yolo_model.predict(crops, verbose=False, device=self._device)
+        for (track_id, ox, oy, scale), r in zip(metas, preds):
+            if r.keypoints is None or len(r.keypoints) == 0:
+                continue
+            kdata = r.keypoints.data.cpu().numpy()  # (N,17,3)
+            if r.boxes is not None and len(r.boxes) > 1:
+                # pick the most confident person in the crop
+                confs = r.boxes.conf.cpu().numpy()
+                kp = kdata[int(confs.argmax())]
+            else:
+                kp = kdata[0]
+            kp = kp.copy()
+            kp[:, 0] = kp[:, 0] / scale + ox
+            kp[:, 1] = kp[:, 1] / scale + oy
+            results[track_id] = kp
         return results
 
     def _dummy_frame(

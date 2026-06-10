@@ -15,9 +15,14 @@ import numpy as np
 
 from pose_estimator.skeleton_utils import KP, joint_angle, wrist_position
 
-_CONF = 0.3
-_MIN_FRAMES = 3          # consecutive frames required to confirm a shot
-_BALL_PROXIMITY_PX = 120  # max distance from wrist to ball center
+try:
+    from configs.settings import settings as _settings
+    _CONF = _settings.event_pose_conf_threshold
+except Exception:
+    _CONF = 0.12
+_MIN_FRAMES = 2          # consecutive frames required to confirm a shot
+_BALL_PROXIMITY_PX = 160  # distance from wrist to ball center (confidence flag only)
+_COOLDOWN_FRAMES = 30     # ~1s — min gap between shot events for the same player
 
 
 class ShotDetector:
@@ -36,10 +41,13 @@ class ShotDetector:
         self,
         min_frames: int = _MIN_FRAMES,
         ball_proximity_px: float = _BALL_PROXIMITY_PX,
+        cooldown_frames: int = _COOLDOWN_FRAMES,
     ) -> None:
         self.min_frames = min_frames
         self.ball_proximity_px = ball_proximity_px
+        self.cooldown_frames = cooldown_frames
         self._counters: dict[int, int] = defaultdict(int)
+        self._last_event_frame: dict[int, int] = defaultdict(lambda: -10**9)
         self._events: list[dict] = []
 
     def update(
@@ -62,17 +70,28 @@ class ShotDetector:
 
         active_ids = set()
         for track_id, kps in pose_frame.items():
-            if _is_shooting_pose(kps) and _ball_near_wrist(kps, ball_center, self.ball_proximity_px):
+            # Pose-only gate: wrist raised above shoulder sustained for min_frames.
+            # Ball proximity is unreliable for a gray ball (noisy/absent detections),
+            # so it is recorded as a confidence flag on the event, not a hard gate.
+            if _is_shooting_pose(kps):
                 active_ids.add(track_id)
                 self._counters[track_id] += 1
-                if self._counters[track_id] == self.min_frames:
+                if (
+                    self._counters[track_id] == self.min_frames
+                    and frame_idx - self._last_event_frame[track_id] >= self.cooldown_frames
+                ):
                     event = {
                         "type": "shot_attempt",
                         "track_id": track_id,
                         "frame": frame_idx,
+                        "ball_near": bool(
+                            _ball_near_wrist(kps, ball_center, self.ball_proximity_px)
+                            and ball_center is not None
+                        ),
                     }
                     self._events.append(event)
                     new_events.append(event)
+                    self._last_event_frame[track_id] = frame_idx
             else:
                 self._counters[track_id] = 0
 

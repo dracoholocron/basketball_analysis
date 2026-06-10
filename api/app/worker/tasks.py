@@ -28,6 +28,8 @@ from ..core.config import settings as api_settings
 from ..models.job import Job, JobStatus, JobStage
 from ..models.metrics import FrameMetric, PlayerMetric
 from ..models.game_annotation import GameAnnotation
+from ..models.ball_annotation import BallAnnotation
+from ..models.hoop_annotation import HoopAnnotation
 from ..services.storage import StorageService
 
 # Add engine path to sys.path so we can import the basketball_analysis package
@@ -73,6 +75,19 @@ def run_analysis(
     storage = StorageService()
 
     with Session(engine) as db:
+        # Idempotency / staleness guards. A long task (>~1h) can be re-delivered by
+        # the broker; without this it would re-run the whole ~1h pipeline.
+        _job = db.get(Job, uuid.UUID(job_id))
+        if _job is None:
+            logger.warning(
+                "Job %s no longer exists in DB — aborting stale analysis task", job_id
+            )
+            return
+        if _job.status == JobStatus.DONE:
+            logger.warning(
+                "Job %s already DONE — skipping duplicate/re-delivered task", job_id
+            )
+            return
         _update_job(
             db,
             job_id,
@@ -138,6 +153,32 @@ def run_analysis(
                         len(manual_landmarks), game_id, camera_motion,
                     )
 
+        # ── 4b. Fetch manual ball annotation (for SAM2 tracking) ───────────
+        ball_points = None
+        with Session(engine) as db:
+            from sqlalchemy import select as sa_select
+            ball_ann = db.execute(
+                sa_select(BallAnnotation).where(BallAnnotation.game_id == uuid.UUID(game_id))
+            ).scalar_one_or_none()
+            if ball_ann is not None and ball_ann.points:
+                ball_points = ball_ann.points  # list[dict] {frame_t, pixel, visible}
+                logger.info(
+                    "Using %d manual ball points for game %s", len(ball_points), game_id,
+                )
+
+        # ── 4c. Fetch manual hoop annotation ───────────────────────────────
+        hoop_boxes = None
+        with Session(engine) as db:
+            from sqlalchemy import select as sa_select
+            hoop_ann = db.execute(
+                sa_select(HoopAnnotation).where(HoopAnnotation.game_id == uuid.UUID(game_id))
+            ).scalar_one_or_none()
+            if hoop_ann is not None and hoop_ann.hoops:
+                hoop_boxes = hoop_ann.hoops  # list[dict] {frame_t, bbox, kind}
+                logger.info(
+                    "Using %d manual hoop boxes for game %s", len(hoop_boxes), game_id,
+                )
+
         # ── 5. Run pipeline ────────────────────────────────────────────────
         stub_dir = os.path.join(tmp, "stubs")
         output_video = os.path.join(tmp, "output.mp4")
@@ -190,6 +231,8 @@ def run_analysis(
                 on_progress=_pipeline_progress,
                 show_poses=show_poses,
                 pose_player_filter=pose_player_filter,
+                ball_points=ball_points,
+                hoop_boxes=hoop_boxes,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -246,6 +289,45 @@ def run_analysis(
                 finished_at=datetime.now(timezone.utc),
             )
         logger.info("Job %s completed successfully", job_id)
+
+
+def _build_roster_map(engine, job_uuid) -> dict[tuple[int, str], uuid.UUID]:
+    """Map (team_no, dorsal) -> players.id using the game's home/away rosters.
+
+    team_no 1 = home team, 2 = away team (matches pipeline team1/team2). Returns
+    empty when there is no game/roster, so analysis still works without a roster.
+    """
+    from ..models.game import Game
+    from ..models.player import Player
+
+    out: dict[tuple[int, str], uuid.UUID] = {}
+    try:
+        with Session(engine) as db:
+            job = db.get(Job, job_uuid)
+            if job is None or job.game_id is None:
+                return out
+            game = db.get(Game, job.game_id)
+            if game is None:
+                return out
+            team_no_by_uuid = {}
+            if game.home_team_id:
+                team_no_by_uuid[game.home_team_id] = 1
+            if game.away_team_id:
+                team_no_by_uuid[game.away_team_id] = 2
+            if not team_no_by_uuid:
+                return out
+            players = (
+                db.query(Player)
+                .filter(Player.team_id.in_(list(team_no_by_uuid.keys())))
+                .all()
+            )
+            for p in players:
+                if not p.jersey_number or p.team_id not in team_no_by_uuid:
+                    continue
+                out[(team_no_by_uuid[p.team_id], str(p.jersey_number))] = p.id
+    except Exception as exc:
+        logger.warning("Roster map unavailable: %s", exc)
+    return out
 
 
 def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
@@ -319,47 +401,148 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
     # Per-player: shots / rebounds / steals from pose-based event detectors
     from collections import defaultdict as _dd
     shots_attempted: dict[int, int] = _dd(int)
+    shots_made: dict[int, int] = _dd(int)
+    shots_missed: dict[int, int] = _dd(int)
     rebounds_made: dict[int, int] = _dd(int)
     steals_cv_made: dict[int, int] = _dd(int)
+
+    fps_attr = float(metrics.get("fps", 25.0)) or 25.0
+
+    def _attribute_shooter(frame: int | None, default_tid: int) -> int:
+        """Rim-shot events have no shooter (track_id=-1). Attribute to the last
+        player who held the ball within ~1.5s before the shot."""
+        if default_tid != -1:
+            return default_tid
+        if frame is None:
+            return -1
+        back = int(fps_attr * 1.5)
+        for j in range(int(frame), max(-1, int(frame) - back), -1):
+            if 0 <= j < len(ball_acquisition) and int(ball_acquisition[j]) != -1:
+                return int(ball_acquisition[j])
+        return -1
+
     for ev in metrics.get("shot_events", []):
-        shots_attempted[int(ev["track_id"])] += 1
+        tid = _attribute_shooter(ev.get("frame"), int(ev.get("track_id", -1)))
+        shots_attempted[tid] += 1
+        if "made" in ev:
+            if ev.get("made"):
+                shots_made[tid] += 1
+            else:
+                shots_missed[tid] += 1
     for ev in metrics.get("rebound_events", []):
-        rebounds_made[int(ev["track_id"])] += 1
+        rebounds_made[int(ev.get("track_id", -1))] += 1
     for ev in metrics.get("steal_events", []):
-        steals_cv_made[int(ev["track_id"])] += 1
+        steals_cv_made[int(ev.get("track_id", -1))] += 1
 
-    # Generate display labels: sort by first frame of appearance → #1, #2, …
-    ordered_tracks = sorted(
-        all_track_ids,
-        key=lambda tid: next(
-            (i for i, pa in enumerate(player_assignment) if tid in pa), 999999
-        ),
-    )
-    display_labels: dict[int, str] = {
-        tid: f"#{i + 1}" for i, tid in enumerate(ordered_tracks)
-    }
+    # ── Identity consolidation (jersey OCR) ─────────────────────────────────
+    # Fragmented tracks for the same athlete share a (team, dorsal). Merge them
+    # so 1000s of tracks collapse into the real players. Tracks without a
+    # confident dorsal stay as their own provisional identity (no count inflation).
+    jersey_numbers_raw: dict = metrics.get("jersey_numbers", {}) or {}
+    jersey_of: dict[int, str] = {int(k): str(v) for k, v in jersey_numbers_raw.items()}
 
-    # Build PlayerMetric rows — cast everything to native Python types
+    fps = float(metrics.get("fps", 25.0)) or 25.0
+    first_seen: dict[int, int] = {}
+    frames_present: dict[int, int] = defaultdict(int)
+    for i, pa in enumerate(player_assignment):
+        for tid in pa:
+            t = int(tid)
+            if t not in first_seen:
+                first_seen[t] = i
+            frames_present[t] += 1
+
+    # Group tracks → canonical identity key
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    for tid in all_track_ids:
+        dorsal = jersey_of.get(tid)
+        team = majority_team(tid)
+        if dorsal:
+            key = ("J", team, dorsal)          # consolidate by (team, dorsal)
+        else:
+            key = ("T", tid)                    # provisional: track stays alone
+        groups[key].append(tid)
+
+    # Order identities by earliest appearance for stable #N labels
+    def _group_first(members: list[int]) -> int:
+        return min((first_seen.get(t, 999999) for t in members), default=999999)
+
+    ordered_keys = sorted(groups, key=lambda k: _group_first(groups[k]))
+
+    # Optional roster map: (team_id 1/2, dorsal) -> players.id
+    roster_map = _build_roster_map(engine, j_uuid)
+
+    min_track_frames = int(float(os.getenv("BA_MIN_TRACK_SECONDS", "0.5")) * fps)
+    dropped_short = 0
     player_rows: list[PlayerMetric] = []
-    for track_id in all_track_ids:
-        tid = int(track_id)
-        mt = majority_team(tid)
-        row = PlayerMetric(
+    ordinal = 0
+    for key in ordered_keys:
+        members = groups[key]
+        canonical = min(members, key=lambda t: first_seen.get(t, 999999))
+        if key[0] == "J":
+            team = key[1]
+            dorsal = key[2]
+        else:
+            dorsal = None
+            team = majority_team(canonical)
+            for m in members:  # fall back to any member with a team vote
+                if team is None:
+                    team = majority_team(m)
+
+        # Aggregate metrics across all merged tracks
+        tot_dist = sum(float(player_distances.get(t, 0.0)) for t in members)
+        avg_samples = [float(player_avg_speeds.get(t, 0.0)) for t in members
+                       if float(player_avg_speeds.get(t, 0.0)) > 0]
+        avg_speed = (sum(avg_samples) / len(avg_samples)) if avg_samples else 0.0
+        max_speed = max((float(player_max_speeds.get(t, 0.0)) for t in members), default=0.0)
+        poss = sum(int(possession_frames.get(t, 0)) for t in members)
+        pmade = sum(int(passes_made.get(t, 0)) for t in members)
+        imade = sum(int(interceptions_made.get(t, 0)) for t in members)
+        shots = sum(int(shots_attempted.get(t, 0)) for t in members)
+        made = sum(int(shots_made.get(t, 0)) for t in members)
+        missed = sum(int(shots_missed.get(t, 0)) for t in members)
+        rebs = sum(int(rebounds_made.get(t, 0)) for t in members)
+        steals = sum(int(steals_cv_made.get(t, 0)) for t in members)
+        # Minutes played: union of frames where any merged track is on court.
+        present = sum(int(frames_present.get(t, 0)) for t in members)
+        minutes = (present / fps) / 60.0 if fps else 0.0
+
+        # Drop provisional (no-dorsal) identities seen too briefly — these are
+        # detection blips / partial occlusions, not real players. Identities with a
+        # confident dorsal are always kept.
+        if dorsal is None and present < min_track_frames:
+            dropped_short += 1
+            continue
+
+        ordinal += 1
+        label = f"#{dorsal}" if dorsal else f"#{ordinal}"
+        player_id = roster_map.get((team, dorsal)) if dorsal and team in (1, 2) else None
+
+        player_rows.append(PlayerMetric(
             job_id=j_uuid,
-            track_id=tid,
-            display_label=display_labels.get(tid),
-            team_id=int(mt) if mt is not None else None,
-            total_distance_m=float(player_distances.get(track_id, 0.0)),
-            avg_speed_kmh=float(player_avg_speeds.get(track_id, 0.0)),
-            max_speed_kmh=float(player_max_speeds.get(track_id, 0.0)),
-            possession_frames=int(possession_frames.get(tid, 0)),
-            passes_made=int(passes_made.get(tid, 0)),
-            interceptions_made=int(interceptions_made.get(tid, 0)),
-            shots_attempted=int(shots_attempted.get(tid, 0)),
-            rebounds=int(rebounds_made.get(tid, 0)),
-            steals_cv=int(steals_cv_made.get(tid, 0)),
-        )
-        player_rows.append(row)
+            track_id=int(canonical),
+            display_label=label,
+            jersey_number=str(dorsal) if dorsal else None,
+            team_id=int(team) if team is not None else None,
+            player_id=player_id,
+            minutes_played=float(minutes),
+            total_distance_m=tot_dist,
+            avg_speed_kmh=avg_speed,
+            max_speed_kmh=max_speed,
+            possession_frames=poss,
+            passes_made=pmade,
+            interceptions_made=imade,
+            shots_attempted=shots,
+            shots_made=made,
+            shots_missed=missed,
+            rebounds=rebs,
+            steals_cv=steals,
+        ))
+
+    logger.info(
+        "Identity consolidation: %d raw tracks → %d identities (%d with dorsal, %d short provisional dropped)",
+        len(all_track_ids), len(player_rows),
+        sum(1 for r in player_rows if r.jersey_number), dropped_short,
+    )
 
     # Build FrameMetric rows with ball_holder_team resolved per frame
     # Force all values to native Python int — numpy.int64 breaks psycopg2
@@ -388,6 +571,12 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         )
 
     with Session(engine) as db:
+        if db.get(Job, j_uuid) is None:
+            logger.warning(
+                "Job %s vanished before metrics persist — skipping %d player rows",
+                job_id, len(player_rows),
+            )
+            return
         db.bulk_save_objects(player_rows)
         batch_size = 1000
         for i in range(0, len(frame_rows), batch_size):
@@ -396,6 +585,56 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
     logger.info(
         "Persisted %d player metrics, %d frame metrics", len(player_rows), total_frames
     )
+
+    # Unified player-game stats (CV family) for mapped athletes → season aggregation
+    _upsert_player_game_stats_cv(engine, j_uuid, player_rows)
+
+
+def _upsert_player_game_stats_cv(engine, job_uuid, player_rows: list) -> None:
+    """Upsert the CV/tracking family into player_game_stats for rows mapped to a real
+    player. One row per (player_id, game_id); coexists with box-score data (source)."""
+    from ..models.game import Game
+    from ..models.player_game_stats import PlayerGameStats
+
+    mapped = [r for r in player_rows if r.player_id is not None]
+    if not mapped:
+        return
+    try:
+        with Session(engine) as db:
+            job = db.get(Job, job_uuid)
+            if job is None or job.game_id is None:
+                return
+            game = db.get(Game, job.game_id)
+            if game is None:
+                return
+            team_uuid_by_no = {1: game.home_team_id, 2: game.away_team_id}
+            for r in mapped:
+                existing = db.query(PlayerGameStats).filter(
+                    PlayerGameStats.player_id == r.player_id,
+                    PlayerGameStats.game_id == game.id,
+                ).one_or_none()
+                pgs = existing or PlayerGameStats(player_id=r.player_id, game_id=game.id)
+                pgs.season_id = game.season_id
+                pgs.team_id = team_uuid_by_no.get(r.team_id)
+                pgs.job_id = job_uuid
+                pgs.minutes_played = r.minutes_played or 0.0
+                pgs.distance_m = r.total_distance_m or 0.0
+                pgs.avg_speed_kmh = r.avg_speed_kmh or 0.0
+                pgs.max_speed_kmh = r.max_speed_kmh or 0.0
+                pgs.possession_frames = r.possession_frames or 0
+                pgs.shots_attempted_cv = r.shots_attempted or 0
+                pgs.shots_made_cv = r.shots_made or 0
+                pgs.shots_missed_cv = r.shots_missed or 0
+                pgs.rebounds_cv = r.rebounds or 0
+                pgs.steals_cv = r.steals_cv or 0
+                pgs.passes_cv = r.passes_made or 0
+                pgs.source = "both" if (existing and existing.pts is not None) else "cv"
+                if existing is None:
+                    db.add(pgs)
+            db.commit()
+            logger.info("player_game_stats: upserted %d CV rows", len(mapped))
+    except Exception as exc:
+        logger.warning("player_game_stats CV upsert failed: %s", exc)
 
 
 def _build_cv_events(metrics: dict) -> list[dict]:
@@ -447,22 +686,24 @@ def _build_cv_events(metrics: dict) -> list[dict]:
 
     # Shot attempt events (pose-based: wrist elevated + ball near wrist)
     for ev in metrics.get("shot_events", []):
+        _tid = int(ev.get("track_id", -1))
         events.append({
             "event_type": "shot_attempt",
             "frame": int(ev["frame"]),
             "time_s": frame_to_s(ev["frame"]),
-            "player_track_id": int(ev["track_id"]),
-            "description": f"Intento de tiro — jugador {ev['track_id']}",
+            "player_track_id": _tid if _tid != -1 else None,
+            "description": "Intento de tiro" if _tid == -1 else f"Intento de tiro — jugador {_tid}",
         })
 
     # Rebound events (pose-based: ball descending then reversing + player proximity)
     for ev in metrics.get("rebound_events", []):
+        _tid = int(ev.get("track_id", -1))
         events.append({
             "event_type": "rebound",
             "frame": int(ev["frame"]),
             "time_s": frame_to_s(ev["frame"]),
-            "player_track_id": int(ev["track_id"]),
-            "description": f"Rebote — jugador {ev['track_id']}",
+            "player_track_id": _tid if _tid != -1 else None,
+            "description": "Rebote" if _tid == -1 else f"Rebote — jugador {_tid}",
         })
 
     # Steal events (pose-based: wrist proximity + possession change)
@@ -491,6 +732,8 @@ def generate_highlights(
     pad_before_s: float = 2.0,
     pad_after_s: float = 3.0,
     event_types: list[str] | None = None,
+    max_clips: int = 25,
+    w_audio: float = 0.8,
 ) -> dict:
     """
     Extract highlight clips from the source video based on cv_events_json.
@@ -520,16 +763,7 @@ def generate_highlights(
     if event_types:
         cv_events = [e for e in cv_events if e.get("event_type") in event_types]
 
-    # Deduplicate nearby events (within 3 s)
-    deduped: list[dict] = []
-    last_time: float | None = None
-    for ev in sorted(cv_events, key=lambda e: e.get("time_s", 0)):
-        t = float(ev.get("time_s", 0))
-        if last_time is None or t - last_time >= 3.0:
-            deduped.append(ev)
-            last_time = t
-
-    if not deduped:
+    if not cv_events:
         logger.info("generate_highlights: no events to clip for job %s", job_id)
         return {"clips": 0}
 
@@ -553,13 +787,52 @@ def generate_highlights(
         except Exception:
             video_duration = 9999.0
 
+        # ── Score, merge & rank events (audio excitement + type relevance) ──
+        try:
+            from audio import AudioExcitement
+            excite = AudioExcitement.from_video(local_video)
+        except Exception as exc:
+            logger.warning("AudioExcitement init failed: %s", exc)
+            excite = None
+
+        _TYPE_W = {
+            "shot_attempt": 1.0, "steal": 0.9, "steal_cv": 0.9, "steal_pose": 0.9,
+            "rebound": 0.35, "pass": 0.2,
+        }
+        scored = []
+        for ev in cv_events:
+            t = float(ev.get("time_s", 0))
+            exc = excite.at(t) if excite is not None else 0.0
+            score = 0.6 * _TYPE_W.get(ev.get("event_type", ""), 0.4) + w_audio * exc
+            scored.append({"t": t, "score": score, "exc": exc, "ev": ev})
+
+        # Merge events within 3 s, keeping the highest-scoring one per cluster.
+        scored.sort(key=lambda d: d["t"])
+        merged: list[dict] = []
+        for item in scored:
+            if merged and item["t"] - merged[-1]["t"] < 3.0:
+                if item["score"] > merged[-1]["score"]:
+                    merged[-1] = item
+            else:
+                merged.append(item)
+
+        # Rank by score; keep the top `max_clips`.
+        merged.sort(key=lambda d: d["score"], reverse=True)
+        selected = merged[: max(1, max_clips)]
+        logger.info(
+            "Highlights: %d events → %d merged → top %d (audio=%s)",
+            len(cv_events), len(merged), len(selected),
+            "on" if (excite is not None and excite.available) else "off",
+        )
+
         manifest: list[dict] = []
         clips_dir = os.path.join(tmp, "clips")
         os.makedirs(clips_dir, exist_ok=True)
 
         vf_filter = "scale=iw*min(1080/iw\\,1920/ih):ih*min(1080/iw\\,1920/ih),pad=1080:1920:(1080-iw)/2:(1920-ih)/2" if portrait else ""
 
-        for i, ev in enumerate(deduped):
+        for i, item in enumerate(selected):
+            ev = item["ev"]
             t = float(ev.get("time_s", 0))
             start = max(0.0, t - pad_before_s)
             end = min(video_duration, t + pad_after_s)
@@ -603,6 +876,8 @@ def generate_highlights(
                 "time_s": t,
                 "s3_key": s3_key,
                 "description": ev.get("description", ""),
+                "score": round(float(item["score"]), 3),
+                "excitement": round(float(item["exc"]), 3),
             })
 
         # Upload manifest JSON
@@ -626,3 +901,53 @@ def generate_highlights(
             "generate_highlights done: %d clips for job %s", len(manifest), job_id
         )
         return {"clips": len(manifest), "manifest_key": manifest_key}
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.finetune_ball_detector",
+                 max_retries=0, acks_late=True)
+def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> dict:
+    """
+    Fine-tune the ball detector on the accumulated SAM2 auto-label dataset
+    (/app/ball_dataset, produced when BA_BALL_EXPORT_DATASET=true during analysis).
+
+    Transfer-learns from the current ball model (head re-init to 1 class 'Ball'),
+    then backs up and swaps the model in the models volume. Long-running.
+    """
+    import glob
+    import shutil
+
+    dataset = "/app/ball_dataset"
+    data_yaml = os.path.join(dataset, "data.yaml")
+    if not os.path.exists(data_yaml):
+        return {"error": f"no dataset at {data_yaml} — run analyses with ball annotation + BA_BALL_EXPORT_DATASET first"}
+
+    n_labels = len(glob.glob(os.path.join(dataset, "labels", "train", "*.txt")))
+    if n_labels < 20:
+        return {"error": f"too few labeled frames ({n_labels}); annotate more games first"}
+
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    base = os.path.join(engine_path, "models", "ball_detector_model.pt")
+    if base not in sys.path:
+        sys.path.insert(0, engine_path)
+
+    try:
+        from ultralytics import YOLO
+        logger.info("Fine-tuning ball detector on %d labeled frames (epochs=%d)…", n_labels, epochs)
+        model = YOLO(base)
+        model.train(
+            data=data_yaml, epochs=epochs, imgsz=imgsz,
+            mosaic=1.0, close_mosaic=10, degrees=0.0,
+            translate=0.1, scale=0.5, fliplr=0.5,
+            project="/app/ball_dataset/runs", name="finetune", exist_ok=True,
+        )
+        best = getattr(model.trainer, "best", None)
+        if not best or not os.path.exists(best):
+            return {"error": "training produced no best.pt"}
+        # backup + swap
+        shutil.copy(base, base + ".bak")
+        shutil.copy(best, base)
+        logger.info("Ball detector fine-tuned and swapped in: %s ← %s", base, best)
+        return {"ok": True, "labeled_frames": n_labels, "best": str(best)}
+    except Exception as exc:
+        logger.exception("finetune_ball_detector failed")
+        return {"error": str(exc)}

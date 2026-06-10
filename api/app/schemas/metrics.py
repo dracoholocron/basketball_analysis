@@ -9,7 +9,10 @@ class PlayerMetricRead(BaseModel):
     job_id: uuid.UUID
     track_id: int
     display_label: Optional[str] = None
+    jersey_number: Optional[str] = None
+    player_id: Optional[uuid.UUID] = None
     team_id: Optional[int]
+    minutes_played: float = 0.0
     total_distance_m: float
     avg_speed_kmh: float
     max_speed_kmh: float
@@ -17,6 +20,8 @@ class PlayerMetricRead(BaseModel):
     passes_made: int
     interceptions_made: int
     shots_attempted: int = 0
+    shots_made: int = 0
+    shots_missed: int = 0
     rebounds: int = 0
     steals_cv: int = 0
 
@@ -26,6 +31,8 @@ class PlayerMetricRead(BaseModel):
 class GameMetrics(BaseModel):
     game_id: uuid.UUID
     job_id: uuid.UUID
+    home_team_name: Optional[str] = None
+    away_team_name: Optional[str] = None
     total_frames: int
     team1_possession_pct: float
     team2_possession_pct: float

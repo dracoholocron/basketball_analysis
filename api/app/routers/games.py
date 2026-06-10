@@ -17,6 +17,7 @@ from ..core.config import settings as api_settings
 from ..models.game import Game
 from ..models.job import Job, JobStatus, JobStage
 from ..models.video_asset import VideoAsset
+from ..models.team import Team
 from ..models.user import User
 from ..schemas.game import AnalysisOptions, GameCreate, GameList, GameRead
 from ..schemas.job import JobRead
@@ -38,6 +39,8 @@ class HighlightOut(BaseModel):
     start_s: float
     end_s: float
     clip_url: Optional[str] = None
+    score: float = 0.0
+    excitement: float = 0.0
 
 router = APIRouter(prefix="/games", tags=["games"])
 
@@ -90,7 +93,14 @@ async def get_game(
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    return game
+    out = GameRead.model_validate(game)
+    if game.home_team_id:
+        ht = await db.get(Team, game.home_team_id)
+        out.home_team_name = ht.name if ht else None
+    if game.away_team_id:
+        at = await db.get(Team, game.away_team_id)
+        out.away_team_name = at.name if at else None
+    return out
 
 
 class GameUpdate(BaseModel):
@@ -99,6 +109,21 @@ class GameUpdate(BaseModel):
     is_half_court: Optional[bool] = None
     home_team1_jersey: Optional[str] = None
     away_team2_jersey: Optional[str] = None
+    home_team_name: Optional[str] = None   # find-or-create Team → home_team_id
+    away_team_name: Optional[str] = None   # find-or-create Team → away_team_id
+
+
+async def _find_or_create_team(db: AsyncSession, name: str, org_id) -> Team:
+    name = name.strip()
+    res = await db.execute(
+        select(Team).where(Team.name == name, Team.organization_id == org_id)
+    )
+    team = res.scalar_one_or_none()
+    if team is None:
+        team = Team(name=name, organization_id=org_id)
+        db.add(team)
+        await db.flush()
+    return team
 
 
 @router.patch("/{game_id}", response_model=GameRead)
@@ -106,12 +131,23 @@ async def update_game(
     game_id: uuid.UUID,
     payload: GameUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role("admin", "coach")),
+    current_user: User = Depends(require_role("admin", "coach")),
 ):
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
-    for field, value in payload.model_dump(exclude_none=True).items():
+
+    data = payload.model_dump(exclude_none=True)
+    # Team names → find-or-create Team (org-scoped) and link to the game. This both
+    # labels the game (names show in metrics) and enables roster-based player mapping.
+    home_name = data.pop("home_team_name", None)
+    away_name = data.pop("away_team_name", None)
+    if home_name:
+        game.home_team_id = (await _find_or_create_team(db, home_name, current_user.organization_id)).id
+    if away_name:
+        game.away_team_id = (await _find_or_create_team(db, away_name, current_user.organization_id)).id
+
+    for field, value in data.items():
         setattr(game, field, value)
     await db.commit()
     await db.refresh(game)
@@ -325,7 +361,11 @@ async def list_highlights(
                 start_s=item.get("start_s", 0.0),
                 end_s=item.get("end_s", 0.0),
                 clip_url=clip_url,
+                score=float(item.get("score", 0.0)),
+                excitement=float(item.get("excitement", 0.0)),
             ))
+        # Most exciting / relevant first.
+        highlights.sort(key=lambda h: h.score, reverse=True)
         return highlights
     except Exception:
         return []

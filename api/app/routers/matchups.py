@@ -19,6 +19,7 @@ from ..models.box_score import BoxScore
 from ..models.game_event import GameEvent
 from ..models.matchup import Matchup
 from ..models.play import Play
+from ..models.player_game_stats import PlayerGameStats
 from ..models.scouting_report import ScoutingReport
 from ..models.simulation import GameSimulation, KeyToVictory, SituationalAdjustment
 from ..models.team import Team
@@ -399,24 +400,53 @@ class PriorityKeyUpdate(BaseModel):
 # ── Helper: aggregate box scores for a team ───────────────────────────────────
 
 async def _get_team_stats(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
-    """Return averaged box score stats for a team."""
+    """Return team stats for simulation: box-score shooting rates (authoritative)
+    MERGED with CV-derived tempo/defense from player_game_stats. ``data_sources``
+    records what fed the numbers (box_score / cv / both)."""
     result = await db.execute(
         select(BoxScore).where(BoxScore.team_id == team_id).order_by(BoxScore.created_at.desc()).limit(10)
     )
     scores = result.scalars().all()
-    if not scores:
-        return {}
-    n = len(scores)
-    fields = ["pts", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "ast", "stl", "blk", "tov"]
-    avgs: dict[str, float] = {}
-    for f in fields:
-        total = sum(getattr(s, f, 0) or 0 for s in scores)
-        avgs[f"avg_{f}"] = round(total / n, 2)
-    avgs["games_played"] = n
-    avgs["fg_pct"] = round(avgs["avg_fgm"] / avgs["avg_fga"], 3) if avgs.get("avg_fga", 0) > 0 else 0.0
-    avgs["fg3_pct"] = round(avgs["avg_fg3m"] / avgs["avg_fg3a"], 3) if avgs.get("avg_fg3a", 0) > 0 else 0.0
-    avgs["ft_pct"] = round(avgs["avg_ftm"] / avgs["avg_fta"], 3) if avgs.get("avg_fta", 0) > 0 else 0.0
-    avgs["avg_reb"] = round(avgs.get("avg_oreb", 0) + avgs.get("avg_dreb", 0), 2)
+    avgs: dict[str, Any] = {}
+    if scores:
+        n = len(scores)
+        fields = ["pts", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "ast", "stl", "blk", "tov"]
+        for f in fields:
+            total = sum(getattr(s, f, 0) or 0 for s in scores)
+            avgs[f"avg_{f}"] = round(total / n, 2)
+        avgs["games_played"] = n
+        avgs["fg_pct"] = round(avgs["avg_fgm"] / avgs["avg_fga"], 3) if avgs.get("avg_fga", 0) > 0 else 0.0
+        avgs["fg3_pct"] = round(avgs["avg_fg3m"] / avgs["avg_fg3a"], 3) if avgs.get("avg_fg3a", 0) > 0 else 0.0
+        avgs["ft_pct"] = round(avgs["avg_ftm"] / avgs["avg_fta"], 3) if avgs.get("avg_fta", 0) > 0 else 0.0
+        avgs["avg_reb"] = round(avgs.get("avg_oreb", 0) + avgs.get("avg_dreb", 0), 2)
+
+    # ── CV/tracking aggregates from analyzed games (tempo + defensive pressure) ──
+    cv_res = await db.execute(
+        select(PlayerGameStats).where(PlayerGameStats.team_id == team_id)
+    )
+    cv_rows = cv_res.scalars().all()
+    cv_game_ids = {r.game_id for r in cv_rows}
+    if cv_game_ids:
+        ng = len(cv_game_ids)
+        team_steals = sum(r.steals_cv or 0 for r in cv_rows)
+        team_shots = sum(r.shots_attempted_cv or 0 for r in cv_rows)
+        team_made = sum(r.shots_made_cv or 0 for r in cv_rows)
+        avgs["cv_games"] = ng
+        avgs["cv_steals_pg"] = round(team_steals / ng, 2)
+        avgs["cv_shots_pg"] = round(team_shots / ng, 2)
+        # Defensive pressure → extra turnover probability inflicted on the OPPONENT.
+        # Scaled & capped so CV defense nudges, not dominates, the box-score model.
+        avgs["cv_def_pressure"] = round(min(0.06, (team_steals / ng) / 200.0), 4)
+        # CV shooting (rim makes/attempts) — only used as fallback when no box score.
+        if team_shots > 0:
+            avgs["cv_fg_pct"] = round(team_made / team_shots, 3)
+        # Pace proxy: shot attempts per game → possessions estimate when no box score.
+        avgs["cv_possessions"] = round(team_shots / ng, 1) if ng else None
+
+    avgs["data_sources"] = (
+        "both" if (scores and cv_game_ids) else "box_score" if scores
+        else "cv" if cv_game_ids else "none"
+    )
     return avgs
 
 

@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import AppShell from "@/components/layout/AppShell";
 import { api } from "@/lib/api";
 import {
-  Download, Film, Loader2, Play, RefreshCw, Monitor, Smartphone,
+  Download, Film, Loader2, RefreshCw, Monitor, Smartphone,
 } from "lucide-react";
 import Link from "next/link";
 import { clsx } from "clsx";
@@ -18,6 +18,8 @@ interface Highlight {
   s3_key?: string;
   clip_url?: string;
   created_at?: string;
+  score?: number;
+  excitement?: number;
 }
 
 const EVENT_LABELS: Record<string, string> = {
@@ -43,13 +45,18 @@ export default function HighlightsPage() {
   const [generating, setGenerating] = useState(false);
   const [portrait, setPortrait] = useState(false);
   const [filter, setFilter] = useState<string>("all");
+  const [genMsg, setGenMsg] = useState<string>("");
+  const [genError, setGenError] = useState<string>("");
 
-  const fetchHighlights = async () => {
+  const fetchHighlights = async (): Promise<number> => {
     try {
       const { data } = await api.get(`/games/${gameId}/highlights`);
-      setHighlights(data ?? []);
+      const list = data ?? [];
+      setHighlights(list);
+      return list.length;
     } catch {
       setHighlights([]);
+      return 0;
     } finally {
       setLoading(false);
     }
@@ -61,9 +68,23 @@ export default function HighlightsPage() {
 
   const handleGenerate = async () => {
     setGenerating(true);
+    setGenError("");
+    setGenMsg("");
+    const before = highlights.length;
     try {
-      await api.post(`/games/${gameId}/highlights/generate`, { portrait });
-      await fetchHighlights();
+      const { data } = await api.post(`/games/${gameId}/highlights/generate`, null, { params: { portrait } });
+      setGenMsg(`Generando ${data?.events ?? ""} clips… puede tardar 1–3 min.`);
+      // Poll until clips appear (the task runs async on the worker).
+      const deadline = Date.now() + 4 * 60 * 1000; // 4 min
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5000));
+        const n = await fetchHighlights();
+        if (n > before) { setGenMsg(`Listo: ${n} clips generados.`); break; }
+      }
+      if (Date.now() >= deadline) setGenMsg("Aún procesando… recarga en un momento.");
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setGenError(detail ?? (err instanceof Error ? err.message : "No se pudo generar"));
     } finally {
       setGenerating(false);
     }
@@ -126,6 +147,16 @@ export default function HighlightsPage() {
           </div>
         </div>
 
+        {(genMsg || genError) && (
+          <div className={clsx(
+            "text-sm px-4 py-2 rounded-lg border",
+            genError ? "bg-red-900/30 border-red-700/50 text-red-300"
+                     : "bg-slate-800 border-slate-700 text-slate-300",
+          )}>
+            {genError || genMsg}
+          </div>
+        )}
+
         {/* Filter tabs */}
         {highlights.length > 0 && (
           <div className="flex gap-2 flex-wrap">
@@ -180,17 +211,14 @@ export default function HighlightsPage() {
                   {highlight.clip_url ? (
                     <video
                       src={highlight.clip_url}
-                      className="w-full h-full object-cover"
-                      controls={false}
-                      muted
+                      className="w-full h-full object-contain bg-black"
+                      controls
+                      playsInline
                       preload="metadata"
                     />
                   ) : (
                     <Film size={32} className="text-slate-600" />
                   )}
-                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40">
-                    <Play size={32} className="text-white" fill="white" />
-                  </div>
                 </div>
 
                 {/* Info */}
@@ -202,6 +230,14 @@ export default function HighlightsPage() {
                     )}>
                       {EVENT_LABELS[highlight.event_type] ?? highlight.event_type}
                     </span>
+                    {(highlight.excitement ?? 0) > 0.05 && (
+                      <span
+                        className="text-xs text-amber-400"
+                        title={`Excitación del público: ${Math.round((highlight.excitement ?? 0) * 100)}%`}
+                      >
+                        {"🔥".repeat(Math.min(3, Math.max(1, Math.ceil((highlight.excitement ?? 0) * 3))))}
+                      </span>
+                    )}
                     <span className="text-xs text-slate-500">
                       {highlight.start_s.toFixed(1)}s – {highlight.end_s.toFixed(1)}s
                     </span>

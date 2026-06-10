@@ -25,6 +25,8 @@ class GameRead(BaseModel):
     season_id: uuid.UUID
     home_team_id: Optional[uuid.UUID]
     away_team_id: Optional[uuid.UUID]
+    home_team_name: Optional[str] = None
+    away_team_name: Optional[str] = None
     game_date: Optional[date]
     location: Optional[str]
     court_level: str

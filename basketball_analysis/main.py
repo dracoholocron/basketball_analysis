@@ -80,6 +80,223 @@ def _resolve_detector_path(multiclass: str, legacy: str) -> str:
     return multiclass if os.path.exists(multiclass) else legacy
 
 
+def _stitch_tracks(player_tracks: list[dict], frame_width: int,
+                   max_gap_s: float, max_dist_frac: float,
+                   fps: float) -> list[dict]:
+    """Link fragmented tracks of the same player by spatio-temporal continuity.
+
+    When a track ends and another begins shortly after (≤ max_gap_s) near where the
+    first ended, they are almost certainly the same player who was briefly lost
+    (occlusion / missed detection). We merge B into A. Continuity-based, so it does
+    NOT confuse teammates by appearance. Reduces fragmentation regardless of tracker.
+    """
+    import math
+    stats: dict = {}  # tid -> [first_frame, last_frame, first_center, last_center]
+    for i, frame in enumerate(player_tracks):
+        for tid, info in frame.items():
+            bb = info.get("bbox", [])
+            if len(bb) < 4:
+                continue
+            c = ((bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0)
+            if tid not in stats:
+                stats[tid] = [i, i, c, c]
+            else:
+                stats[tid][1] = i
+                stats[tid][3] = c
+    if len(stats) < 2:
+        return player_tracks
+
+    gap_frames = max(1, int(max_gap_s * fps))
+    order = sorted(stats, key=lambda t: stats[t][0])
+    parent = {t: t for t in stats}
+    active: list[dict] = []  # finished/extending chains: {last, lc, root}
+    for t in order:
+        f0, _f1, c0, _c1 = stats[t]
+        best, bestd = None, 1e18
+        for a in active:
+            la = a["last"]
+            if la < f0 and (f0 - la) <= gap_frames:
+                d = math.hypot(c0[0] - a["lc"][0], c0[1] - a["lc"][1])
+                gap_s = max(1.0, (f0 - la) / fps)
+                if d <= max_dist_frac * frame_width * gap_s and d < bestd:
+                    best, bestd = a, d
+        if best is not None:
+            parent[t] = best["root"]
+            best["last"] = stats[t][1]
+            best["lc"] = stats[t][3]
+        else:
+            active.append({"last": stats[t][1], "lc": stats[t][3], "root": t})
+
+    def find(x):
+        while parent[x] != x:
+            x = parent[x]
+        return x
+
+    new: list[dict] = []
+    for frame in player_tracks:
+        nf: dict = {}
+        for tid, info in frame.items():
+            r = find(tid) if tid in parent else tid
+            if r not in nf:
+                nf[r] = info
+        new.append(nf)
+
+    n_after = len({find(t) for t in stats})
+    logger.info(
+        "Tracklet stitching: %d tracks → %d after linking (gap≤%.1fs, dist≤%.0f px/s)",
+        len(stats), n_after, max_gap_s, max_dist_frac * frame_width,
+    )
+    return new
+
+
+def _ball_center(bt: dict):
+    bbox = bt.get(1, {}).get("bbox", [])
+    if len(bbox) < 4:
+        return None
+    return ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+
+
+def _rim_box_sequence(rims_with_t: list[tuple[int, list[float]]],
+                      total_frames: int,
+                      clamp_margin: int | None = None) -> list[list[float] | None]:
+    """Build a per-frame rim box from boxes annotated at different frame indices.
+
+    Each annotation carries the frame it was drawn on (frame_t × fps). For a
+    panning camera the rim moves on screen, so we linearly interpolate between
+    consecutive annotations of the *same* hoop. With a single annotation this
+    degrades to a static box on every frame (correct for a fixed camera).
+
+    ``clamp_margin`` (frames): when set, the box is only emitted within
+    ``[first - margin, last + margin]`` and is None outside. Used when several
+    distinct hoops are annotated, so a hoop that's only visible during one part of
+    the pan does not "exist" (frozen) over the whole video.
+    """
+    if not rims_with_t:
+        return [None] * total_frames
+    pts = sorted(rims_with_t, key=lambda p: p[0])
+    lo, hi = pts[0][0], pts[-1][0]
+    seq: list[list[float] | None] = [None] * total_frames
+    for i in range(total_frames):
+        if clamp_margin is not None and (i < lo - clamp_margin or i > hi + clamp_margin):
+            seq[i] = None
+            continue
+        if i <= lo:
+            seq[i] = list(pts[0][1])
+        elif i >= hi:
+            seq[i] = list(pts[-1][1])
+        else:
+            a, b = pts[0], pts[-1]
+            for k in range(len(pts) - 1):
+                if pts[k][0] <= i <= pts[k + 1][0]:
+                    a, b = pts[k], pts[k + 1]
+                    break
+            span = (b[0] - a[0]) or 1
+            t = (i - a[0]) / span
+            seq[i] = [a[1][j] + (b[1][j] - a[1][j]) * t for j in range(4)]
+    return seq
+
+
+def _is_made_basket(ball_tracks: list[dict], rim_seq: list,
+                    frame: int, fps: float, window_s: float = 0.8,
+                    bb_seq: list | None = None) -> bool:
+    """Heuristic make/miss: the ball must come from ABOVE (rim x-band OR the backboard
+    box), pass THROUGH the rim band, and end up BELOW it within a short window → a
+    basket. The optional ``bb_seq`` (per-frame backboard box for the SAME hoop)
+    reinforces detection: a ball that touches the board or descends from the board
+    area into the rim counts as "from above", catching bank shots and high-arc makes
+    that a rim-only check might miss. A miss (rim-out, airball, block) won't produce
+    the full above→through→below sequence."""
+    w = int(fps * window_s)
+    lo = max(0, frame - w)
+    hi = min(len(ball_tracks), frame + w + 1)
+    above = through = below = False
+    for j in range(lo, hi):
+        c = _ball_center(ball_tracks[j])
+        rb = rim_seq[j] if j < len(rim_seq) else None
+        if c is None or rb is None:
+            continue
+        rb_w = rb[2] - rb[0]
+        in_x = (rb[0] - rb_w * 0.2) <= c[0] <= (rb[2] + rb_w * 0.2)
+        # Backboard reinforcement: inside the board box, or x-aligned and above its
+        # bottom edge, also qualifies as "coming from above" for this hoop.
+        bb = bb_seq[j] if (bb_seq is not None and j < len(bb_seq)) else None
+        on_board = bool(bb and bb[0] <= c[0] <= bb[2] and c[1] <= bb[3])
+        if on_board:
+            above = True
+        if not in_x:
+            continue
+        if c[1] < rb[1]:
+            above = True
+        elif rb[1] <= c[1] <= rb[3]:
+            if above:
+                through = True
+        elif c[1] > rb[3] and through:
+            below = True
+    return bool(above and through and below)
+
+
+def _rim_shot_events(ball_tracks: list[dict], rim_seqs: list[list],
+                     fps: float, cooldown_s: float = 1.5,
+                     bb_seqs: list | None = None) -> list[dict]:
+    """Count a shot attempt when the ball center enters the (slightly expanded)
+    rim box *of that frame*, debounced by a global cooldown. Each event carries a
+    ``made`` flag (make/miss via _is_made_basket, reinforced by the matching backboard
+    sequence in ``bb_seqs`` when available). ``rim_seqs``/``bb_seqs`` are aligned lists
+    — one per annotated hoop — so the proxy follows a panning camera and supports
+    multiple distinct hoops. Geometry-based proxy, more reliable than pose-only when a
+    manual rim is provided."""
+    events: list[dict] = []
+    last = -10 ** 9
+    cooldown = int(cooldown_s * fps)
+    for i, bt in enumerate(ball_tracks):
+        c = _ball_center(bt)
+        if c is None:
+            continue
+        for k, seq in enumerate(rim_seqs):
+            rb = seq[i] if i < len(seq) else None
+            if rb is None:
+                continue
+            ex = (rb[2] - rb[0]) * 0.5
+            ey = (rb[3] - rb[1]) * 0.5
+            if rb[0] - ex <= c[0] <= rb[2] + ex and rb[1] - ey <= c[1] <= rb[3] + ey:
+                if i - last >= cooldown:
+                    bb_seq = bb_seqs[k] if (bb_seqs and k < len(bb_seqs)) else None
+                    made = _is_made_basket(ball_tracks, seq, i, fps, bb_seq=bb_seq)
+                    events.append({"type": "shot_attempt", "frame": i,
+                                   "track_id": -1, "made": made})
+                    last = i
+                break
+    return events
+
+
+def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[dict]:
+    """
+    Fuse YOLO and SAM2 per-frame ball tracks.
+
+    - both present & agree (centers within 50px) → keep YOLO (precise).
+    - only one present → use it.
+    - both present & disagree → use SAM2 (anchored to user clicks, trustworthy
+      for off-domain balls).
+    """
+    import math
+    n = len(yolo_tracks)
+    out: list[dict] = []
+    for i in range(n):
+        y = yolo_tracks[i] if i < len(yolo_tracks) else {}
+        s = sam2_tracks[i] if i < len(sam2_tracks) else {}
+        yc, sc = _ball_center(y), _ball_center(s)
+        if yc and sc:
+            d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
+            out.append(y if d <= 50 else s)
+        elif yc:
+            out.append(y)
+        elif sc:
+            out.append(s)
+        else:
+            out.append({})
+    return out
+
+
 def run_pipeline(
     input_video: str,
     output_video: str = OUTPUT_VIDEO_PATH,
@@ -98,6 +315,8 @@ def run_pipeline(
     chunk_size: int | None = None,
     show_poses: bool = True,
     pose_player_filter: list[int] | None = None,
+    ball_points: list[dict] | None = None,
+    hoop_boxes: list[dict] | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -146,11 +365,18 @@ def run_pipeline(
         _vid_props = get_video_properties(input_video)
         actual_fps = _vid_props["fps"] or 24.0
         frame_width = _vid_props["width"] or 1280
+        _intrinsic_height = _vid_props["height"] or 720
         _total_frames_hint = _vid_props["total_frames"]
     except Exception:
         actual_fps = 24.0
         frame_width = 1280
+        _intrinsic_height = 720
         _total_frames_hint = 0
+
+    # Manual anchors are stored in the video's intrinsic pixel space, but all
+    # inference/drawing runs on frames downscaled to max height 720p. Compute the
+    # factor to map anchors into that working space (1.0 when video is ≤720p tall).
+    _manual_src_scale = 720.0 / _intrinsic_height if _intrinsic_height > 720 else 1.0
 
     player_tracker = PlayerTracker(_player_path)
     ball_tracker = BallTracker(_ball_path)
@@ -160,6 +386,9 @@ def run_pipeline(
     _ball_stub = os.path.join(stub_path, "ball_track_stubs.pkl")
     _court_stub = os.path.join(stub_path, "court_key_points_stub.pkl")
     _assign_stub = os.path.join(stub_path, "player_assignment_stub.pkl")
+
+    # Jersey number per track (track_id -> dorsal str); populated by OCR when enabled.
+    jersey_numbers: dict[int, str] = {}
 
     if _chunk_size > 0:
         # ── Chunked inference path (O(chunk_size) peak RAM) ─────────────────
@@ -174,12 +403,19 @@ def run_pipeline(
         player_tracks = read_stub(use_stubs, _player_stub)
         referee_tracks: list = read_stub(use_stubs, _ref_stub) or []
         if player_tracks is None:
-            sv_player = player_tracker.detect_frames_streaming(input_video, _chunk_size)
-            player_tracks = player_tracker.build_tracks_from_sv_detections(sv_player)
+            player_tracks, _refs = player_tracker.get_tracks_streaming(
+                input_video, max_height=_settings.player_max_h, target_height=720,
+            )
+            if getattr(_settings, "track_stitch", True):
+                player_tracks = _stitch_tracks(
+                    player_tracks, frame_width,
+                    max_gap_s=getattr(_settings, "track_stitch_max_gap_s", 1.0),
+                    max_dist_frac=getattr(_settings, "track_stitch_max_dist_frac", 0.10),
+                    fps=actual_fps,
+                )
             if not referee_tracks:
-                referee_tracks = player_tracker.build_referee_tracks_from_sv_detections(sv_player)
+                referee_tracks = _refs
                 save_stub(_ref_stub, referee_tracks)
-            del sv_player
             save_stub(_player_stub, player_tracks)
         logger.info(
             "Player tracks done (%d frames, %d referee detections)",
@@ -205,9 +441,56 @@ def run_pipeline(
         logger.info("Court keypoints done (%d frames)", len(court_keypoints_per_frame))
 
         _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
+        _raw_detected = len(ball_tracks) - _missing_before_sahi
+        logger.info(
+            "Ball raw detection rate: %d/%d frames (%.1f%%) before SAHI",
+            _raw_detected, len(ball_tracks),
+            100.0 * _raw_detected / max(len(ball_tracks), 1),
+        )
+
+        # ── SAM2 ball propagation (when manual ball points exist) ───────────
+        # Color-agnostic; fuse with YOLO: keep YOLO where it agrees/is precise,
+        # use SAM2 to fill gaps and resolve disagreements (anchored to clicks).
+        if ball_points and getattr(_settings, "ball_sam2", True):
+            try:
+                from ball_sam2 import Sam2BallTracker
+                sam2 = Sam2BallTracker(_settings.sam2_checkpoint, _settings.sam2_config)
+                sam2_tracks = sam2.track(
+                    input_video, ball_points, len(ball_tracks), actual_fps,
+                    src_scale=_manual_src_scale,
+                )
+                if sam2_tracks is not None:
+                    # Export SAM2 boxes as YOLO auto-labels for fine-tuning (purpose 2).
+                    if getattr(_settings, "ball_export_dataset", False):
+                        try:
+                            import uuid as _uuid
+                            from ball_sam2.export_dataset import export_yolo_dataset
+                            _nv = {
+                                int(round(float(p.get("frame_t", 0.0)) * actual_fps))
+                                for p in ball_points if not p.get("visible", True)
+                            }
+                            _written = export_yolo_dataset(
+                                input_video, sam2_tracks, "/app/ball_dataset",
+                                game_id=_uuid.uuid4().hex[:8], not_visible_frames=_nv,
+                            )
+                            logger.info("Ball dataset export: %d labeled frames", _written)
+                        except Exception as exc:
+                            logger.warning("Ball dataset export failed: %s", exc)
+                    ball_tracks = _fuse_ball_tracks(ball_tracks, sam2_tracks)
+                    _m = sum(1 for bt in ball_tracks if 1 not in bt)
+                    logger.info(
+                        "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
+                        len(ball_tracks) - _m, len(ball_tracks),
+                        100.0 * (len(ball_tracks) - _m) / max(len(ball_tracks), 1),
+                    )
+            except Exception as exc:
+                logger.warning("SAM2 ball fusion skipped: %s", exc)
+
+        _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
         if _missing_before_sahi > 0:
             ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
         ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
 
         _progress("team_assignment", 55)
@@ -223,6 +506,23 @@ def run_pipeline(
             stub_path=_assign_stub,
         )
         logger.info("Team assignment done")
+
+        # ── Jersey number OCR (player identity) ─────────────────────────────
+        # Read dorsales per track from NATIVE-resolution crops, vote per tracklet.
+        # Used downstream to consolidate fragmented tracks into real athletes.
+        if getattr(_settings, "jersey_ocr", False):
+            try:
+                from jersey_ocr import JerseyOCR
+                _ocr = JerseyOCR()
+                jersey_numbers = _ocr.read_tracklets(
+                    input_video, player_tracks,
+                    src_scale=_manual_src_scale,
+                    sample_every=getattr(_settings, "jersey_ocr_sample_every", 10),
+                    min_votes=getattr(_settings, "jersey_ocr_min_votes", 3),
+                )
+                logger.info("Jersey OCR: %d tracks have a dorsal", len(jersey_numbers))
+            except Exception as exc:
+                logger.warning("Jersey OCR skipped: %s", exc)
 
         _progress("pose_estimation", 62)
         if show_poses:
@@ -281,6 +581,7 @@ def run_pipeline(
         logger.info("Court keypoints done")
 
         ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
 
         _progress("team_assignment", 55)
@@ -338,6 +639,61 @@ def run_pipeline(
         len(hoop_tracks), sum(1 for h in hoop_tracks if h is not None),
     )
 
+    # ── Manual hoop override (boxes are trusted over the YOLO hoop detector) ─────
+    # Each rim box carries the frame it was annotated on (frame_t × fps) and a
+    # hoop_id identifying which physical hoop it belongs to. Boxes are grouped by
+    # hoop_id; within each hoop we interpolate a per-frame box (follows a panning
+    # camera). When several hoops are annotated, each is only "active" around the
+    # frames it was marked on, so a hoop visible in one part of the pan doesn't
+    # exist (frozen) over the whole video.
+    _rim_seqs: list[list] = []
+    _bb_seqs: list[list | None] = []   # backboard sequence aligned per hoop with _rim_seqs
+    _rim_boxes_720: list[list[float]] = []
+    if hoop_boxes:
+        from collections import defaultdict as _dd
+
+        def _grouped_by_hoop(kind: str) -> dict[int, list[tuple[int, list[float]]]]:
+            g: dict[int, list[tuple[int, list[float]]]] = _dd(list)
+            for b in hoop_boxes:
+                if b.get("kind", "rim") != kind or len(b.get("bbox", [])) != 4:
+                    continue
+                box = [float(v) * _manual_src_scale for v in b["bbox"]]
+                fidx = max(0, min(total_frames - 1,
+                                  int(round(float(b.get("frame_t", 0.0)) * actual_fps))))
+                g[int(b.get("hoop_id", 0))].append((fidx, box))
+            return g
+
+        # Boxes with no explicit kind default to "rim" inside _grouped_by_hoop.
+        groups = _grouped_by_hoop("rim")
+        bb_groups = _grouped_by_hoop("backboard")
+        if groups:
+            multi = len(groups) > 1
+
+            def _seq(pts):
+                # Window to marked range only with several hoops AND ≥2 marks (panning
+                # track). A single mark = static box for the whole video.
+                m = int(actual_fps * 2) if (multi and len(pts) >= 2) else None
+                return _rim_box_sequence(pts, total_frames, clamp_margin=m)
+
+            for hid in sorted(groups):
+                _rim_seqs.append(_seq(groups[hid]))
+                # Pair the SAME hoop's backboard so it reinforces this rim's makes.
+                _bb_seqs.append(_seq(bb_groups[hid]) if bb_groups.get(hid) else None)
+            _rim_boxes_720 = [box for pts in groups.values() for _, box in pts]
+            # hoop_tracks (metrics only; not drawn): first active hoop box per frame
+            hoop_tracks = []
+            for i in range(total_frames):
+                b = next((s[i] for s in _rim_seqs if s[i] is not None), None)
+                hoop_tracks.append(list(b) if b is not None else None)
+            logger.info(
+                "Manual hoop: %d hoop(s), %d rim box(es) at frames %s, %d backboard box(es)"
+                " → per-frame interpolated sequences%s",
+                len(groups), len(_rim_boxes_720),
+                sorted({f for pts in groups.values() for f, _ in pts}),
+                sum(len(v) for v in bb_groups.values()),
+                " (windowed per hoop)" if multi else "",
+            )
+
     # ── CV Event Detection (shot, rebound, steal) ───────────────────────────────
     _progress("event_detection", 66)
     _event_stub = os.path.join(stub_path, "cv_events_stub.pkl")
@@ -356,7 +712,9 @@ def run_pipeline(
             rebound_events = ReboundDetector().process_sequence(
                 pose_sequence, ball_tracks, player_tracks
             )
-            steal_events = StealTurnoverDetector().process_sequence(pose_sequence, ball_tracks)
+            steal_events = StealTurnoverDetector().process_sequence(
+                pose_sequence, ball_tracks, player_assignment
+            )
             save_stub(_event_stub, {
                 "shot_events": shot_events,
                 "rebound_events": rebound_events,
@@ -364,6 +722,17 @@ def run_pipeline(
             })
         except Exception as exc:
             logger.warning("Event detection failed: %s — skipping", exc)
+
+    # Manual rim → ball-reaches-rim shot proxy (more reliable than pose-only when a
+    # rim box is provided). Replaces pose-based shots to avoid double counting.
+    if _rim_boxes_720:
+        _rim_shots = _rim_shot_events(ball_tracks, _rim_seqs, actual_fps, bb_seqs=_bb_seqs)
+        logger.info(
+            "Manual rim shots: %d (replacing %d pose-based)",
+            len(_rim_shots), len(shot_events),
+        )
+        shot_events = _rim_shots
+
     logger.info(
         "CV events: %d shots, %d rebounds, %d steals",
         len(shot_events), len(rebound_events), len(steal_events),
@@ -411,9 +780,15 @@ def run_pipeline(
         court_profile=profile,
         manual_landmarks=manual_landmarks,
         camera_motion=camera_motion,
+        src_scale=_manual_src_scale,
     )
     court_keypoints_per_frame = tactical_view_converter.validate_keypoints(
         court_keypoints_per_frame
+    )
+    # Build per-frame manual-anchor sequence (optical-flow tracked for moving
+    # cameras; static reuse otherwise). No-op when no manual landmarks exist.
+    tactical_view_converter.build_manual_anchor_sequence(
+        input_video, total_frames, actual_fps
     )
     tactical_player_positions = (
         tactical_view_converter.transform_players_to_tactical_view(
@@ -448,7 +823,8 @@ def run_pipeline(
     pose_drawer               = PoseDrawer(player_filter=pose_player_filter)
     ball_tracks_drawer        = BallTracksDrawer()
     court_keypoint_drawer     = CourtKeypointDrawer(
-        manual_src=tactical_view_converter._manual_src
+        manual_src=tactical_view_converter._manual_src,
+        manual_src_seq=tactical_view_converter._manual_src_seq,
     )
     team_ball_control_drawer  = TeamBallControlDrawer()
     frame_number_drawer       = FrameNumberDrawer()
@@ -623,6 +999,7 @@ def run_pipeline(
         # Raw per-frame sequences needed by _persist_metrics in the worker
         "ball_acquisition": ball_aquisition,          # list[int] — track_id holding ball, -1 if none
         "player_assignment": player_assignment,       # list[dict[track_id, team_id]]
+        "jersey_numbers": jersey_numbers,             # dict[track_id, dorsal str] from OCR voting
         "passes": passes,                             # list[int] — team_id that passed, -1 if none
         "interceptions": interceptions,               # list[int] — team_id that intercepted, -1 if none
         "fps": actual_fps,

@@ -10,9 +10,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libpq-dev \
     gcc \
+    git \
     libgl1-mesa-glx \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+# SAM 2 (Meta) for click-prompted ball tracking. Installed best-effort: the
+# pipeline degrades gracefully to the YOLO ball path if the import is missing.
+RUN pip install --no-cache-dir "git+https://github.com/facebookresearch/sam2.git" || \
+    echo "WARNING: sam2 install failed — ball SAM2 tracking will be disabled at runtime"
+
+# EasyOCR for jersey-number recognition (player identity). Best-effort: jersey OCR
+# is skipped at runtime if the import fails. Model weights download on first use and
+# are cached under /app/engine/models/easyocr (mount a volume to persist).
+RUN pip install --no-cache-dir easyocr || \
+    echo "WARNING: easyocr install failed — jersey number OCR will be disabled at runtime"
+
+# lap: linear-assignment solver required by ultralytics BoT-SORT/ByteTrack trackers.
+# Baked in so the first model.track() call doesn't trigger a runtime auto-install.
+RUN pip install --no-cache-dir lap
 
 # API service deps (for Celery + DB + Storage)
 COPY api/requirements.txt /tmp/api_requirements.txt

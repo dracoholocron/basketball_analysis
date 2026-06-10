@@ -21,14 +21,21 @@ class PoseDrawer:
         None (default) draws poses for all players.
     """
 
-    CONF_THRESHOLD = 0.3
     BONE_COLOR  = (0, 255, 255)   # cyan (BGR)
     JOINT_COLOR = (255, 255, 0)   # yellow (BGR)
     BONE_THICKNESS = 2
     JOINT_RADIUS = 3
 
-    def __init__(self, player_filter: list[int] | None = None):
+    def __init__(self, player_filter: list[int] | None = None,
+                 conf_threshold: float | None = None):
         self.player_filter = player_filter
+        if conf_threshold is None:
+            try:
+                from configs.settings import settings
+                conf_threshold = settings.pose_conf_threshold
+            except Exception:
+                conf_threshold = 0.05
+        self.CONF_THRESHOLD = conf_threshold
 
     def draw_frame(self, frame, frame_num, pose_sequence):
         if frame_num >= len(pose_sequence):
@@ -43,6 +50,11 @@ class PoseDrawer:
         if keypoints is None or len(keypoints) < 17:
             return frame
         kp = np.asarray(keypoints)
+
+        # Skip degenerate detections: a real player needs several confident joints.
+        # Avoids drawing long crossing lines from a couple of stray keypoints.
+        if int((kp[:, 2] > self.CONF_THRESHOLD).sum()) < 5:
+            return frame
 
         for i, j in _COCO_SKELETON:
             if kp[i][2] > self.CONF_THRESHOLD and kp[j][2] > self.CONF_THRESHOLD:

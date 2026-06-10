@@ -163,6 +163,155 @@ class EngineSettings(BaseSettings):
         default=0.4,
         description="NMS IoU threshold for ball detector",
     )
+    ball_sahi_tile: int = Field(
+        default=640,
+        description="SAHI tile size (px) for ball gap-refill; smaller helps tiny balls",
+    )
+    ball_sahi_overlap: float = Field(
+        default=0.25,
+        description="SAHI tile overlap fraction for ball gap-refill",
+    )
+    ball_max_interp_gap: int = Field(
+        default=15,
+        description=(
+            "Max consecutive missing frames to linear-interpolate the ball across "
+            "(~0.5s at 30fps). Longer gaps are left empty instead of drawing a "
+            "false straight line."
+        ),
+    )
+    ball_kalman: bool = Field(
+        default=True,
+        description="Apply a constant-velocity Kalman filter to smooth/predict the ball",
+    )
+    ball_visual_track: bool = Field(
+        default=False,
+        description=(
+            "Bridge detector gaps with a color-agnostic visual tracker (CSRT) seeded "
+            "from confident detections — helps off-domain balls (e.g. gray). Off by "
+            "default: try lower conf + Kalman first; enable only if coverage is still low."
+        ),
+    )
+    ball_sam2: bool = Field(
+        default=True,
+        description=(
+            "When manual ball annotations exist, propagate them across the video with "
+            "SAM2 (color-agnostic) and fuse with the YOLO detector. Degrades to the "
+            "YOLO path if sam2 is unavailable."
+        ),
+    )
+    sam2_checkpoint: str = Field(
+        default="models/sam2.1_hiera_small.pt",
+        description="Path to the SAM2 checkpoint (.pt)",
+    )
+    sam2_config: str = Field(
+        default="configs/sam2.1/sam2.1_hiera_s.yaml",
+        description="SAM2 hydra config name (ships with the sam2 package)",
+    )
+    sam2_stride: int = Field(
+        default=1,
+        description=(
+            "Process 1 of every N frames with SAM2 (rest filled by Kalman/interp). "
+            "Raise (2-3) on very long videos to cut SAM2 time."
+        ),
+    )
+
+    # ── Player detection resolution ──────────────────────────────────────────────
+    player_max_h: int = Field(
+        default=720,
+        description=(
+            "Frame read height for player detection. Raise (e.g. 1080) to feed the "
+            "detector native-resolution frames; boxes are rescaled back to 720p."
+        ),
+    )
+    player_imgsz: int = Field(
+        default=640,
+        description=(
+            "YOLO inference imgsz for player detection. Raise (e.g. 1280) together "
+            "with player_max_h so small/distant players aren't lost to the default "
+            "640 internal resize."
+        ),
+    )
+    tracker: str = Field(
+        default="botsort",
+        description=(
+            "Player tracker backend: 'botsort' (BoT-SORT + camera-motion "
+            "compensation — best for panning video) or 'bytetrack'."
+        ),
+    )
+    tracker_lost_buffer: int = Field(
+        default=120,
+        description=(
+            "ByteTrack lost_track_buffer (frames). Higher keeps a lost track alive "
+            "longer through occlusions → fewer new IDs (~4s at 30fps)."
+        ),
+    )
+    tracker_min_match: float = Field(
+        default=0.85,
+        description="ByteTrack minimum_matching_threshold (higher = looser re-match)",
+    )
+    tracker_frame_rate: int = Field(
+        default=30,
+        description="ByteTrack frame_rate (scales the lost-track buffer window)",
+    )
+    track_stitch: bool = Field(
+        default=True,
+        description="Link track fragments by spatio-temporal continuity (tracklet stitching)",
+    )
+    track_stitch_max_gap_s: float = Field(
+        default=1.0,
+        description="Max time gap (s) between one track ending and another starting to stitch them",
+    )
+    track_stitch_max_dist_frac: float = Field(
+        default=0.10,
+        description="Max center distance to stitch, as fraction of frame width, per second of gap",
+    )
+    min_track_seconds: float = Field(
+        default=0.5,
+        description="Drop provisional (no-dorsal) identities seen less than this (noise/false tracks)",
+    )
+
+    # ── Jersey number OCR (player identity) ──────────────────────────────────────
+    jersey_ocr: bool = Field(
+        default=True,
+        description="Read jersey numbers (OCR) per track and consolidate identities by (team, number)",
+    )
+    jersey_ocr_sample_every: int = Field(
+        default=5,
+        description="Run jersey OCR every N frames per track (cost control; lower = more coverage)",
+    )
+    jersey_ocr_min_votes: int = Field(
+        default=2,
+        description="Min OCR readings agreeing before a track is assigned a jersey number",
+    )
+    ball_export_dataset: bool = Field(
+        default=False,
+        description="Export SAM2-propagated ball boxes as a YOLO dataset during analysis (fine-tune corpus)",
+    )
+
+    # ── Pose estimation ──────────────────────────────────────────────────────────
+    pose_conf_threshold: float = Field(
+        default=0.05,
+        description=(
+            "Min keypoint confidence to DRAW a pose joint/bone. RTMPose SimCC "
+            "raw-max scores sit around ~0.05-0.17 for real joints, so it is well "
+            "below 1.0."
+        ),
+    )
+    pose_topdown: bool = Field(
+        default=True,
+        description=(
+            "YOLO-pose top-down: run pose on each tracked player's crop (upscaled) "
+            "instead of the full frame, so small/distant players still get a skeleton."
+        ),
+    )
+    event_pose_conf_threshold: float = Field(
+        default=0.12,
+        description=(
+            "Stricter keypoint confidence used by the event detectors (shots/steals) "
+            "so noisy low-confidence joints don't trigger false events. Higher than "
+            "the draw threshold."
+        ),
+    )
 
     # ── Team assignment ────────────────────────────────────────────────────────
     team_1_jersey: str = Field(
@@ -186,6 +335,20 @@ class EngineSettings(BaseSettings):
     speed_max_kmh: float = Field(
         default=40.0,
         description="Hard cap on per-frame speed (km/h) to filter homography noise",
+    )
+    speed_deadband_m: float = Field(
+        default=0.08,
+        description=(
+            "Per-frame tactical displacement (m) below which movement is treated as "
+            "jitter and counted as 0 — stops a stationary player accruing fake distance."
+        ),
+    )
+    speed_smooth_alpha: float = Field(
+        default=0.4,
+        description=(
+            "EMA factor (0-1) to smooth per-player tactical positions before measuring "
+            "distance. Lower = smoother. 1.0 disables smoothing."
+        ),
     )
 
     # ── Device / hardware ───────────────────────────────────────────────────────

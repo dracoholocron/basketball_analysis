@@ -80,6 +80,8 @@ export async function updateGameSettings(
     is_half_court?: boolean;
     home_team1_jersey?: string;
     away_team2_jersey?: string;
+    home_team_name?: string;
+    away_team_name?: string;
   }
 ) {
   const { data } = await api.patch(`/games/${gameId}`, payload);
@@ -170,8 +172,126 @@ export async function detectCameraMotion(gameId: string): Promise<{
   return data;
 }
 
+// ── Ball annotation (SAM2 tracking + fine-tune labels) ──────────────────────
+
+export interface BallPoint {
+  frame_t: number;
+  pixel: [number, number];   // intrinsic video resolution
+  visible: boolean;          // false = ball NOT present in this frame
+}
+
+export interface BallAnnotation {
+  id: string;
+  game_id: string;
+  points: BallPoint[] | null;
+}
+
+export async function getBallAnnotation(gameId: string): Promise<BallAnnotation | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/ball-annotation`);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function putBallAnnotation(
+  gameId: string,
+  points: BallPoint[],
+): Promise<BallAnnotation> {
+  const { data } = await api.put(`/games/${gameId}/ball-annotation`, { points });
+  return data;
+}
+
+/** Trigger a background fine-tune of the ball detector on accumulated SAM2 auto-labels. */
+export async function triggerBallFinetune(epochs = 60): Promise<{ task_id: string; status: string; epochs: number }> {
+  const { data } = await api.post(`/admin/finetune-ball`, null, { params: { epochs } });
+  return data;
+}
+
+// ── Hoop annotation (rim/backboard boxes for shot counting) ─────────────────
+
+export interface HoopBox {
+  frame_t: number;
+  bbox: [number, number, number, number];  // intrinsic resolution
+  kind: "rim" | "backboard";
+  hoop_id?: number;  // which physical hoop this box belongs to (0, 1, …)
+}
+
+export interface HoopAnnotation {
+  id: string;
+  game_id: string;
+  hoops: HoopBox[] | null;
+}
+
+export async function getHoopAnnotation(gameId: string): Promise<HoopAnnotation | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/hoop-annotation`);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function putHoopAnnotation(gameId: string, hoops: HoopBox[]): Promise<HoopAnnotation> {
+  const { data } = await api.put(`/games/${gameId}/hoop-annotation`, { hoops });
+  return data;
+}
+
 export async function getLandmarkCatalog(): Promise<LandmarkCatalogItem[]> {
   const { data } = await api.get("/landmarks/catalog");
+  return data;
+}
+
+// ── Roster mapping (detected identities → real players) ─────────────────────────
+export interface RosterPlayer { id: string; name: string; jersey_number?: string | null; }
+export interface MappingIdentity {
+  track_id: number;
+  display_label?: string | null;
+  jersey_number?: string | null;
+  team_id?: number | null;       // 1 = home, 2 = away
+  minutes_played: number;
+  player_id?: string | null;
+}
+export interface PlayerMapping {
+  game_id: string;
+  job_id: string;
+  home_team?: RosterPlayer | null;
+  away_team?: RosterPlayer | null;
+  home_roster: RosterPlayer[];
+  away_roster: RosterPlayer[];
+  identities: MappingIdentity[];
+}
+export interface PlayerMapItem {
+  track_id: number;
+  player_id?: string | null;
+  new_player_name?: string | null;
+  team_id?: number | null;
+  jersey_number?: string | null;
+}
+
+export async function getPlayerMapping(gameId: string): Promise<PlayerMapping> {
+  const { data } = await api.get(`/games/${gameId}/player-mapping`);
+  return data;
+}
+
+export async function putPlayerMapping(gameId: string, mappings: PlayerMapItem[]): Promise<PlayerMapping> {
+  const { data } = await api.put(`/games/${gameId}/player-mapping`, { mappings });
+  return data;
+}
+
+// ── Player / Team profile stats (player_game_stats aggregation) ─────────────────
+export async function getPlayerStats(playerId: string, seasonId?: string) {
+  const { data } = await api.get(`/players/${playerId}/stats`, {
+    params: seasonId ? { season_id: seasonId } : {},
+  });
+  return data;
+}
+
+export async function getTeamStats(teamId: string, seasonId?: string) {
+  const { data } = await api.get(`/teams/${teamId}/stats`, {
+    params: seasonId ? { season_id: seasonId } : {},
+  });
   return data;
 }
 

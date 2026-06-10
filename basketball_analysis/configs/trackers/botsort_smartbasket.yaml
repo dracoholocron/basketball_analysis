@@ -1,0 +1,21 @@
+# BoT-SORT tuned for SmartBasket — moving-camera basketball footage.
+# Key: gmc_method compensates camera panning before association (ByteTrack can't),
+# and a larger track_buffer keeps identities through occlusions → far fewer ID
+# switches / fragmented tracks than the default ByteTrack on panning video.
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 150        # ~5s at 30fps — survive long occlusions/re-entries
+match_thresh: 0.85
+fuse_score: True
+
+# Global motion compensation — the main win for a panning camera
+gmc_method: sparseOptFlow
+
+# ReID (appearance) — off by default: teammates share a kit so appearance barely
+# separates them, and it adds compute. GMC + motion handles most of it.
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: False
+model: auto

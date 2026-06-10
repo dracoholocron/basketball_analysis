@@ -11,6 +11,8 @@ from ..core.database import get_db
 from ..core.deps import require_role, get_current_org_id
 from ..models.box_score import BoxScore
 from ..models.game import Game
+from ..models.player import Player
+from ..models.player_game_stats import PlayerGameStats
 from ..models.season import Season
 from ..models.team import Team
 from ..schemas.box_score import TeamAverages
@@ -20,6 +22,72 @@ router = APIRouter(prefix="/teams", tags=["teams"])
 
 _admin = require_role("admin")
 _staff = require_role("admin", "coach")
+
+
+@router.get("/{team_id}/stats")
+async def team_stats(
+    team_id: uuid.UUID,
+    season_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_staff),
+):
+    """Per-player season aggregates + team totals from player_game_stats (box-score
+    + CV). Optional season filter. Powers the team profile page."""
+    team = await db.get(Team, team_id)
+    if team is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+
+    q = select(PlayerGameStats).where(PlayerGameStats.team_id == team_id)
+    if season_id is not None:
+        q = q.where(PlayerGameStats.season_id == season_id)
+    rows = (await db.execute(q)).scalars().all()
+
+    # Player names for the roster table
+    pres = await db.execute(select(Player).where(Player.team_id == team_id))
+    name_by_id = {p.id: p for p in pres.scalars().all()}
+
+    by_player: dict[uuid.UUID, list[PlayerGameStats]] = {}
+    for r in rows:
+        by_player.setdefault(r.player_id, []).append(r)
+
+    def s(attr):
+        return sum(getattr(r, attr) or 0 for r in rows)
+
+    players_out = []
+    for pid, prows in by_player.items():
+        p = name_by_id.get(pid)
+        gp = len(prows)
+        pts = sum(x.pts or 0 for x in prows)
+        fgm = sum(x.fgm or 0 for x in prows); fga = sum(x.fga or 0 for x in prows)
+        mcv = sum(x.shots_made_cv or 0 for x in prows); acv = sum(x.shots_attempted_cv or 0 for x in prows)
+        players_out.append({
+            "player_id": str(pid),
+            "name": p.name if p else "—",
+            "jersey_number": p.jersey_number if p else None,
+            "games": gp,
+            "ppg": round(pts / gp, 1) if gp and pts else None,
+            "minutes_played": round(sum(x.minutes_played or 0 for x in prows), 1),
+            "distance_m": round(sum(x.distance_m or 0 for x in prows), 1),
+            "fg_pct": round(fgm / fga, 3) if fga else (round(mcv / acv, 3) if acv else None),
+            "shots_made_cv": mcv, "shots_attempted_cv": acv,
+            "rebounds_cv": sum(x.rebounds_cv or 0 for x in prows),
+            "steals_cv": sum(x.steals_cv or 0 for x in prows),
+        })
+    players_out.sort(key=lambda x: (-(x["minutes_played"] or 0)))
+
+    games_count = len({r.game_id for r in rows})
+    return {
+        "team_id": str(team_id), "name": team.name,
+        "seasons": sorted({str(r.season_id) for r in rows if r.season_id}),
+        "games": games_count,
+        "totals": {
+            "pts": s("pts"), "fgm": s("fgm"), "fga": s("fga"),
+            "distance_m": round(s("distance_m"), 1),
+            "shots_made_cv": s("shots_made_cv"), "shots_attempted_cv": s("shots_attempted_cv"),
+            "rebounds_cv": s("rebounds_cv"), "steals_cv": s("steals_cv"),
+        },
+        "players": players_out,
+    }
 
 
 @router.get("", response_model=list[TeamRead])

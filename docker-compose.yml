@@ -120,8 +120,32 @@ services:
       BA_DEVICE: ${BA_DEVICE:-auto}
       BA_CHUNK_SIZE: "3000"
       BA_YOLO_BATCH_SIZE: "32"
-      BA_BALL_DETECTOR_CONF: "0.25"
+      BA_BALL_DETECTOR_CONF: "0.15"
+      BA_BALL_SAHI_TILE: "640"
+      BA_BALL_SAHI_OVERLAP: "0.25"
+      BA_BALL_MAX_INTERP_GAP: "15"
+      BA_BALL_KALMAN: "true"
+      BA_BALL_VISUAL_TRACK: "false"   # CSRT needs opencv-contrib (not installed); fine-tune is the real gray-ball fix
+      BA_BALL_SAM2: "true"            # propagate manual ball clicks with SAM2 (color-agnostic)
+      BA_SAM2_STRIDE: "1"             # raise (2-3) on very long videos to cut SAM2 time
+      BA_POSE_TOPDOWN: "true"         # per-player crop pose → distant players keep skeletons
+      BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
+      BA_PLAYER_MAX_H: "1080"         # player detection at native res → recover distant players
+      BA_PLAYER_IMGSZ: "1280"         # YOLO imgsz for players (with MAX_H) to keep distant detail
+      BA_POSE_BACKEND: "yolo"
+      BA_POSE_CONF_THRESHOLD: "0.3"
+      BA_EVENT_POSE_CONF_THRESHOLD: "0.3"
       BA_SPEED_MAX_KMH: "25"
+      BA_TRACKER: "botsort"           # BoT-SORT + camera-motion compensation (GMC) for panning video
+      BA_TRACKER_LOST_BUFFER: "120"   # ByteTrack fallback: keep lost tracks ~4s
+      BA_TRACKER_MIN_MATCH: "0.85"
+      BA_TRACK_STITCH: "true"         # link track fragments by spatio-temporal continuity
+      BA_TRACK_STITCH_MAX_GAP_S: "2.5" # aggressive: bridge longer occlusions/missed stretches
+      BA_TRACK_STITCH_MAX_DIST_FRAC: "0.12"  # px/s tolerance (scales with gap length)
+      BA_MIN_TRACK_SECONDS: "0.5"     # drop provisional (no-dorsal) identities seen < this
+      BA_JERSEY_OCR: "true"           # OCR jersey numbers → consolidate tracks into real athletes
+      BA_JERSEY_OCR_SAMPLE_EVERY: "5"
+      BA_JERSEY_OCR_MIN_VOTES: "2"
       BA_PLAYER_DETECTOR_PATH: /app/engine/models/player_detector.pt
       BA_BALL_DETECTOR_PATH: /app/engine/models/ball_detector_model.pt
       BA_COURT_KEYPOINT_DETECTOR_PATH: /app/engine/models/court_keypoint_detector.pt
@@ -137,6 +161,7 @@ services:
       - models_data:/app/engine/models     # persist downloaded .pt models
       - stubs_data:/app/engine/stubs
       - hf_cache:/root/.cache/huggingface  # persist FashionCLIP + HF models
+      - ball_dataset:/app/ball_dataset     # accumulated SAM2 auto-labels for fine-tune
       - ./basketball_analysis/output_videos:/app/host_outputs:rw
     depends_on:
       db:
@@ -200,5 +225,6 @@ volumes:
   models_data:
   stubs_data:
   hf_cache:
+  ball_dataset:
   caddy_data:
   caddy_config:

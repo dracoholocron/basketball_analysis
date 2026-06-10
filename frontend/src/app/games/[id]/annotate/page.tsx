@@ -231,6 +231,18 @@ function fmtTime(s: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+// Rect (within the canvas/element) actually covered by the video content under
+// CSS `object-contain` — accounts for letterbox/pillarbox bars. Without this,
+// clicks on a non-16:9 video (e.g. 2400×1080) are mapped with the wrong vertical
+// scale/offset and stored court anchors come out deviated.
+function videoContentRect(v: HTMLVideoElement) {
+  const cw = v.clientWidth, ch = v.clientHeight;
+  const va = v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : cw / ch;
+  const ca = cw / ch;
+  if (va > ca) { const h = cw / va; return { x: 0, y: (ch - h) / 2, w: cw, h }; }
+  const w = ch * va; return { x: (cw - w) / 2, y: 0, w, h: ch };
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AnnotatePage() {
@@ -312,10 +324,15 @@ export default function AnnotatePage() {
       (lm) => Math.abs(lm.frame_t - currentTime) < 0.5 || currentTime === 0
     );
 
+    // Stored pixels are in the video's intrinsic space; convert back to canvas
+    // (display) space via the actual object-contain content rect.
+    const cr = videoContentRect(video);
+
     visiblePlaced.forEach((lm, idx) => {
       const cat = catalog.find((c) => c.id === lm.landmark_id);
       const color = getCatColor(cat?.category ?? "");
-      const [x, y] = lm.pixel;
+      const x = cr.x + (video.videoWidth ? lm.pixel[0] / video.videoWidth * cr.w : 0);
+      const y = cr.y + (video.videoHeight ? lm.pixel[1] / video.videoHeight * cr.h : 0);
       const isSelected = lm.landmark_id === selectedLandmarkId;
 
       // Outer ring for selected
@@ -358,9 +375,14 @@ export default function AnnotatePage() {
       if (!canvas) return;
 
       const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      const frame_t = videoRef.current?.currentTime ?? 0;
+      // Capture in the video's INTRINSIC pixel space, mapping through the actual
+      // object-contain content rect (handles letterbox bars on non-16:9 video).
+      const v = videoRef.current;
+      if (!v) return;
+      const cr = videoContentRect(v);
+      const x = (e.clientX - rect.left - cr.x) / cr.w * v.videoWidth;
+      const y = (e.clientY - rect.top - cr.y) / cr.h * v.videoHeight;
+      const frame_t = v.currentTime ?? 0;
 
       setPlaced((prev) => {
         const existingIdx = prev.findIndex(
