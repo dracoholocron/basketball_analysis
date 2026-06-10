@@ -88,11 +88,12 @@ class BallTracker:
         batch: list = []
         batch_size = settings.yolo_batch_size
         _half = bool(getattr(settings, "yolo_half", False)) and str(self._device).startswith("cuda")
+        _imgsz = getattr(settings, "ball_imgsz", 640)
 
         def _flush(frames: list) -> None:
             for r in self.model.predict(
                 frames, conf=self.conf, iou=self.iou, verbose=False,
-                device=self._device, half=_half,
+                device=self._device, half=_half, imgsz=_imgsz,
             ):
                 if self._cls_names is None:
                     self._cls_names = r.names

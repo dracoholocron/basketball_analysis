@@ -179,6 +179,29 @@ def run_analysis(
                     "Using %d manual hoop boxes for game %s", len(hoop_boxes), game_id,
                 )
 
+        # ── 4d. Team names (overlay) + game window (exclude warm-up/pre-game) ──
+        team1_name = team2_name = None
+        analysis_start_s = 0.0
+        analysis_end_s = None
+        with Session(engine) as db:
+            from ..models.game import Game as _Game
+            from ..models.team import Team as _Team
+            _g = db.get(_Game, uuid.UUID(game_id))
+            if _g is not None:
+                if _g.home_team_id:
+                    _ht = db.get(_Team, _g.home_team_id)
+                    team1_name = _ht.name if _ht else None
+                if _g.away_team_id:
+                    _at = db.get(_Team, _g.away_team_id)
+                    team2_name = _at.name if _at else None
+                analysis_start_s = float(getattr(_g, "analysis_start_s", 0.0) or 0.0)
+                analysis_end_s = getattr(_g, "analysis_end_s", None)
+                if analysis_start_s or analysis_end_s:
+                    logger.info(
+                        "Game window: %.0fs – %s", analysis_start_s,
+                        f"{analysis_end_s:.0f}s" if analysis_end_s else "end",
+                    )
+
         # ── 5. Run pipeline ────────────────────────────────────────────────
         stub_dir = os.path.join(tmp, "stubs")
         output_video = os.path.join(tmp, "output.mp4")
@@ -233,6 +256,10 @@ def run_analysis(
                 pose_player_filter=pose_player_filter,
                 ball_points=ball_points,
                 hoop_boxes=hoop_boxes,
+                team1_name=team1_name,
+                team2_name=team2_name,
+                analysis_start_s=analysis_start_s,
+                analysis_end_s=analysis_end_s,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -905,7 +932,8 @@ def generate_highlights(
 
 @celery_app.task(bind=True, name="app.worker.tasks.finetune_ball_detector",
                  max_retries=0, acks_late=True)
-def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> dict:
+def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 1280,
+                           max_images: int = 4000) -> dict:
     """
     Fine-tune the ball detector on the accumulated SAM2 auto-label dataset
     (/app/ball_dataset, produced when BA_BALL_EXPORT_DATASET=true during analysis).
@@ -914,6 +942,7 @@ def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> d
     then backs up and swaps the model in the models volume. Long-running.
     """
     import glob
+    import random
     import shutil
 
     dataset = "/app/ball_dataset"
@@ -925,6 +954,27 @@ def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> d
     if n_labels < 20:
         return {"error": f"too few labeled frames ({n_labels}); annotate more games first"}
 
+    # ── Subsample near-duplicate frames to a diverse subset ──────────────────
+    # The export is ~every frame → tons of consecutive near-dupes. Stride-sample
+    # (keeps spread across games/time) to cap at max_images, then 90/10 train/val.
+    imgs = sorted(glob.glob(os.path.join(dataset, "images", "train", "*.jpg")))
+    if len(imgs) > max_images:
+        stride = len(imgs) // max_images
+        imgs = imgs[::stride][:max_images]
+    random.seed(0)
+    random.shuffle(imgs)
+    n_val = max(1, int(len(imgs) * 0.1))
+    val_list, train_list = imgs[:n_val], imgs[n_val:]
+    train_txt = os.path.join(dataset, "train_subset.txt")
+    val_txt = os.path.join(dataset, "val_subset.txt")
+    with open(train_txt, "w") as f:
+        f.write("\n".join(train_list))
+    with open(val_txt, "w") as f:
+        f.write("\n".join(val_list))
+    sub_yaml = os.path.join(dataset, "data_subset.yaml")
+    with open(sub_yaml, "w") as f:
+        f.write(f"path: {dataset}\ntrain: train_subset.txt\nval: val_subset.txt\nnc: 1\nnames: ['Ball']\n")
+
     engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
     base = os.path.join(engine_path, "models", "ball_detector_model.pt")
     if base not in sys.path:
@@ -932,12 +982,16 @@ def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> d
 
     try:
         from ultralytics import YOLO
-        logger.info("Fine-tuning ball detector on %d labeled frames (epochs=%d)…", n_labels, epochs)
+        logger.info(
+            "Fine-tuning ball detector: %d total labels → %d subset (%d train / %d val), epochs=%d, imgsz=%d",
+            n_labels, len(imgs), len(train_list), len(val_list), epochs, imgsz,
+        )
         model = YOLO(base)
         model.train(
-            data=data_yaml, epochs=epochs, imgsz=imgsz,
+            data=sub_yaml, epochs=epochs, imgsz=imgsz,
             mosaic=1.0, close_mosaic=10, degrees=0.0,
             translate=0.1, scale=0.5, fliplr=0.5,
+            workers=0,  # Celery prefork is daemonic → DataLoader cannot fork children
             project="/app/ball_dataset/runs", name="finetune", exist_ok=True,
         )
         best = getattr(model.trainer, "best", None)

@@ -231,6 +231,13 @@ class EngineSettings(BaseSettings):
             "640 internal resize."
         ),
     )
+    ball_imgsz: int = Field(
+        default=960,
+        description=(
+            "YOLO inference imgsz for the BALL detector. The ball is small/distant; "
+            "higher (960/1280) improves detection at more GPU cost. Env: BA_BALL_IMGSZ"
+        ),
+    )
     tracker: str = Field(
         default="botsort",
         description=(

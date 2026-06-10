@@ -394,6 +394,10 @@ def run_pipeline(
     pose_player_filter: list[int] | None = None,
     ball_points: list[dict] | None = None,
     hoop_boxes: list[dict] | None = None,
+    team1_name: str | None = None,
+    team2_name: str | None = None,
+    analysis_start_s: float = 0.0,
+    analysis_end_s: float | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -845,16 +849,18 @@ def run_pipeline(
     _progress("ball_acquisition", 65)
     ball_aquisition_detector = BallAquisitionDetector(frame_width=frame_width)
     ball_aquisition = ball_aquisition_detector.detect_ball_possession(
-        player_tracks, ball_tracks
+        player_tracks, ball_tracks, pose_sequence=pose_sequence
     )
 
     _progress("pass_detection", 68)
     pass_and_interception_detector = PassAndInterceptionDetector()
     passes = pass_and_interception_detector.detect_passes(
-        ball_aquisition, player_assignment
+        ball_aquisition, player_assignment,
+        ball_tracks=ball_tracks, rim_sequence=hoop_tracks, fps=actual_fps,
     )
     interceptions = pass_and_interception_detector.detect_interceptions(
-        ball_aquisition, player_assignment
+        ball_aquisition, player_assignment,
+        ball_tracks=ball_tracks, rim_sequence=hoop_tracks, fps=actual_fps,
     )
     logger.info("Passes/interceptions done")
 
@@ -912,6 +918,37 @@ def run_pipeline(
         )
     logger.info("Speed/distance done")
 
+    # ── Game window: exclude warm-up / pre-game so metrics count only live play ──
+    # Mask per-frame possession/pass/interception and zero distance/speed outside
+    # [analysis_start_s, analysis_end_s]; filter CV events to the window. The video
+    # still shows everything; only the stats/overlay reflect the window.
+    _start_f = max(0, int(round(float(analysis_start_s or 0.0) * actual_fps)))
+    _end_f = (int(round(float(analysis_end_s) * actual_fps))
+              if analysis_end_s else total_frames - 1)
+    _end_f = min(total_frames - 1, _end_f)
+    if _start_f > 0 or _end_f < total_frames - 1:
+        def _in_win(i: int) -> bool:
+            return _start_f <= i <= _end_f
+        for i in range(total_frames):
+            if not _in_win(i):
+                if i < len(ball_aquisition):
+                    ball_aquisition[i] = -1
+                if i < len(passes):
+                    passes[i] = -1
+                if i < len(interceptions):
+                    interceptions[i] = -1
+                if i < len(player_distances_per_frame):
+                    player_distances_per_frame[i] = {}
+                if i < len(player_speed_per_frame):
+                    player_speed_per_frame[i] = {}
+        shot_events = [e for e in shot_events if _in_win(int(e.get("frame", -1)))]
+        rebound_events = [e for e in rebound_events if _in_win(int(e.get("frame", -1)))]
+        steal_events = [e for e in steal_events if _in_win(int(e.get("frame", -1)))]
+        logger.info(
+            "Game window: metrics restricted to frames %d–%d (%.0fs–%.0fs)",
+            _start_f, _end_f, _start_f / actual_fps, _end_f / actual_fps,
+        )
+
     _progress("drawing", 78)
     player_tracks_drawer      = PlayerTracksDrawer()
     pose_drawer               = PoseDrawer(player_filter=pose_player_filter)
@@ -920,9 +957,9 @@ def run_pipeline(
         manual_src=tactical_view_converter._manual_src,
         manual_src_seq=tactical_view_converter._manual_src_seq,
     )
-    team_ball_control_drawer  = TeamBallControlDrawer()
+    team_ball_control_drawer  = TeamBallControlDrawer(team1_name, team2_name)
     frame_number_drawer       = FrameNumberDrawer()
-    pass_and_interceptions_drawer = PassInterceptionDrawer()
+    pass_and_interceptions_drawer = PassInterceptionDrawer(team1_name, team2_name)
     tactical_view_drawer      = TacticalViewDrawer()
     speed_and_distance_drawer = SpeedAndDistanceDrawer()
 

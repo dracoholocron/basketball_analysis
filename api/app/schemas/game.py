@@ -36,6 +36,8 @@ class GameRead(BaseModel):
     away_team2_jersey: str
     home_score: Optional[int]
     away_score: Optional[int]
+    analysis_start_s: Optional[float] = None
+    analysis_end_s: Optional[float] = None
 
     model_config = {"from_attributes": True}
 

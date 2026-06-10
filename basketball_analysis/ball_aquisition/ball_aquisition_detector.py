@@ -128,7 +128,29 @@ class BallAquisitionDetector:
         key_points = self.get_key_basketball_player_assignment_points(player_bbox,ball_center)
         return min(measure_distance(ball_center, point) for point in key_points)
     
-    def find_best_candidate_for_possession(self, ball_center, player_tracks_frame, ball_bbox):
+    # COCO-17 upper-body joints most indicative of holding the ball.
+    _POSE_HAND_JOINTS = (5, 6, 7, 8, 9, 10)  # shoulders, elbows, wrists
+
+    def _pose_points(self, pose_kp) -> list[tuple[float, float]]:
+        """Valid (x, y) hand/arm keypoints from a player's pose (COCO-17)."""
+        pts: list[tuple[float, float]] = []
+        if pose_kp is None:
+            return pts
+        try:
+            for j in self._POSE_HAND_JOINTS:
+                if j >= len(pose_kp):
+                    continue
+                kp = pose_kp[j]
+                x, y = float(kp[0]), float(kp[1])
+                conf = float(kp[2]) if len(kp) > 2 else 1.0
+                if x > 0 and y > 0 and conf > 0.2:
+                    pts.append((x, y))
+        except (TypeError, IndexError, ValueError):
+            pass
+        return pts
+
+    def find_best_candidate_for_possession(self, ball_center, player_tracks_frame,
+                                           ball_bbox, pose_frame=None):
         """
         Determine which player in a single frame is most likely to have the ball.
 
@@ -156,6 +178,14 @@ class BallAquisitionDetector:
             containment = self.calculate_ball_containment_ratio(player_bbox, ball_bbox)
             min_distance = self.find_minimum_distance_to_ball(ball_center, player_bbox)
 
+            # Pose-aware: a hand/arm joint on the ball gives a much smaller (more
+            # accurate) distance than bbox corners — disambiguates players in a crowd.
+            if pose_frame is not None:
+                for pt in self._pose_points(pose_frame.get(player_id)):
+                    d = measure_distance(ball_center, pt)
+                    if d < min_distance:
+                        min_distance = d
+
             if containment > self.containment_threshold:
                 high_containment_players.append((player_id, min_distance))
             else:
@@ -174,7 +204,7 @@ class BallAquisitionDetector:
                 
         return -1
     
-    def detect_ball_possession(self, player_tracks, ball_tracks):
+    def detect_ball_possession(self, player_tracks, ball_tracks, pose_sequence=None):
         """
         Detect which player has the ball in each frame based on bounding box information.
 
@@ -210,10 +240,16 @@ class BallAquisitionDetector:
                 
             ball_center = get_center_of_bbox(ball_bbox)
             
+            pose_frame = (
+                pose_sequence[frame_num]
+                if pose_sequence is not None and frame_num < len(pose_sequence)
+                else None
+            )
             best_player_id = self.find_best_candidate_for_possession(
-                ball_center, 
-                player_tracks[frame_num], 
-                ball_bbox
+                ball_center,
+                player_tracks[frame_num],
+                ball_bbox,
+                pose_frame=pose_frame,
             )
 
             if best_player_id != -1:

@@ -111,6 +111,8 @@ class GameUpdate(BaseModel):
     away_team2_jersey: Optional[str] = None
     home_team_name: Optional[str] = None   # find-or-create Team → home_team_id
     away_team_name: Optional[str] = None   # find-or-create Team → away_team_id
+    analysis_start_s: Optional[float] = None  # live-play window start (seconds)
+    analysis_end_s: Optional[float] = None    # live-play window end (seconds)
 
 
 async def _find_or_create_team(db: AsyncSession, name: str, org_id) -> Team:

@@ -31,6 +31,9 @@ class Game(Base):
     away_team2_jersey: Mapped[str] = mapped_column(String(120), nullable=False, default="dark blue shirt")
     home_score: Mapped[int | None] = mapped_column()
     away_score: Mapped[int | None] = mapped_column()
+    # Live-play window (seconds): metrics/events count only within [start, end].
+    analysis_start_s: Mapped[float | None] = mapped_column(Float)
+    analysis_end_s: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

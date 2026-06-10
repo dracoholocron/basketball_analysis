@@ -137,6 +137,7 @@ services:
       BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
       BA_PLAYER_MAX_H: "1080"         # player detection at native res → recover distant players
       BA_PLAYER_IMGSZ: "1280"         # YOLO imgsz for players (with MAX_H) to keep distant detail
+      BA_BALL_IMGSZ: "960"            # YOLO imgsz for the small/distant ball (more GPU, better recall)
       BA_POSE_BACKEND: "yolo"
       BA_POSE_CONF_THRESHOLD: "0.3"
       BA_EVENT_POSE_CONF_THRESHOLD: "0.3"

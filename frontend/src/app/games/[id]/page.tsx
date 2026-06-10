@@ -104,6 +104,8 @@ export default function GameDetailPage() {
   const [jerseyTeam2, setJerseyTeam2] = useState("");
   const [teamName1, setTeamName1] = useState("");
   const [teamName2, setTeamName2] = useState("");
+  const [gameStartS, setGameStartS] = useState("");
+  const [gameEndS, setGameEndS] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const showPoses = (game?.show_poses as boolean) ?? true;
@@ -116,6 +118,8 @@ export default function GameDetailPage() {
       setJerseyTeam2((g?.away_team2_jersey as string) ?? "dark blue shirt");
       setTeamName1((g?.home_team_name as string) ?? "");
       setTeamName2((g?.away_team_name as string) ?? "");
+      setGameStartS(g?.analysis_start_s != null ? String(g.analysis_start_s) : "");
+      setGameEndS(g?.analysis_end_s != null ? String(g.analysis_end_s) : "");
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
@@ -238,11 +242,13 @@ export default function GameDetailPage() {
     // Persist jersey + team-name changes before starting analysis
     const t1 = jerseyTeam1.trim() || "white shirt";
     const t2 = jerseyTeam2.trim() || "dark blue shirt";
-    const payload: Record<string, string> = {};
+    const payload: Record<string, string | number | null> = {};
     if (t1 !== (game?.home_team1_jersey as string)) payload.home_team1_jersey = t1;
     if (t2 !== (game?.away_team2_jersey as string)) payload.away_team2_jersey = t2;
     if (teamName1.trim() && teamName1.trim() !== (game?.home_team_name as string)) payload.home_team_name = teamName1.trim();
     if (teamName2.trim() && teamName2.trim() !== (game?.away_team_name as string)) payload.away_team_name = teamName2.trim();
+    payload.analysis_start_s = gameStartS.trim() ? Number(gameStartS) : 0;
+    payload.analysis_end_s = gameEndS.trim() ? Number(gameEndS) : null;
     if (Object.keys(payload).length > 0) {
       try {
         const updated = await updateGameSettings(id, payload);
@@ -609,6 +615,37 @@ export default function GameDetailPage() {
                       value={jerseyTeam2}
                       onChange={e => setJerseyTeam2(e.target.value)}
                       placeholder="ej: dark blue shirt"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Game window — exclude warm-up / pre-game from metrics */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Ventana del juego (opcional)</p>
+                <p className="text-xs text-slate-400">
+                  Las métricas (posesión, pases, control, tiros) cuentan solo dentro de esta ventana.
+                  Útil para excluir el calentamiento previo. Déjalo vacío para todo el video.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Inicio (segundos)</label>
+                    <input
+                      type="number" min={0} step={1}
+                      value={gameStartS}
+                      onChange={e => setGameStartS(e.target.value)}
+                      placeholder="ej: 55"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Fin (segundos, vacío=fin)</label>
+                    <input
+                      type="number" min={0} step={1}
+                      value={gameEndS}
+                      onChange={e => setGameEndS(e.target.value)}
+                      placeholder="ej: 380"
                       className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
                     />
                   </div>

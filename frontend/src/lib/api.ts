@@ -82,6 +82,8 @@ export async function updateGameSettings(
     away_team2_jersey?: string;
     home_team_name?: string;
     away_team_name?: string;
+    analysis_start_s?: number | null;
+    analysis_end_s?: number | null;
   }
 ) {
   const { data } = await api.patch(`/games/${gameId}`, payload);
