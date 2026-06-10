@@ -90,16 +90,20 @@ export default function TeamsPage() {
                   <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Name</th>
                   <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Level</th>
                   <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Jersey</th>
-                  <th className="pb-2 text-left text-xs font-semibold text-slate-400 uppercase font-mono">ID</th>
+                  <th className="pb-2 text-left text-xs font-semibold text-slate-400 uppercase">Stats</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {teams.map((t) => (
                   <tr key={t.id} className="table-row">
-                    <td className="table-cell font-medium">{t.name}</td>
+                    <td className="table-cell font-medium">
+                      <Link href={`/teams/${t.id}`} className="text-blue-600 hover:underline">{t.name}</Link>
+                    </td>
                     <td className="table-cell text-slate-500 text-xs uppercase">{t.level ?? "—"}</td>
                     <td className="table-cell text-xs text-slate-500">{t.jersey_description ?? "—"}</td>
-                    <td className="table-cell font-mono text-xs text-slate-400">{t.id.slice(0, 12)}…</td>
+                    <td className="table-cell">
+                      <Link href={`/teams/${t.id}`} className="text-xs text-blue-600 hover:underline">Ver stats →</Link>
+                    </td>
                   </tr>
                 ))}
               </tbody>

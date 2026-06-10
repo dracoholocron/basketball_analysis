@@ -31,6 +31,9 @@ import { clsx } from "clsx";
 interface PlayerMetric {
   track_id: number;
   display_label?: string | null;
+  jersey_number?: string | null;
+  player_id?: string | null;
+  minutes_played?: number;
   team_id: number | null;
   total_distance_m: number;
   avg_speed_kmh: number;
@@ -42,6 +45,8 @@ interface PlayerMetric {
 
 interface Metrics {
   total_frames: number;
+  home_team_name?: string | null;
+  away_team_name?: string | null;
   team1_possession_pct: number;
   team2_possession_pct: number;
   team1_passes: number;
@@ -77,6 +82,7 @@ export default function GameDetailPage() {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [cvEvents, setCvEvents] = useState<CvEvent[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>("stats");
+  const [onlyIdentified, setOnlyIdentified] = useState(false);
   const [jobStatus, setJobStatus] = useState<{
     status: string;
     progress_pct: number;
@@ -96,6 +102,8 @@ export default function GameDetailPage() {
   const [updatingPoses, setUpdatingPoses] = useState(false);
   const [jerseyTeam1, setJerseyTeam1] = useState("");
   const [jerseyTeam2, setJerseyTeam2] = useState("");
+  const [teamName1, setTeamName1] = useState("");
+  const [teamName2, setTeamName2] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const showPoses = (game?.show_poses as boolean) ?? true;
@@ -106,6 +114,8 @@ export default function GameDetailPage() {
       setGame(g);
       setJerseyTeam1((g?.home_team1_jersey as string) ?? "white shirt");
       setJerseyTeam2((g?.away_team2_jersey as string) ?? "dark blue shirt");
+      setTeamName1((g?.home_team_name as string) ?? "");
+      setTeamName2((g?.away_team_name as string) ?? "");
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
@@ -225,12 +235,17 @@ export default function GameDetailPage() {
       ? poseFilterInput.split(",").map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
       : undefined;
 
-    // Persist any jersey changes before starting analysis
+    // Persist jersey + team-name changes before starting analysis
     const t1 = jerseyTeam1.trim() || "white shirt";
     const t2 = jerseyTeam2.trim() || "dark blue shirt";
-    if (t1 !== (game?.home_team1_jersey as string) || t2 !== (game?.away_team2_jersey as string)) {
+    const payload: Record<string, string> = {};
+    if (t1 !== (game?.home_team1_jersey as string)) payload.home_team1_jersey = t1;
+    if (t2 !== (game?.away_team2_jersey as string)) payload.away_team2_jersey = t2;
+    if (teamName1.trim() && teamName1.trim() !== (game?.home_team_name as string)) payload.home_team_name = teamName1.trim();
+    if (teamName2.trim() && teamName2.trim() !== (game?.away_team_name as string)) payload.away_team_name = teamName2.trim();
+    if (Object.keys(payload).length > 0) {
       try {
-        const updated = await updateGameSettings(id, { home_team1_jersey: t1, away_team2_jersey: t2 });
+        const updated = await updateGameSettings(id, payload);
         setGame(updated);
       } catch { /* non-fatal */ }
     }
@@ -317,6 +332,24 @@ export default function GameDetailPage() {
                 {annotationStatus === "done" && (
                   <CheckCircle2 size={12} className="text-green-400" />
                 )}
+              </Link>
+            )}
+            {videoReady && (
+              <Link
+                href={`/games/${id}/annotate-ball`}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                <Crosshair size={16} />
+                Anotar balón
+              </Link>
+            )}
+            {videoReady && (
+              <Link
+                href={`/games/${id}/annotate-hoop`}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                <Crosshair size={16} />
+                Anotar aro
               </Link>
             )}
             <div className="flex flex-col gap-2">
@@ -520,6 +553,36 @@ export default function GameDetailPage() {
               <div className="flex items-center gap-2">
                 <Settings2 size={18} className="text-blue-400" />
                 <h3 className="font-semibold text-white text-base">Opciones de análisis</h3>
+              </div>
+
+              {/* Team names — labels the game + links rosters for player mapping */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Nombres de equipos</p>
+                <p className="text-xs text-slate-400">
+                  Se usan como etiqueta del partido y para vincular los rosters (mapeo dorsal→jugador).
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Local</label>
+                    <input
+                      type="text"
+                      value={teamName1}
+                      onChange={e => setTeamName1(e.target.value)}
+                      placeholder="ej: Leones"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Visitante</label>
+                    <input
+                      type="text"
+                      value={teamName2}
+                      onChange={e => setTeamName2(e.target.value)}
+                      placeholder="ej: Águilas"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
               </div>
 
               {/* Jersey descriptions — critical for FashionCLIP team classification */}
@@ -771,32 +834,72 @@ export default function GameDetailPage() {
         )}
 
         {/* Tab: Players */}
-        {activeTab === "players" && metrics && (
-          <div className="bg-slate-800 rounded-xl overflow-x-auto">
+        {activeTab === "players" && metrics && (() => {
+          const identifiedCount = metrics.players.filter(p => p.jersey_number).length;
+          const rows = [...metrics.players]
+            .filter(p => !onlyIdentified || p.jersey_number)
+            .sort((a, b) => (b.minutes_played ?? 0) - (a.minutes_played ?? 0));
+          return (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <p className="text-xs text-slate-400">
+                {metrics.players.length} identidades · <span className="text-emerald-400 font-medium">{identifiedCount} con dorsal</span>.
+                Ordenado por minutos (los jugadores reales arriba; los fragmentos sin dorsal, abajo).
+              </p>
+              <div className="flex items-center gap-2">
+                <Link
+                  href={`/games/${id}/roster-mapping`}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium border border-emerald-600/50 text-emerald-300 hover:bg-emerald-600/10 transition-colors"
+                >
+                  Asignar jugadores →
+                </Link>
+                <button
+                  onClick={() => setOnlyIdentified(v => !v)}
+                  className={clsx(
+                    "px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
+                    onlyIdentified ? "bg-emerald-600 border-emerald-500 text-white"
+                      : "border-slate-600 text-slate-300 hover:border-slate-400",
+                  )}
+                >
+                  {onlyIdentified ? "Mostrando solo con dorsal" : "Solo identificados (con dorsal)"}
+                </button>
+              </div>
+            </div>
+            <div className="bg-slate-800 rounded-xl overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-700 text-left text-xs text-slate-400">
-                  {["Jugador", "Equipo", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep."].map(h => (
+                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep."].map(h => (
                     <th key={h} className="px-4 py-3 font-medium">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-700">
-                {metrics.players.sort((a, b) => b.total_distance_m - a.total_distance_m).map(p => {
+                {rows.map(p => {
                   const maxSpd = p.max_speed_kmh;
                   const spdColor = maxSpd > 25 ? "text-red-400" : maxSpd > 15 ? "text-amber-400" : "text-green-400";
                   const avgSpd = p.avg_speed_kmh;
                   const avgColor = avgSpd > 20 ? "text-red-400" : avgSpd > 10 ? "text-amber-400" : "text-green-400";
-                  const label = p.display_label ?? `#${p.track_id}`;
+                  const label = p.display_label ?? (p.jersey_number ? `#${p.jersey_number}` : `#${p.track_id}`);
                   return (
                     <tr key={p.track_id} className="hover:bg-slate-700/50 transition-colors">
-                      <td className="px-4 py-3 font-mono font-semibold text-white">{label}</td>
+                      <td className="px-4 py-3 font-mono font-semibold text-white">
+                        {p.player_id ? (
+                          <Link href={`/players/${p.player_id}`} className="text-blue-400 hover:underline">{label}</Link>
+                        ) : label}
+                        {p.jersey_number && (
+                          <span className="ml-2 text-[10px] uppercase tracking-wide text-slate-500">dorsal</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         <span className="inline-block rounded-full px-2 py-0.5 text-xs font-semibold text-white"
                           style={{ backgroundColor: TEAM_COLORS[(p.team_id ?? 1) - 1] ?? "#6b7280" }}>
-                          T{p.team_id ?? "?"}
+                          {p.team_id === 1 ? (metrics.home_team_name ?? "Local")
+                            : p.team_id === 2 ? (metrics.away_team_name ?? "Visitante")
+                            : "?"}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-slate-200">{(p.minutes_played ?? 0).toFixed(1)}</td>
                       <td className="px-4 py-3 text-slate-200">{p.total_distance_m.toFixed(1)}</td>
                       <td className={`px-4 py-3 font-medium ${avgColor}`}>{avgSpd.toFixed(1)} km/h</td>
                       <td className={`px-4 py-3 font-medium ${spdColor}`}>{maxSpd.toFixed(1)} km/h</td>
@@ -808,8 +911,10 @@ export default function GameDetailPage() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
-        )}
+          );
+        })()}
       </div>
     </AppShell>
   );

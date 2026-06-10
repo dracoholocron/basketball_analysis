@@ -237,7 +237,9 @@ function AdminPlayersContent() {
                 {players.map(p => (
                   <tr key={p.id} className="hover:bg-slate-700/50 transition-colors">
                     <td className="px-4 py-3 font-mono font-bold text-slate-300">{p.jersey_number ?? "—"}</td>
-                    <td className="px-4 py-3 font-medium text-white">{p.name}</td>
+                    <td className="px-4 py-3 font-medium">
+                      <Link href={`/players/${p.id}`} className="text-blue-400 hover:underline">{p.name}</Link>
+                    </td>
                     <td className="px-4 py-3 text-slate-300">{p.position ?? "—"}</td>
                     <td className="px-4 py-3 text-slate-300">{teamName(p.team_id)}</td>
                     <td className="px-4 py-3 text-slate-400">{p.height_cm ? `${p.height_cm} cm` : "—"}</td>

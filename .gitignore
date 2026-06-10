@@ -65,6 +65,13 @@ bench/*.json
 stubs/
 basketball_analysis/stubs/
 
+# Analysis output artifacts (large generated videos)
+basketball_analysis/output_videos/
+output_videos/
+
+# Local agent / tooling
+.claude/
+
 # Coverage
 .coverage
 htmlcov/

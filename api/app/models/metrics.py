@@ -18,8 +18,10 @@ class PlayerMetric(Base):
     )
     track_id: Mapped[int] = mapped_column(Integer, nullable=False)
     display_label: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    jersey_number: Mapped[str | None] = mapped_column(String(10), nullable=True)
     team_id: Mapped[int | None] = mapped_column(Integer)
 
+    minutes_played: Mapped[float] = mapped_column(Float, default=0.0)
     total_distance_m: Mapped[float] = mapped_column(Float, default=0.0)
     avg_speed_kmh: Mapped[float] = mapped_column(Float, default=0.0)
     max_speed_kmh: Mapped[float] = mapped_column(Float, default=0.0)
@@ -27,6 +29,8 @@ class PlayerMetric(Base):
     passes_made: Mapped[int] = mapped_column(Integer, default=0)
     interceptions_made: Mapped[int] = mapped_column(Integer, default=0)
     shots_attempted: Mapped[int] = mapped_column(Integer, default=0)
+    shots_made: Mapped[int] = mapped_column(Integer, default=0)
+    shots_missed: Mapped[int] = mapped_column(Integer, default=0)
     rebounds: Mapped[int] = mapped_column(Integer, default=0)
     steals_cv: Mapped[int] = mapped_column(Integer, default=0)
 

@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
 import AppShell from "@/components/layout/AppShell";
-import { Building2, Trophy, Users, UserCircle2, ChevronRight } from "lucide-react";
+import { Building2, Trophy, Users, UserCircle2, ChevronRight, Dumbbell, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { triggerBallFinetune } from "@/lib/api";
 
 const ADMIN_SECTIONS = [
   {
@@ -40,15 +41,33 @@ const ADMIN_SECTIONS = [
 
 export default function AdminPage() {
   const router = useRouter();
+  const [ftState, setFtState] = useState<"idle" | "loading" | "ok" | "error">("idle");
+  const [ftMsg, setFtMsg] = useState<string>("");
+
   useEffect(() => {
     if (!Cookies.get("access_token")) {
       router.replace("/login");
     }
   }, [router]);
 
+  async function handleFinetune() {
+    if (ftState === "loading") return;
+    setFtState("loading");
+    setFtMsg("");
+    try {
+      const res = await triggerBallFinetune();
+      setFtState("ok");
+      setFtMsg(`Reentrenamiento encolado (task ${res.task_id.slice(0, 8)}…). Corre en segundo plano en la GPU.`);
+    } catch (err: unknown) {
+      setFtState("error");
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setFtMsg(detail ?? (err instanceof Error ? err.message : "Error al encolar"));
+    }
+  }
+
   return (
     <AppShell title="Settings & Admin" subtitle="Manage your organization data">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-4xl mx-auto space-y-6">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           {ADMIN_SECTIONS.map((section) => (
             <Link key={section.href} href={section.href}>
@@ -66,6 +85,40 @@ export default function AdminPage() {
               </div>
             </Link>
           ))}
+        </div>
+
+        {/* Modelos / ML */}
+        <div className="card bg-gradient-to-br from-rose-50 to-orange-50 border-rose-200 p-5">
+          <div className="flex items-center gap-4">
+            <div className="p-3 rounded-xl bg-white shadow-sm">
+              <Dumbbell size={28} className="text-rose-600" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="font-display font-bold text-slate-900 text-base">Reentrenar detector de balón</p>
+              <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+                Usa las cajas auto-etiquetadas por SAM2 (de los videos con balón anotado) para
+                fine-tune del modelo. Corre en segundo plano en la GPU.
+              </p>
+            </div>
+            <button
+              onClick={handleFinetune}
+              disabled={ftState === "loading"}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                ftState === "loading"
+                  ? "bg-slate-300 text-slate-500 cursor-not-allowed"
+                  : "bg-rose-600 hover:bg-rose-700 text-white"
+              }`}
+            >
+              {ftState === "loading" ? <Loader2 size={14} className="animate-spin" /> : <Dumbbell size={14} />}
+              Reentrenar
+            </button>
+          </div>
+          {ftMsg && (
+            <div className={`mt-3 flex items-center gap-2 text-xs ${ftState === "error" ? "text-red-600" : "text-green-700"}`}>
+              {ftState === "error" ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
+              {ftMsg}
+            </div>
+          )}
         </div>
       </div>
     </AppShell>

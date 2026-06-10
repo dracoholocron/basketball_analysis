@@ -15,12 +15,56 @@ from sqlalchemy.orm import selectinload
 from ..core.database import get_db
 from ..core.deps import require_role
 from ..models.box_score import BoxScore, PlayerBoxScore
+from ..models.game import Game
+from ..models.player_game_stats import PlayerGameStats
 from ..schemas.box_score import BoxScoreCreate, BoxScoreRead
 
 router = APIRouter(prefix="/box-scores", tags=["box-scores"])
 
 _admin = require_role("admin")
 _staff = require_role("admin", "coach")
+
+
+async def _upsert_pgs_from_box_score(db: AsyncSession, box_score_id: uuid.UUID) -> None:
+    """Mirror per-player box-score numbers into the unified player_game_stats table
+    (box-score family) so player/team profiles show them alongside CV metrics. Only
+    rows whose PlayerBoxScore is linked to a real player_id are mirrored."""
+    res = await db.execute(
+        select(BoxScore).where(BoxScore.id == box_score_id)
+        .options(selectinload(BoxScore.player_box_scores))
+    )
+    bs = res.scalar_one_or_none()
+    if bs is None:
+        return
+    game = await db.get(Game, bs.game_id)
+    season_id = game.season_id if game else None
+    for ps in bs.player_box_scores:
+        if ps.player_id is None:
+            continue
+        ex = await db.execute(
+            select(PlayerGameStats).where(
+                PlayerGameStats.player_id == ps.player_id,
+                PlayerGameStats.game_id == bs.game_id,
+            )
+        )
+        pgs = ex.scalar_one_or_none()
+        is_new = pgs is None
+        had_cv = (not is_new) and pgs.job_id is not None
+        if is_new:
+            pgs = PlayerGameStats(player_id=ps.player_id, game_id=bs.game_id)
+        pgs.season_id = season_id
+        pgs.team_id = bs.team_id
+        pgs.pts, pgs.fgm, pgs.fga = ps.pts, ps.fgm, ps.fga
+        pgs.fg3m, pgs.fg3a = ps.fg3m, ps.fg3a
+        pgs.ftm, pgs.fta = ps.ftm, ps.fta
+        pgs.ast, pgs.stl, pgs.blk, pgs.tov = ps.ast, ps.stl, ps.blk, ps.tov
+        pgs.oreb, pgs.dreb = ps.oreb, ps.dreb
+        if ps.minutes_played and not pgs.minutes_played:
+            pgs.minutes_played = ps.minutes_played
+        pgs.source = "both" if had_cv else "box_score"
+        if is_new:
+            db.add(pgs)
+    await db.commit()
 
 
 def _validate_pts_consistency(pts: int, fgm: int, fg3m: int, ftm: int) -> None:
@@ -95,6 +139,7 @@ async def create_box_score(
         db.add(ps)
 
     await db.commit()
+    await _upsert_pgs_from_box_score(db, box_score.id)
     result = await db.execute(
         select(BoxScore)
         .where(BoxScore.id == box_score.id)
@@ -385,6 +430,7 @@ async def import_box_scores_csv(
         )
 
     await db.commit()
+    await _upsert_pgs_from_box_score(db, box_score.id)
 
     replaced_note = " Replaced existing box score for this game/team." if had_existing else ""
     return ImportResult(

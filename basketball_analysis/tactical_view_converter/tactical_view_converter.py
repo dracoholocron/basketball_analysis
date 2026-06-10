@@ -102,10 +102,15 @@ class TacticalViewConverter:
         court_profile: Optional[CourtProfile] = None,
         manual_landmarks: Optional[list[dict]] = None,
         camera_motion: str = "static",
+        src_scale: float = 1.0,
     ) -> None:
         self.court_image_path = court_image_path
         self.profile = court_profile or CourtProfile(CourtLevel.NBA)
         self.camera_motion = camera_motion
+        # Factor to map manual-anchor pixels (stored in the video's intrinsic
+        # resolution) into the pipeline's working resolution (frames are
+        # downscaled to max height 720p before all inference/drawing).
+        self.src_scale = src_scale
 
         self.width: int = self.profile.display_w_px
         self.height: int = self.profile.display_h_px
@@ -123,6 +128,12 @@ class TacticalViewConverter:
         self._manual_src: Optional[np.ndarray] = None   # pixel positions (Nx2)
         self._manual_tgt: Optional[np.ndarray] = None   # tactical positions (Nx2)
         self._manual_frame_t: list[float] = []          # frame_t per anchor
+        self._manual_landmarks: list[dict] = manual_landmarks or []
+
+        # Per-frame anchor sequences, populated by build_manual_anchor_sequence()
+        # when the camera moves. None entries fall back to YOLO keypoints.
+        self._manual_src_seq: Optional[list[Optional[np.ndarray]]] = None
+        self._manual_tgt_seq: Optional[list[Optional[np.ndarray]]] = None
 
         if manual_landmarks and len(manual_landmarks) >= 4:
             self._build_manual_anchors(manual_landmarks)
@@ -140,26 +151,32 @@ class TacticalViewConverter:
             self.camera_motion,
         )
 
-    def _build_manual_anchors(self, manual_landmarks: list[dict]) -> None:
-        """Convert landmark dicts to pixel→tactical arrays."""
+    def _landmark_to_tgt(self, landmark_id: str):
+        """Return the tactical-view pixel position [tx, ty] for a landmark, or None."""
         try:
             from .landmarks import CATALOG_BY_ID
         except ImportError:
-            logger.warning("landmarks.py not available; manual anchors disabled")
-            return
+            return None
+        cat = CATALOG_BY_ID.get(landmark_id)
+        if cat is None:
+            return None
+        x_m, y_m = cat.tactical_pos(
+            self.actual_width_in_meters, self.actual_height_in_meters
+        )
+        tx = x_m / self.actual_width_in_meters * self.width
+        ty = y_m / self.actual_height_in_meters * self.height
+        return [tx, ty]
 
+    def _build_manual_anchors(self, manual_landmarks: list[dict]) -> None:
+        """Convert landmark dicts to pixel→tactical arrays (flattened, static use)."""
         src, tgt, ts = [], [], []
         for lm in manual_landmarks:
-            cat = CATALOG_BY_ID.get(lm.get("landmark_id", ""))
-            if cat is None:
+            tgt_pt = self._landmark_to_tgt(lm.get("landmark_id", ""))
+            if tgt_pt is None:
                 continue
-            x_m, y_m = cat.tactical_pos(
-                self.actual_width_in_meters, self.actual_height_in_meters
-            )
-            tx = x_m / self.actual_width_in_meters * self.width
-            ty = y_m / self.actual_height_in_meters * self.height
-            src.append(lm["pixel"])
-            tgt.append([tx, ty])
+            px = lm["pixel"]
+            src.append([px[0] * self.src_scale, px[1] * self.src_scale])
+            tgt.append(tgt_pt)
             ts.append(float(lm.get("frame_t", 0.0)))
 
         if len(src) >= 4:
@@ -167,6 +184,168 @@ class TacticalViewConverter:
             self._manual_tgt = np.array(tgt, dtype=np.float32)
             self._manual_frame_t = ts
             logger.info("Manual anchors loaded: %d points", len(src))
+
+    def _group_keyframes(self, fps: float):
+        """Group manual landmarks by keyframe index → list of (kf_idx, src Nx2, tgt Nx2).
+
+        Anchors are scaled to the working (720p) resolution and sorted by frame.
+        Only keyframes with ≥4 valid anchors are kept.
+        """
+        from collections import defaultdict
+
+        groups: dict[int, list[tuple[list, list]]] = defaultdict(list)
+        for lm in self._manual_landmarks:
+            tgt_pt = self._landmark_to_tgt(lm.get("landmark_id", ""))
+            if tgt_pt is None:
+                continue
+            kf = int(round(float(lm.get("frame_t", 0.0)) * fps))
+            px = lm["pixel"]
+            groups[kf].append(([px[0] * self.src_scale, px[1] * self.src_scale], tgt_pt))
+
+        keyframes = []
+        for kf in sorted(groups):
+            pairs = groups[kf]
+            if len(pairs) < 4:
+                continue
+            src = np.array([p[0] for p in pairs], dtype=np.float32)
+            tgt = np.array([p[1] for p in pairs], dtype=np.float32)
+            keyframes.append((kf, src, tgt))
+        return keyframes
+
+    def build_manual_anchor_sequence(
+        self, video_path: str, total_frames: int, fps: float
+    ) -> None:
+        """
+        Build per-frame manual-anchor arrays so the homography tracks a moving camera.
+
+        Manual landmarks may be annotated at several keyframes (the UI encourages
+        2–3 keyframes for moving cameras). The camera's GLOBAL motion between
+        consecutive frames is estimated (hundreds of background features + RANSAC
+        homography) and ALL anchors are warped by it, re-seeded to the exact
+        annotated positions at each keyframe. Unlike tracking the sparse anchor
+        points directly, a global transform never "loses" individual points
+        (occlusion/low-texture), giving near-100 % frame coverage.
+
+        For a static camera (or a single keyframe) the estimation is skipped and
+        the single anchor set is reused on every frame.
+        """
+        if not self._manual_landmarks:
+            return
+
+        keyframes = self._group_keyframes(fps)
+        if not keyframes:
+            return
+
+        # Static / single-keyframe: reuse one anchor set everywhere (no drift).
+        if self.camera_motion == "static" or len(keyframes) == 1:
+            _, src, tgt = keyframes[0]
+            self._manual_src_seq = [src] * total_frames
+            self._manual_tgt_seq = [tgt] * total_frames
+            logger.info(
+                "Manual anchor sequence: static — %d anchors reused on all %d frames",
+                len(src), total_frames,
+            )
+            return
+
+        from utils import iter_video_frames
+
+        kf_indices = [kf for kf, _, _ in keyframes]
+
+        # ── 1) One video pass: inter-frame homographies H[i] (frame i-1 → i) ─────
+        # H[0] is None; H[i] maps points in frame i-1 to frame i. None when the
+        # estimate fails → treated as identity (no motion) when chaining.
+        H: list[Optional[np.ndarray]] = [None] * total_frames
+        prev_gray = None
+        for frame_idx, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+            if frame_idx >= total_frames:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prev_gray is not None:
+                H[frame_idx] = self._estimate_global_homography(prev_gray, gray)
+            prev_gray = gray
+
+        # ── 2) Assign every frame to its nearest keyframe (midpoint boundaries) ──
+        seq_src: list[Optional[np.ndarray]] = [None] * total_frames
+        seq_tgt: list[Optional[np.ndarray]] = [None] * total_frames
+
+        def _nearest_kf(f: int) -> int:
+            best, bd = kf_indices[0], abs(f - kf_indices[0])
+            for kf in kf_indices[1:]:
+                d = abs(f - kf)
+                if d < bd:
+                    bd, best = d, kf
+            return best
+
+        # ── 3) Propagate each keyframe's anchors forward & backward over its region
+        covered = 0
+        for kf, src, tgt in keyframes:
+            anchors = src.astype(np.float32).copy()
+            # seed the keyframe itself
+            if seq_src[kf] is None or _nearest_kf(kf) == kf:
+                seq_src[kf], seq_tgt[kf] = anchors.copy(), tgt.copy()
+                covered += 1
+            # forward: frames kf+1 .. while nearest keyframe is still this one
+            cur = anchors.copy()
+            f = kf + 1
+            while f < total_frames and _nearest_kf(f) == kf:
+                if H[f] is not None:
+                    cur = cv2.perspectiveTransform(cur.reshape(-1, 1, 2), H[f]).reshape(-1, 2)
+                seq_src[f], seq_tgt[f] = cur.copy(), tgt.copy()
+                covered += 1
+                f += 1
+            # backward: frames kf-1 .. while nearest keyframe is still this one
+            cur = anchors.copy()
+            f = kf - 1
+            while f >= 0 and _nearest_kf(f) == kf:
+                # invert the (f+1 → f+1-1) transform to step from frame f+1 back to f
+                Hb = H[f + 1]
+                if Hb is not None:
+                    try:
+                        cur = cv2.perspectiveTransform(
+                            cur.reshape(-1, 1, 2), np.linalg.inv(Hb)
+                        ).reshape(-1, 2)
+                    except np.linalg.LinAlgError:
+                        pass
+                seq_src[f], seq_tgt[f] = cur.copy(), tgt.copy()
+                covered += 1
+                f -= 1
+
+        self._manual_src_seq = seq_src
+        self._manual_tgt_seq = seq_tgt
+        logger.info(
+            "Manual anchor sequence: %d keyframes, bidirectional homography covered %d/%d frames",
+            len(keyframes), covered, total_frames,
+        )
+
+    @staticmethod
+    def _estimate_global_homography(prev_gray: np.ndarray, gray: np.ndarray):
+        """
+        Estimate the global camera homography between two consecutive frames.
+
+        Tracks many background features (goodFeaturesToTrack + LK) and fits a
+        RANSAC homography. RANSAC rejects the minority of moving foreground
+        (players) as outliers. Returns a 3x3 matrix or None if too few matches.
+        """
+        p0 = cv2.goodFeaturesToTrack(
+            prev_gray, maxCorners=300, qualityLevel=0.01, minDistance=8
+        )
+        if p0 is None or len(p0) < 12:
+            return None
+        lk_params = dict(
+            winSize=(21, 21),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        )
+        p1, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, p0, None, **lk_params)
+        if p1 is None:
+            return None
+        good = status.flatten() == 1
+        good0 = p0[good].reshape(-1, 2)
+        good1 = p1[good].reshape(-1, 2)
+        if len(good0) < 12:
+            return None
+        H, _ = cv2.findHomography(good0, good1, cv2.RANSAC, 3.0)
+        return H
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -232,7 +411,9 @@ class TacticalViewConverter:
         """
         tactical_player_positions: list[dict] = []
 
-        for frame_keypoints, frame_tracks in zip(keypoints_list, player_tracks):
+        for frame_idx, (frame_keypoints, frame_tracks) in enumerate(
+            zip(keypoints_list, player_tracks)
+        ):
             tactical_positions: dict = {}
             try:
                 raw = frame_keypoints.xy.tolist()
@@ -245,21 +426,29 @@ class TacticalViewConverter:
             yolo_src = np.array([kp_list[i] for i in valid_indices], dtype=np.float32)
             yolo_tgt = np.array([self.key_points[i] for i in valid_indices], dtype=np.float32)
 
+            # Per-frame manual anchors (optical-flow tracked) take precedence over
+            # the static set when a sequence has been built for a moving camera.
+            manual_src = self._manual_src
+            manual_tgt = self._manual_tgt
+            if self._manual_src_seq is not None and frame_idx < len(self._manual_src_seq):
+                manual_src = self._manual_src_seq[frame_idx]
+                manual_tgt = self._manual_tgt_seq[frame_idx]
+
             # Select source/target points for homography:
             # ≥6 manual anchors → use ONLY manual (stable, no per-frame YOLO noise)
             # 4-5 manual anchors → blend with YOLO
             # <4 manual anchors → YOLO only
-            if self._manual_src is not None and len(self._manual_src) >= 6:
-                source_points = self._manual_src
-                target_points = self._manual_tgt
-            elif self._manual_src is not None and len(self._manual_src) >= 4:
+            if manual_src is not None and len(manual_src) >= 6:
+                source_points = manual_src
+                target_points = manual_tgt
+            elif manual_src is not None and len(manual_src) >= 4:
                 source_points = (
-                    np.vstack([self._manual_src, yolo_src]) if len(yolo_src) > 0
-                    else self._manual_src
+                    np.vstack([manual_src, yolo_src]) if len(yolo_src) > 0
+                    else manual_src
                 )
                 target_points = (
-                    np.vstack([self._manual_tgt, yolo_tgt]) if len(yolo_src) > 0
-                    else self._manual_tgt
+                    np.vstack([manual_tgt, yolo_tgt]) if len(yolo_src) > 0
+                    else manual_tgt
                 )
             else:
                 source_points = yolo_src

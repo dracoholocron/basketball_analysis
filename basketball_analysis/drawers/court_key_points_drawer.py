@@ -16,9 +16,12 @@ class CourtKeypointDrawer:
         user can verify the annotations are active.
     """
 
-    def __init__(self, manual_src: np.ndarray | None = None):
+    def __init__(self, manual_src: np.ndarray | None = None, manual_src_seq=None):
         self.keypoint_color = '#ff2c2c'
         self.manual_src = manual_src
+        # Optional per-frame anchor sequence (list[np.ndarray|None]); when present,
+        # the squares track the moving camera frame by frame.
+        self.manual_src_seq = manual_src_seq
         self.vertex_annotator = sv.VertexAnnotator(
             color=sv.Color.from_hex(self.keypoint_color),
             radius=8,
@@ -39,8 +42,13 @@ class CourtKeypointDrawer:
     def draw_frame(self, frame, frame_num, court_keypoints):
         annotated_frame = frame.copy()
 
-        # Draw YOLO-detected keypoints
-        if frame_num < len(court_keypoints):
+        # Manual anchors (if any) take precedence — when present they ARE the
+        # homography source, so the noisy YOLO keypoints are hidden to avoid
+        # visual confusion.
+        has_manual = (self.manual_src is not None) or (self.manual_src_seq is not None)
+
+        # Draw YOLO-detected keypoints only when there are no manual anchors.
+        if not has_manual and frame_num < len(court_keypoints):
             keypoints = court_keypoints[frame_num]
             annotated_frame = self.vertex_annotator.annotate(
                 scene=annotated_frame, key_points=keypoints
@@ -50,9 +58,12 @@ class CourtKeypointDrawer:
                 scene=annotated_frame, key_points=keypoints_numpy
             )
 
-        # Draw manual anchors as blue squares
-        if self.manual_src is not None and len(self.manual_src) > 0:
-            for pt in self.manual_src:
+        # Draw manual anchors as blue squares (per-frame sequence if available).
+        anchors = self.manual_src
+        if self.manual_src_seq is not None and frame_num < len(self.manual_src_seq):
+            anchors = self.manual_src_seq[frame_num]
+        if anchors is not None and len(anchors) > 0:
+            for pt in anchors:
                 x, y = int(pt[0]), int(pt[1])
                 cv2.rectangle(annotated_frame, (x - 6, y - 6), (x + 6, y + 6), (255, 100, 0), 2)
 

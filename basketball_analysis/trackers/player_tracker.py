@@ -35,7 +35,17 @@ class PlayerTracker:
         self.model = YOLO(model_path)
         self.model.to(self._device)
         logger.info("PlayerTracker loaded on device: %s", self._device)
-        self.tracker = sv.ByteTrack()
+        # Tuned ByteTrack: a larger lost-track buffer keeps identities alive across
+        # occlusions/re-entries → far fewer spurious new IDs than the default.
+        try:
+            self.tracker = sv.ByteTrack(
+                lost_track_buffer=getattr(settings, "tracker_lost_buffer", 120),
+                minimum_matching_threshold=getattr(settings, "tracker_min_match", 0.85),
+                frame_rate=getattr(settings, "tracker_frame_rate", 30),
+            )
+        except TypeError:
+            # Older supervision signature
+            self.tracker = sv.ByteTrack()
         self.conf = conf
 
     def detect_frames(self, frames: list) -> list:
@@ -52,7 +62,8 @@ class PlayerTracker:
         return detections
 
     def detect_frames_streaming(
-        self, video_path: str, chunk_size: int, max_height: int = 720
+        self, video_path: str, chunk_size: int, max_height: int = 720,
+        target_height: int = 720,
     ) -> list[sv.Detections]:
         """
         YOLO detection over the full video using frame-by-frame iteration.
@@ -69,13 +80,24 @@ class PlayerTracker:
         batch: list = []
         batch_size = settings.yolo_batch_size
 
+        # If detecting at a higher resolution than the pipeline's working space,
+        # rescale boxes back to target_height (720p) so all downstream stages
+        # (tracking, tactical homography, drawing) stay in one coordinate space.
+        _scale = (target_height / max_height) if max_height != target_height else 1.0
+
+        _imgsz = getattr(settings, "player_imgsz", 640)
+
         def _flush(frames: list) -> None:
             for r in self.model.predict(
-                frames, conf=self.conf, verbose=False, device=self._device
+                frames, conf=self.conf, verbose=False, device=self._device,
+                imgsz=_imgsz,
             ):
                 if self._cls_names is None:
                     self._cls_names = r.names
-                all_sv.append(sv.Detections.from_ultralytics(r))
+                det = sv.Detections.from_ultralytics(r)
+                if _scale != 1.0 and len(det) > 0:
+                    det.xyxy = det.xyxy * _scale
+                all_sv.append(det)
 
         for frame in iter_video_frames(video_path, max_height=max_height):
             batch.append(frame)
@@ -90,6 +112,80 @@ class PlayerTracker:
             len(all_sv), max_height,
         )
         return all_sv
+
+    def _botsort_cfg(self) -> str:
+        """Absolute path to the tuned BoT-SORT config shipped with the engine."""
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(here, "configs", "trackers", "botsort_smartbasket.yaml")
+
+    def get_tracks_streaming(
+        self, video_path: str, max_height: int = 720, target_height: int = 720,
+    ) -> tuple[list[dict], list[dict]]:
+        """Detect + track players and referees over the full video (streaming).
+
+        Returns ``(player_tracks, referee_tracks)``. Chooses the tracker backend
+        from settings: 'botsort' (BoT-SORT + camera-motion compensation — robust on
+        panning footage) or 'bytetrack' (legacy supervision path).
+        """
+        backend = getattr(settings, "tracker", "botsort").lower()
+        if backend != "botsort":
+            sv_det = self.detect_frames_streaming(video_path, 0, max_height, target_height)
+            return (
+                self.build_tracks_from_sv_detections(sv_det),
+                self.build_referee_tracks_from_sv_detections(sv_det),
+            )
+
+        from utils.video_utils import iter_video_frames
+
+        cfg = self._botsort_cfg()
+        _scale = (target_height / max_height) if max_height != target_height else 1.0
+        _imgsz = getattr(settings, "player_imgsz", 640)
+        logger.info("PlayerTracker: BoT-SORT (GMC) tracking, cfg=%s", os.path.basename(cfg))
+
+        player_tracks: list[dict] = []
+        referee_tracks: list[dict] = []
+        ref_counter = 0
+        self._cls_names = None
+
+        for frame in iter_video_frames(video_path, max_height=max_height):
+            res = self.model.track(
+                frame, persist=True, conf=self.conf, imgsz=_imgsz,
+                tracker=cfg, verbose=False, device=self._device,
+            )
+            r = res[0]
+            if self._cls_names is None:
+                self._cls_names = r.names
+            cls_inv = {v: k for k, v in r.names.items()}
+            player_id_set = {cls_inv[n] for n in _PLAYER_CLASS_NAMES if n in cls_inv}
+            ref_id_set = {cls_inv[n] for n in _REFEREE_CLASS_NAMES if n in cls_inv}
+
+            pframe: dict = {}
+            rframe: dict = {}
+            boxes = r.boxes
+            if boxes is not None and len(boxes) > 0:
+                xyxy = boxes.xyxy.cpu().numpy()
+                clss = boxes.cls.cpu().numpy().astype(int)
+                ids = (
+                    boxes.id.cpu().numpy().astype(int)
+                    if boxes.id is not None else [None] * len(clss)
+                )
+                for box, cls_id, tid in zip(xyxy, clss, ids):
+                    bbox = (box * _scale).tolist() if _scale != 1.0 else box.tolist()
+                    if cls_id in player_id_set and tid is not None:
+                        pframe[int(tid)] = {"bbox": bbox}
+                    elif cls_id in ref_id_set:
+                        ref_counter += 1
+                        rframe[-ref_counter] = {"bbox": bbox}
+            player_tracks.append(pframe)
+            referee_tracks.append(rframe)
+
+        logger.info(
+            "PlayerTracker.get_tracks_streaming (botsort): %d frames, %d player IDs, %d ref dets",
+            len(player_tracks),
+            len({tid for f in player_tracks for tid in f}),
+            sum(len(f) for f in referee_tracks),
+        )
+        return player_tracks, referee_tracks
 
     def build_tracks_from_sv_detections(
         self, sv_detections: list[sv.Detections]

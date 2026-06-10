@@ -206,8 +206,8 @@ class BallTracker:
         self,
         video_path: str,
         ball_tracks: list[dict],
-        tile_size: int = 640,
-        overlap: float = 0.25,
+        tile_size: int | None = None,
+        overlap: float | None = None,
         sahi_conf: float | None = None,
         min_gap_frames: int = 8,
     ) -> list[dict]:
@@ -218,6 +218,11 @@ class BallTracker:
         them accurately. Only long consecutive gaps justify the per-frame SAHI cost.
         Iterates the video once; stops early when all target frames are covered.
         """
+        if tile_size is None:
+            tile_size = getattr(settings, "ball_sahi_tile", 640)
+        if overlap is None:
+            overlap = getattr(settings, "ball_sahi_overlap", 0.25)
+
         all_missing = sorted(i for i, bt in enumerate(ball_tracks) if 1 not in bt)
         if not all_missing:
             logger.info("SAHI refill: no missing ball frames — skipping")
@@ -382,22 +387,138 @@ class BallTracker:
 
         return ball_positions
 
-    def interpolate_ball_positions(self,ball_positions):
+    def interpolate_ball_positions(self, ball_positions, max_interp_gap: int | None = None):
         """
         Interpolate missing ball positions to create smooth tracking results.
 
+        Only interior gaps of at most ``max_interp_gap`` consecutive missing frames
+        are linearly interpolated. Longer gaps (and leading/trailing gaps) are left
+        empty so the ball simply disappears instead of being drawn travelling along
+        a false straight line across the court.
+
         Args:
             ball_positions (list): List of ball positions with potential gaps.
+            max_interp_gap (int | None): Max consecutive missing frames to fill.
+                Defaults to settings.ball_max_interp_gap.
 
         Returns:
-            list: List of ball positions with interpolated values filling the gaps.
+            list: Ball positions with short gaps interpolated, long gaps emptied.
         """
-        ball_positions = [x.get(1,{}).get('bbox',[]) for x in ball_positions]
-        df_ball_positions = pd.DataFrame(ball_positions,columns=['x1','y1','x2','y2'])
+        if max_interp_gap is None:
+            max_interp_gap = getattr(settings, "ball_max_interp_gap", 15)
 
-        # Interpolate missing values
-        df_ball_positions = df_ball_positions.interpolate()
-        df_ball_positions = df_ball_positions.bfill()
+        bboxes = [x.get(1, {}).get('bbox', []) for x in ball_positions]
+        df = pd.DataFrame(bboxes, columns=['x1', 'y1', 'x2', 'y2'])
 
-        ball_positions = [{1: {"bbox":x}} for x in df_ball_positions.to_numpy().tolist()]
-        return ball_positions
+        orig_missing = df.isna().all(axis=1).to_numpy()
+        # Linear interpolation only between known points (no leading/trailing fill).
+        df = df.interpolate(method='linear', limit_area='inside')
+        filled = df.to_numpy()
+
+        n = len(filled)
+        blank = np.zeros(n, dtype=bool)
+        j = 0
+        while j < n:
+            if orig_missing[j]:
+                k = j
+                while k < n and orig_missing[k]:
+                    k += 1
+                if (k - j) > max_interp_gap:
+                    blank[j:k] = True   # gap too long → leave empty
+                j = k
+            else:
+                j += 1
+
+        out = []
+        for idx in range(n):
+            row = filled[idx]
+            if blank[idx] or np.isnan(row).any():
+                out.append({})
+            else:
+                out.append({1: {"bbox": [float(v) for v in row]}})
+        return out
+
+    def apply_kalman_smoothing(self, ball_positions, max_predict_gap: int | None = None):
+        """
+        Smooth the ball centre with a constant-velocity Kalman filter and predict
+        through short detection gaps with a physically plausible (velocity-based)
+        trajectory instead of a straight line.
+
+        - Detected frame: predict + correct → de-jittered centre (kept bbox size
+          is an EMA of detected sizes).
+        - Interior gap ≤ ``max_predict_gap``: predict-only → extrapolated centre.
+        - Longer/trailing gaps: left empty ({}) for interpolation/no-draw.
+
+        Disabled (pass-through) when settings.ball_kalman is False.
+        """
+        if not getattr(settings, "ball_kalman", True):
+            return ball_positions
+        if max_predict_gap is None:
+            max_predict_gap = getattr(settings, "ball_max_interp_gap", 15)
+
+        import cv2
+
+        n = len(ball_positions)
+        present: list[list | None] = []
+        for bt in ball_positions:
+            bbox = bt.get(1, {}).get("bbox", [])
+            ok = len(bbox) >= 4 and not any(np.isnan(v) for v in bbox[:4])
+            present.append([float(v) for v in bbox[:4]] if ok else None)
+
+        # index of the next detected frame (for interior-gap test)
+        next_present = [None] * n
+        nxt = None
+        for i in range(n - 1, -1, -1):
+            if present[i] is not None:
+                nxt = i
+            next_present[i] = nxt
+
+        kf = cv2.KalmanFilter(4, 2)
+        kf.transitionMatrix = np.array(
+            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32
+        )
+        kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+        kf.processNoiseCov = np.diag([1e-1, 1e-1, 1.0, 1.0]).astype(np.float32)
+        kf.measurementNoiseCov = np.diag([3.0, 3.0]).astype(np.float32)
+
+        out: list[dict] = [{} for _ in range(n)]
+        initialized = False
+        last_size = None
+        last_det_idx = -1
+
+        def _bbox(cx, cy, size):
+            w, h = size
+            return [cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0]
+
+        for i in range(n):
+            pred = kf.predict() if initialized else None
+            bbox = present[i]
+            if bbox is not None:
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+                w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                if (not initialized) or (i - last_det_idx) > max_predict_gap:
+                    # (re)initialise after a long gap to avoid a huge correction jump
+                    kf.statePost = np.array([[cx], [cy], [0], [0]], np.float32)
+                    kf.errorCovPost = np.eye(4, dtype=np.float32)
+                    ex, ey = cx, cy
+                    initialized = True
+                else:
+                    est = kf.correct(np.array([[np.float32(cx)], [np.float32(cy)]]))
+                    ex, ey = float(est[0]), float(est[1])
+                last_size = (w, h) if last_size is None else (
+                    0.6 * last_size[0] + 0.4 * w, 0.6 * last_size[1] + 0.4 * h
+                )
+                out[i] = {1: {"bbox": _bbox(ex, ey, last_size)}}
+                last_det_idx = i
+            else:
+                if (
+                    initialized and last_size is not None and last_det_idx >= 0
+                    and (i - last_det_idx) <= max_predict_gap
+                    and next_present[i] is not None
+                ):
+                    ex, ey = float(pred[0]), float(pred[1])
+                    out[i] = {1: {"bbox": _bbox(ex, ey, last_size)}}
+                # else leave empty
+
+        return out
