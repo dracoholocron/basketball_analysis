@@ -63,28 +63,49 @@ class CourtKeypointDetector:
         Reads frames via iter_video_frames (max_height=720 by default) so that
         keypoint coordinates are always in the same 720p space as the draw pass.
         """
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_selective
 
-        keypoints = []
+        batch_size = getattr(settings, "court_kp_batch_size", None) or settings.yolo_batch_size
+        stride = max(1, getattr(settings, "court_kp_sample_every", 1))
+        use_half = bool(getattr(settings, "yolo_half", False)) and str(self._device).startswith("cuda")
+        _imgsz = getattr(settings, "court_kp_imgsz", 640)
+
+        sampled: list = []   # one detection per sampled frame (indices 0, stride, 2·stride, …)
         batch: list = []
-        batch_size = settings.yolo_batch_size
 
         def _flush(frames: list) -> None:
             for r in self.model.predict(
-                frames, conf=0.5, verbose=False, device=self._device
+                frames, conf=0.5, verbose=False, device=self._device,
+                half=use_half, imgsz=_imgsz,
             ):
-                keypoints.append(r.keypoints)
+                sampled.append(r.keypoints)
 
-        for frame in iter_video_frames(video_path, max_height=max_height):
-            batch.append(frame)
-            if len(batch) == batch_size:
-                _flush(batch)
-                batch = []
+        # Court geometry changes slowly → infer only every `stride` frames (batched,
+        # FP16) and carry the last result forward for the skipped ones. Skipped frames
+        # are grab()-skipped (not decoded) for an extra speedup. FP16 + larger batch
+        # raise GPU/VRAM use; results unchanged vs decoding every frame.
+        total = 0
+        for idx, frame in iter_video_frames_selective(
+            video_path, lambda i: i % stride == 0, max_height=max_height
+        ):
+            total = idx + 1
+            if frame is not None:
+                batch.append(frame)
+                if len(batch) == batch_size:
+                    _flush(batch)
+                    batch = []
         if batch:
             _flush(batch)
 
+        # Expand to one entry per frame (carry the block's detection forward).
+        keypoints = [
+            sampled[min(i // stride, len(sampled) - 1)] if sampled else None
+            for i in range(total)
+        ]
+
         logger.info(
-            "CourtKeypointDetector.get_court_keypoints_streaming: %d frames (max_h=%d)",
-            len(keypoints), max_height,
+            "CourtKeypointDetector.get_court_keypoints_streaming: %d frames "
+            "(%d inferred, max_h=%d, imgsz=%d, stride=%d, half=%s)",
+            len(keypoints), len(sampled), max_height, _imgsz, stride, use_half,
         )
         return keypoints

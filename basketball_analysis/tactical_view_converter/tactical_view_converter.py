@@ -213,7 +213,8 @@ class TacticalViewConverter:
         return keyframes
 
     def build_manual_anchor_sequence(
-        self, video_path: str, total_frames: int, fps: float
+        self, video_path: str, total_frames: int, fps: float,
+        precomputed_H: Optional[list] = None,
     ) -> None:
         """
         Build per-frame manual-anchor arrays so the homography tracks a moving camera.
@@ -251,18 +252,24 @@ class TacticalViewConverter:
 
         kf_indices = [kf for kf, _, _ in keyframes]
 
-        # ── 1) One video pass: inter-frame homographies H[i] (frame i-1 → i) ─────
+        # ── 1) Inter-frame homographies H[i] (frame i-1 → i) ─────────────────────
         # H[0] is None; H[i] maps points in frame i-1 to frame i. None when the
-        # estimate fails → treated as identity (no motion) when chaining.
-        H: list[Optional[np.ndarray]] = [None] * total_frames
-        prev_gray = None
-        for frame_idx, frame in enumerate(iter_video_frames(video_path, max_height=720)):
-            if frame_idx >= total_frames:
-                break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if prev_gray is not None:
-                H[frame_idx] = self._estimate_global_homography(prev_gray, gray)
-            prev_gray = gray
+        # estimate fails → treated as identity (no motion) when chaining. If a caller
+        # already computed this sequence (e.g. the hoop-box propagation), reuse it so
+        # the whole pipeline does a SINGLE optical-flow pass instead of two.
+        if precomputed_H is not None and len(precomputed_H) >= total_frames:
+            H = precomputed_H
+            logger.info("Manual anchor sequence: reusing shared camera-motion homography (no extra pass)")
+        else:
+            H: list[Optional[np.ndarray]] = [None] * total_frames
+            prev_gray = None
+            for frame_idx, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+                if frame_idx >= total_frames:
+                    break
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if prev_gray is not None:
+                    H[frame_idx] = self._estimate_global_homography(prev_gray, gray)
+                prev_gray = gray
 
         # ── 2) Assign every frame to its nearest keyframe (midpoint boundaries) ──
         seq_src: list[Optional[np.ndarray]] = [None] * total_frames

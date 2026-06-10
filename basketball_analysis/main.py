@@ -196,6 +196,83 @@ def _rim_box_sequence(rims_with_t: list[tuple[int, list[float]]],
     return seq
 
 
+def _global_motion_sequence(video_path: str, total_frames: int) -> list:
+    """Per-frame camera-motion homography H[i] (maps frame i-1 → i), one video pass.
+
+    Reuses the same LK+RANSAC global-motion estimator as the court-anchor
+    propagation. Used to propagate manual hoop/backboard boxes across the whole
+    video so a couple of marks follow the panning camera everywhere."""
+    import cv2
+    from utils.video_utils import iter_video_frames
+    from tactical_view_converter.tactical_view_converter import TacticalViewConverter
+
+    H: list = [None] * total_frames
+    prev_gray = None
+    for i, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+        if i >= total_frames:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if prev_gray is not None:
+            H[i] = TacticalViewConverter._estimate_global_homography(prev_gray, gray)
+        prev_gray = gray
+    return H
+
+
+def _propagate_box_seq(boxes_with_t: list[tuple[int, list[float]]], H: list,
+                       total_frames: int) -> list[list[float] | None]:
+    """Propagate annotated box(es) across ALL frames via the camera-motion homography.
+
+    Each annotation is a keyframe; every frame is assigned to its nearest keyframe and
+    the box's 4 corners are warped forward/backward by the chained per-frame homography
+    (re-seeded at each keyframe to limit drift), then reduced to an axis-aligned bbox.
+    A box for a hoop that is off-screen at some moment warps off-frame on its own, so
+    multiple hoops don't interfere. Covers the full video from just 1–2 marks."""
+    import cv2
+    import numpy as np
+    if not boxes_with_t:
+        return [None] * total_frames
+    pts = sorted(boxes_with_t, key=lambda p: p[0])
+    kf_indices = [f for f, _ in pts]
+
+    def nearest_kf(f: int) -> int:
+        return min(kf_indices, key=lambda k: abs(f - k))
+
+    def _corners(box: list[float]) -> "np.ndarray":
+        x1, y1, x2, y2 = box
+        return np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
+
+    def _bbox(c: "np.ndarray") -> list[float]:
+        xs, ys = c[:, 0], c[:, 1]
+        return [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
+
+    seq: list[list[float] | None] = [None] * total_frames
+    for kf, box in pts:
+        base = _corners(box)
+        if nearest_kf(kf) == kf:
+            seq[kf] = list(box)
+        cur = base.copy()
+        f = kf + 1
+        while f < total_frames and nearest_kf(f) == kf:
+            if H[f] is not None:
+                cur = cv2.perspectiveTransform(cur.reshape(-1, 1, 2), H[f]).reshape(-1, 2)
+            seq[f] = _bbox(cur)
+            f += 1
+        cur = base.copy()
+        f = kf - 1
+        while f >= 0 and nearest_kf(f) == kf:
+            Hb = H[f + 1]
+            if Hb is not None:
+                try:
+                    cur = cv2.perspectiveTransform(
+                        cur.reshape(-1, 1, 2), np.linalg.inv(Hb)
+                    ).reshape(-1, 2)
+                except np.linalg.LinAlgError:
+                    pass
+            seq[f] = _bbox(cur)
+            f -= 1
+    return seq
+
+
 def _is_made_basket(ball_tracks: list[dict], rim_seq: list,
                     frame: int, fps: float, window_s: float = 0.8,
                     bb_seq: list | None = None) -> bool:
@@ -649,6 +726,7 @@ def run_pipeline(
     _rim_seqs: list[list] = []
     _bb_seqs: list[list | None] = []   # backboard sequence aligned per hoop with _rim_seqs
     _rim_boxes_720: list[list[float]] = []
+    _motion_H = None   # shared camera-motion homography (reused by court-anchor pass)
     if hoop_boxes:
         from collections import defaultdict as _dd
 
@@ -669,9 +747,25 @@ def run_pipeline(
         if groups:
             multi = len(groups) > 1
 
+            # Camera-motion propagation: from a couple of marks, warp each box across
+            # ALL frames following the pan (off-screen hoops drift off-frame on their
+            # own, so the rim is available video-wide without windowing). Falls back to
+            # time-interpolation (windowed) when no motion is estimable.
+            _H = None
+            if getattr(_settings, "hoop_propagate", True):
+                try:
+                    _H = _global_motion_sequence(input_video, total_frames)
+                    _motion_H = _H   # reuse for the court-anchor pass (one OF pass total)
+                except Exception as exc:
+                    logger.warning("Hoop motion estimation failed: %s", exc)
+            _have_motion = bool(_H) and any(h is not None for h in _H)
+
             def _seq(pts):
-                # Window to marked range only with several hoops AND ≥2 marks (panning
-                # track). A single mark = static box for the whole video.
+                if not pts:
+                    return None
+                if _have_motion:
+                    return _propagate_box_seq(pts, _H, total_frames)
+                # No motion → time-interpolate; window only with several hoops + ≥2 marks.
                 m = int(actual_fps * 2) if (multi and len(pts) >= 2) else None
                 return _rim_box_sequence(pts, total_frames, clamp_margin=m)
 
@@ -686,12 +780,12 @@ def run_pipeline(
                 b = next((s[i] for s in _rim_seqs if s[i] is not None), None)
                 hoop_tracks.append(list(b) if b is not None else None)
             logger.info(
-                "Manual hoop: %d hoop(s), %d rim box(es) at frames %s, %d backboard box(es)"
-                " → per-frame interpolated sequences%s",
+                "Manual hoop: %d hoop(s), %d rim box(es) at frames %s, %d backboard box(es) → %s",
                 len(groups), len(_rim_boxes_720),
                 sorted({f for pts in groups.values() for f, _ in pts}),
                 sum(len(v) for v in bb_groups.values()),
-                " (windowed per hoop)" if multi else "",
+                "camera-motion propagated (full video)" if _have_motion
+                else ("interpolated, windowed per hoop" if multi else "interpolated"),
             )
 
     # ── CV Event Detection (shot, rebound, steal) ───────────────────────────────
@@ -710,7 +804,7 @@ def run_pipeline(
             from event_detector import ShotDetector, ReboundDetector, StealTurnoverDetector
             shot_events = ShotDetector().process_sequence(pose_sequence, ball_tracks)
             rebound_events = ReboundDetector().process_sequence(
-                pose_sequence, ball_tracks, player_tracks
+                pose_sequence, ball_tracks, player_tracks, rim_sequence=hoop_tracks
             )
             steal_events = StealTurnoverDetector().process_sequence(
                 pose_sequence, ball_tracks, player_assignment
@@ -788,7 +882,7 @@ def run_pipeline(
     # Build per-frame manual-anchor sequence (optical-flow tracked for moving
     # cameras; static reuse otherwise). No-op when no manual landmarks exist.
     tactical_view_converter.build_manual_anchor_sequence(
-        input_video, total_frames, actual_fps
+        input_video, total_frames, actual_fps, precomputed_H=_motion_H
     )
     tactical_player_positions = (
         tactical_view_converter.transform_players_to_tactical_view(

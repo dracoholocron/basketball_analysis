@@ -120,6 +120,11 @@ services:
       BA_DEVICE: ${BA_DEVICE:-auto}
       BA_CHUNK_SIZE: "3000"
       BA_YOLO_BATCH_SIZE: "32"
+      BA_YOLO_HALF: "true"            # FP16 inference (faster, less VRAM) on CUDA
+      BA_COURT_KP_BATCH_SIZE: "24"    # ~10GB at imgsz 1536 (raise GPU/VRAM use; ≥32 risks OOM)
+      BA_COURT_KP_SAMPLE_EVERY: "2"   # moving-camera precision: infer court frequently (follows pan)
+      BA_COURT_KP_IMGSZ: "1536"       # moving/distant precision: high court keypoint resolution (more GPU/VRAM)
+      BA_HOOP_PROPAGATE: "true"       # propagate hoop/backboard across all frames via camera motion (a few marks → full video)
       BA_BALL_DETECTOR_CONF: "0.15"
       BA_BALL_SAHI_TILE: "640"
       BA_BALL_SAHI_OVERLAP: "0.25"

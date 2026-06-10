@@ -87,10 +87,13 @@ class BallTracker:
         self._cls_names: dict | None = None
         batch: list = []
         batch_size = settings.yolo_batch_size
+        _half = bool(getattr(settings, "yolo_half", False)) and str(self._device).startswith("cuda")
 
         def _flush(frames: list) -> None:
             for r in self.model.predict(
-                frames, conf=self.conf, iou=self.iou, verbose=False, device=self._device,            ):
+                frames, conf=self.conf, iou=self.iou, verbose=False,
+                device=self._device, half=_half,
+            ):
                 if self._cls_names is None:
                     self._cls_names = r.names
                 all_sv.append(sv.Detections.from_ultralytics(r))
