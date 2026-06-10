@@ -398,6 +398,8 @@ def run_pipeline(
     team2_name: str | None = None,
     analysis_start_s: float = 0.0,
     analysis_end_s: float | None = None,
+    sam2_checkpoint: str | None = None,
+    sam2_config: str | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -535,7 +537,10 @@ def run_pipeline(
         if ball_points and getattr(_settings, "ball_sam2", True):
             try:
                 from ball_sam2 import Sam2BallTracker
-                sam2 = Sam2BallTracker(_settings.sam2_checkpoint, _settings.sam2_config)
+                _sam2_ckpt = sam2_checkpoint or _settings.sam2_checkpoint
+                _sam2_cfg = sam2_config or _settings.sam2_config
+                logger.info("SAM2 ball tracker checkpoint: %s", _sam2_ckpt)
+                sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg)
                 sam2_tracks = sam2.track(
                     input_video, ball_points, len(ball_tracks), actual_fps,
                     src_scale=_manual_src_scale,

@@ -84,6 +84,7 @@ export async function updateGameSettings(
     away_team_name?: string;
     analysis_start_s?: number | null;
     analysis_end_s?: number | null;
+    ball_tracking_quality?: string;
   }
 ) {
   const { data } = await api.patch(`/games/${gameId}`, payload);
@@ -295,6 +296,22 @@ export async function getTeamStats(teamId: string, seasonId?: string) {
     params: seasonId ? { season_id: seasonId } : {},
   });
   return data;
+}
+
+// ── Lab: SAM 3 pilot (experimental, isolated) ───────────────────────────────────
+export async function sam3Track(gameId: string, prompt: string, startS?: number, endS?: number | null) {
+  const { data } = await api.post(`/lab/sam3/track`, {
+    game_id: gameId, prompt, start_s: startS ?? 0, end_s: endS ?? null,
+  });
+  return data as { task_id: string; queued: boolean };
+}
+
+export async function sam3Result(taskId: string) {
+  const { data } = await api.get(`/lab/sam3/result/${taskId}`);
+  return data as {
+    state: string; error?: string; output_url?: string | null;
+    result?: { coverage_pct?: number; frames?: number; frames_with_object?: number; prompt?: string };
+  };
 }
 
 // ── Seasons ───────────────────────────────────────────────────────────────────

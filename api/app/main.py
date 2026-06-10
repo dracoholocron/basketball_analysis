@@ -12,7 +12,7 @@ from .core.config import settings
 from .routers import auth, games, jobs, metrics
 from .routers import organizations, seasons, teams, players
 from .routers import box_scores, game_events, matchups, plays, playbooks, training
-from .routers import annotations, ball_annotations, hoop_annotations
+from .routers import annotations, ball_annotations, hoop_annotations, lab
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -57,6 +57,7 @@ app.include_router(training.router, prefix=_prefix)
 app.include_router(annotations.router, prefix=_prefix)
 app.include_router(ball_annotations.router, prefix=_prefix)
 app.include_router(hoop_annotations.router, prefix=_prefix)
+app.include_router(lab.router, prefix=_prefix)
 
 
 @app.get("/health", tags=["health"])

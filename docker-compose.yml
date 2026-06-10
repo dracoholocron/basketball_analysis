@@ -183,6 +183,37 @@ services:
       retries: 3
     logging: *default-logging
 
+  # ── SAM 3 PILOT lab worker (isolated, opt-in) ────────────────────────────────
+  # Start only when piloting SAM 3:  docker compose --profile lab up -d worker-sam3lab
+  # Requires sam3.pt (gated) placed in the sam3_models volume.
+  worker-sam3lab:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile.sam3lab
+    profiles: ["lab"]
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      BA_SAM3_WEIGHTS: /app/sam3_models/sam3.pt
+      ENGINE_PATH: /app/engine
+      BA_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-basketball}:${POSTGRES_PASSWORD:-basketball}@db:5432/${POSTGRES_DB:-basketball}
+      BA_REDIS_URL: redis://redis:6379/0
+      BA_MINIO_ENDPOINT: minio:9000
+      BA_MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      BA_MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      LD_LIBRARY_PATH: "/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cufft/lib:/opt/conda/lib/python3.11/site-packages/nvidia/curand/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusolver/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusparse/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+    volumes:
+      - sam3_models:/app/sam3_models       # place gated sam3.pt here
+      - models_data:/app/engine/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    logging: *default-logging
+
   # ── Next.js Frontend ─────────────────────────────────────────────────────────
   frontend:
     build:
@@ -232,5 +263,6 @@ volumes:
   stubs_data:
   hf_cache:
   ball_dataset:
+  sam3_models:       # gated SAM 3 weights (sam3.pt) for the lab pilot
   caddy_data:
   caddy_config:

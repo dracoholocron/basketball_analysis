@@ -38,6 +38,7 @@ class GameRead(BaseModel):
     away_score: Optional[int]
     analysis_start_s: Optional[float] = None
     analysis_end_s: Optional[float] = None
+    ball_tracking_quality: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

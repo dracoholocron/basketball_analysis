@@ -6,7 +6,8 @@ celery_app = Celery(
     "basketball_analytics",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.worker.tasks", "app.worker.cpu_tasks", "app.worker.gpu_tasks"],
+    include=["app.worker.tasks", "app.worker.cpu_tasks", "app.worker.gpu_tasks",
+             "app.worker.sam3_tasks"],
 )
 
 celery_app.conf.update(
@@ -30,5 +31,7 @@ celery_app.conf.update(
         "app.worker.tasks.finetune_ball_detector": {"queue": "gpu"},
         "app.worker.cpu_tasks.run_simulation_task": {"queue": "cpu"},
         "app.worker.gpu_tasks.run_pose_analysis_task": {"queue": "gpu"},
+        # SAM 3 pilot runs on an isolated lab worker (profile 'lab'), own queue.
+        "app.worker.sam3_tasks.sam3_pilot_track": {"queue": "sam3lab"},
     },
 )

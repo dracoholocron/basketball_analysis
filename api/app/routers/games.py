@@ -113,6 +113,7 @@ class GameUpdate(BaseModel):
     away_team_name: Optional[str] = None   # find-or-create Team → away_team_id
     analysis_start_s: Optional[float] = None  # live-play window start (seconds)
     analysis_end_s: Optional[float] = None    # live-play window end (seconds)
+    ball_tracking_quality: Optional[str] = None  # 'small' | 'base_plus' | 'large'
 
 
 async def _find_or_create_team(db: AsyncSession, name: str, org_id) -> Team:
@@ -148,6 +149,9 @@ async def update_game(
         game.home_team_id = (await _find_or_create_team(db, home_name, current_user.organization_id)).id
     if away_name:
         game.away_team_id = (await _find_or_create_team(db, away_name, current_user.organization_id)).id
+    # Validate SAM 2.1 quality selector; ignore unknown values.
+    if data.get("ball_tracking_quality") not in (None, "small", "base_plus", "large"):
+        data.pop("ball_tracking_quality", None)
 
     for field, value in data.items():
         setattr(game, field, value)

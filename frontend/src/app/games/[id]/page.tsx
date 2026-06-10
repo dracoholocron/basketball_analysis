@@ -106,6 +106,7 @@ export default function GameDetailPage() {
   const [teamName2, setTeamName2] = useState("");
   const [gameStartS, setGameStartS] = useState("");
   const [gameEndS, setGameEndS] = useState("");
+  const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large">("base_plus");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const showPoses = (game?.show_poses as boolean) ?? true;
@@ -120,6 +121,7 @@ export default function GameDetailPage() {
       setTeamName2((g?.away_team_name as string) ?? "");
       setGameStartS(g?.analysis_start_s != null ? String(g.analysis_start_s) : "");
       setGameEndS(g?.analysis_end_s != null ? String(g.analysis_end_s) : "");
+      setBallQuality(((g?.ball_tracking_quality as "small"|"base_plus"|"large") ?? "base_plus"));
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
@@ -249,6 +251,7 @@ export default function GameDetailPage() {
     if (teamName2.trim() && teamName2.trim() !== (game?.away_team_name as string)) payload.away_team_name = teamName2.trim();
     payload.analysis_start_s = gameStartS.trim() ? Number(gameStartS) : 0;
     payload.analysis_end_s = gameEndS.trim() ? Number(gameEndS) : null;
+    if (ballQuality !== (game?.ball_tracking_quality as string)) payload.ball_tracking_quality = ballQuality;
     if (Object.keys(payload).length > 0) {
       try {
         const updated = await updateGameSettings(id, payload);
@@ -649,6 +652,29 @@ export default function GameDetailPage() {
                       className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
                     />
                   </div>
+                </div>
+              </div>
+
+              {/* Ball tracking quality (SAM 2.1 checkpoint) */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Calidad de tracking de balón (SAM 2.1)</p>
+                <p className="text-xs text-slate-400">
+                  Checkpoint mayor = mejor seguimiento del balón, pero más VRAM y tiempo.
+                </p>
+                <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 w-fit">
+                  {([
+                    ["small", "Rápido"],
+                    ["base_plus", "Equilibrado"],
+                    ["large", "Máxima"],
+                  ] as const).map(([q, label]) => (
+                    <button key={q} onClick={() => setBallQuality(q)}
+                      className={clsx(
+                        "px-3 py-1.5 text-xs rounded-md transition-colors",
+                        ballQuality === q ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white",
+                      )}>
+                      {label} <span className="opacity-60">({q})</span>
+                    </button>
+                  ))}
                 </div>
               </div>
 

@@ -201,6 +201,17 @@ def run_analysis(
                         "Game window: %.0fs – %s", analysis_start_s,
                         f"{analysis_end_s:.0f}s" if analysis_end_s else "end",
                     )
+                _ball_quality = getattr(_g, "ball_tracking_quality", None) or "base_plus"
+
+        # Map SAM 2.1 quality → (checkpoint, config). None → pipeline uses settings default.
+        _SAM2_BY_QUALITY = {
+            "small":     ("models/sam2.1_hiera_small.pt",     "configs/sam2.1/sam2.1_hiera_s.yaml"),
+            "base_plus": ("models/sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+            "large":     ("models/sam2.1_hiera_large.pt",     "configs/sam2.1/sam2.1_hiera_l.yaml"),
+        }
+        sam2_checkpoint, sam2_config = _SAM2_BY_QUALITY.get(
+            locals().get("_ball_quality", "base_plus"), (None, None)
+        )
 
         # ── 5. Run pipeline ────────────────────────────────────────────────
         stub_dir = os.path.join(tmp, "stubs")
@@ -260,6 +271,8 @@ def run_analysis(
                 team2_name=team2_name,
                 analysis_start_s=analysis_start_s,
                 analysis_end_s=analysis_end_s,
+                sam2_checkpoint=sam2_checkpoint,
+                sam2_config=sam2_config,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -932,8 +945,8 @@ def generate_highlights(
 
 @celery_app.task(bind=True, name="app.worker.tasks.finetune_ball_detector",
                  max_retries=0, acks_late=True)
-def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 1280,
-                           max_images: int = 4000) -> dict:
+def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
+                           max_images: int = 4000, batch: int = 8) -> dict:
     """
     Fine-tune the ball detector on the accumulated SAM2 auto-label dataset
     (/app/ball_dataset, produced when BA_BALL_EXPORT_DATASET=true during analysis).
@@ -988,7 +1001,7 @@ def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 1280,
         )
         model = YOLO(base)
         model.train(
-            data=sub_yaml, epochs=epochs, imgsz=imgsz,
+            data=sub_yaml, epochs=epochs, imgsz=imgsz, batch=batch,
             mosaic=1.0, close_mosaic=10, degrees=0.0,
             translate=0.1, scale=0.5, fliplr=0.5,
             workers=0,  # Celery prefork is daemonic → DataLoader cannot fork children
