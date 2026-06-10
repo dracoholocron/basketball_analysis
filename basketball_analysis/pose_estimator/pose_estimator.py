@@ -323,6 +323,12 @@ class PoseEstimator:
         self._session = None
         self._yolo_model = None
         self._rtm_input_size: tuple[int, int] = (192, 256)
+        # Resolve the inference device once (used by YOLO-pose predict calls).
+        try:
+            from configs.settings import settings as _s
+            self._device = _s.resolve_device()
+        except Exception:
+            self._device = "cpu"
 
         if not self._dummy:
             if _POSE_BACKEND in ("rtmpose", "auto"):

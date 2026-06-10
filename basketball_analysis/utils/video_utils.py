@@ -74,6 +74,44 @@ def iter_video_frames(
         cap.release()
 
 
+def iter_video_frames_selective(
+    video_path: str,
+    want,
+    max_height: int = 0,
+) -> Generator[tuple, None, None]:
+    """Yield ``(idx, frame)`` for every frame, but only DECODE frames where
+    ``want(idx)`` is True; skipped frames are advanced with ``grab()`` (no decode,
+    much cheaper) and yield ``(idx, None)``.
+
+    Lets phases that only need pixels on a subset of frames (e.g. team assignment
+    every N frames, court keypoints every `stride`) avoid decoding the rest — a big
+    speedup with no change to results. ``max_height`` downscales decoded frames the
+    same way as ``iter_video_frames`` so coordinates stay in 720p space.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video: {video_path}")
+    try:
+        idx = 0
+        while True:
+            if want(idx):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if max_height > 0 and frame.shape[0] > max_height:
+                    scale = max_height / frame.shape[0]
+                    new_w = int(frame.shape[1] * scale)
+                    frame = cv2.resize(frame, (new_w, max_height), interpolation=cv2.INTER_AREA)
+                yield idx, frame
+            else:
+                if not cap.grab():   # advance without decoding
+                    break
+                yield idx, None
+            idx += 1
+    finally:
+        cap.release()
+
+
 def iter_video_chunks(
     video_path: str,
     chunk_size: int = 64,

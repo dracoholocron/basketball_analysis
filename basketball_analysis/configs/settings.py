@@ -374,6 +374,38 @@ class EngineSettings(BaseSettings):
         default=30,
         description="Run CLIP inference every N frames per player; intermediate frames reuse last vote. Env: BA_CLIP_SAMPLE_EVERY",
     )
+    yolo_half: bool = Field(
+        default=True,
+        description="FP16 (half-precision) YOLO inference on CUDA — faster and less VRAM. Env: BA_YOLO_HALF",
+    )
+    court_kp_batch_size: int = Field(
+        default=48,
+        description="Batch size for court-keypoint inference (larger → better GPU/VRAM use). Env: BA_COURT_KP_BATCH_SIZE",
+    )
+    hoop_propagate: bool = Field(
+        default=True,
+        description=(
+            "Propagate manual hoop/backboard boxes across the whole video via the "
+            "camera-motion homography (a couple of marks follow the pan everywhere). "
+            "Falls back to time-interpolation when no motion is estimable. Env: BA_HOOP_PROPAGATE"
+        ),
+    )
+    court_kp_imgsz: int = Field(
+        default=1280,
+        description=(
+            "Inference resolution for court keypoints. THE precision lever: higher "
+            "(1280/1536) localizes keypoints better for moving/distant footage and "
+            "uses more GPU/VRAM. Env: BA_COURT_KP_IMGSZ"
+        ),
+    )
+    court_kp_sample_every: int = Field(
+        default=5,
+        description=(
+            "Run court-keypoint detection every N frames; intermediate frames reuse "
+            "the last result (court geometry changes slowly). Raise for static camera "
+            "(e.g. 15-30) to cut this phase. Env: BA_COURT_KP_SAMPLE_EVERY"
+        ),
+    )
     fps: float = Field(
         default=24.0,
         description="Video frame rate — overridden by actual video FPS when available",

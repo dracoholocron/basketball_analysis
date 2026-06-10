@@ -267,9 +267,25 @@ class TeamAssigner:
         last_known: dict[int, int] = {}
         total = len(player_tracks)
 
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_selective
 
-        for frame_num, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+        # Decode only the frames we actually run CLIP on: every `_sample_every`-th
+        # frame PLUS each track's first appearance (so new players are labeled at
+        # birth, exactly as before). All other frames are grab()-skipped (no decode)
+        # → large speedup with identical results. Precompute the decode set.
+        first_appearance: set[int] = set()
+        _seen: set[int] = set()
+        for _i, _pt in enumerate(player_tracks):
+            for _pid in _pt:
+                if _pid not in _seen:
+                    _seen.add(_pid)
+                    first_appearance.add(_i)
+        decode_frames = {i for i in range(total) if i % _sample_every == 0} | first_appearance
+
+        def _want(idx: int) -> bool:
+            return idx in decode_frames
+
+        for frame_num, frame in iter_video_frames_selective(video_path, _want, max_height=720):
             if frame_num >= total:
                 break
 
@@ -282,25 +298,31 @@ class TeamAssigner:
                     frame_num, total, frame_num / total * 100,
                 )
 
-            needs_inference = [
-                pid for pid in player_track
-                if frame_num % _sample_every == 0 or pid not in last_known
-            ]
-            if needs_inference:
-                crops = [
-                    self._jersey_crop(frame, player_track[pid]["bbox"])
-                    for pid in needs_inference
+            # `frame` is None on skipped (non-decoded) frames; only run CLIP when we
+            # have pixels (which is exactly the sampled / first-appearance frames).
+            if frame is not None:
+                needs_inference = [
+                    pid for pid in player_track
+                    if frame_num % _sample_every == 0 or pid not in last_known
                 ]
-                probs = self._clip_team_probabilities_batch(crops)
-                for pid, p_team1 in zip(needs_inference, probs):
-                    hue = self._hsv_hue_mean(self._jersey_crop(frame, player_track[pid]["bbox"])) if 0.35 <= p_team1 <= 0.65 else 90.0
-                    obs = 1 if p_team1 > 0.65 else (2 if p_team1 < 0.35 else (1 if hue < 90 else 2))
-                    last_known[pid] = self._vote(pid, obs)
+                if needs_inference:
+                    crops = [
+                        self._jersey_crop(frame, player_track[pid]["bbox"])
+                        for pid in needs_inference
+                    ]
+                    probs = self._clip_team_probabilities_batch(crops)
+                    for pid, p_team1 in zip(needs_inference, probs):
+                        hue = self._hsv_hue_mean(self._jersey_crop(frame, player_track[pid]["bbox"])) if 0.35 <= p_team1 <= 0.65 else 90.0
+                        obs = 1 if p_team1 > 0.65 else (2 if p_team1 < 0.35 else (1 if hue < 90 else 2))
+                        last_known[pid] = self._vote(pid, obs)
 
             for player_id in player_track:
                 frame_assignments[player_id] = last_known.get(player_id, 1)
             player_assignment.append(frame_assignments)
 
-        logger.info("TeamAssigner (streaming): done — %d frames processed", total)
+        logger.info(
+            "TeamAssigner (streaming): done — %d frames (%d decoded, %d skipped)",
+            total, len(decode_frames), total - len(decode_frames),
+        )
         save_stub(stub_path, player_assignment)
         return player_assignment

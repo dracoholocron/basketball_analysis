@@ -14,9 +14,10 @@ from typing import Optional
 
 import numpy as np
 
-_HISTORY = 10           # frames of ball y-history to analyze trajectory
-_BALL_PROXIMITY_PX = 100
-_COOLDOWN_FRAMES = 45   # ~1.5s at 30fps — prevents consecutive triggers per play
+_HISTORY = 12           # frames of ball y-history to analyze trajectory
+_BALL_PROXIMITY_PX = 80
+_COOLDOWN_FRAMES = 60   # ~2s at 30fps — prevents consecutive triggers per play
+_RIM_PROXIMITY_FACTOR = 3.0  # rebound must occur within N·rim-width of a rim box
 
 
 class ReboundDetector:
@@ -38,10 +39,12 @@ class ReboundDetector:
         history_frames: int = _HISTORY,
         ball_proximity_px: float = _BALL_PROXIMITY_PX,
         cooldown_frames: int = _COOLDOWN_FRAMES,
+        rim_proximity_factor: float = _RIM_PROXIMITY_FACTOR,
     ) -> None:
         self.history_frames = history_frames
         self.ball_proximity_px = ball_proximity_px
         self.cooldown_frames = cooldown_frames
+        self.rim_proximity_factor = rim_proximity_factor
         self._ball_y_history: deque[Optional[float]] = deque(maxlen=history_frames)
         self._last_event_frame: int = -cooldown_frames
         self._events: list[dict] = []
@@ -52,6 +55,7 @@ class ReboundDetector:
         pose_frame: dict[int, np.ndarray],
         ball_tracks: dict,
         player_tracks: list[dict],
+        rim_box: Optional[list] = None,
     ) -> list[dict]:
         """
         Process one frame. Returns list of new rebound events.
@@ -59,6 +63,9 @@ class ReboundDetector:
         Parameters
         ----------
         player_tracks : per-frame player dict {track_id: {"bbox": ...}}
+        rim_box : [x1,y1,x2,y2] of the active rim this frame (or None). When given,
+            a rebound is only counted if the ball is near the rim — kills false
+            positives from floor bounces, passes and dribbles elsewhere on court.
         """
         ball_center = _ball_center(ball_tracks)
         ball_y = ball_center[1] if ball_center else None
@@ -73,6 +80,15 @@ class ReboundDetector:
 
         if ball_center is None:
             return new_events
+
+        # Rim-proximity gate: a real rebound happens at the basket. If a rim box is
+        # available for this frame, require the ball to be within N·rim-width of it.
+        if rim_box is not None and len(rim_box) >= 4:
+            rcx = (rim_box[0] + rim_box[2]) / 2
+            rcy = (rim_box[1] + rim_box[3]) / 2
+            rim_w = max(1.0, rim_box[2] - rim_box[0])
+            if np.hypot(ball_center[0] - rcx, ball_center[1] - rcy) > self.rim_proximity_factor * rim_w:
+                return new_events
 
         tracks = player_tracks if isinstance(player_tracks, dict) else {}
         for track_id, info in tracks.items():
@@ -96,14 +112,18 @@ class ReboundDetector:
         pose_sequence: list[dict[int, np.ndarray]],
         ball_sequence: list[dict],
         player_sequence: list[dict],
+        rim_sequence: Optional[list] = None,
     ) -> list[dict]:
+        """``rim_sequence`` (optional): per-frame rim box [x1,y1,x2,y2]|None. When
+        provided, rebounds are gated to near the rim (far fewer false positives)."""
         self._ball_y_history.clear()
         self._events.clear()
         self._last_event_frame = -self.cooldown_frames
         for i, (pose_frame, ball_tracks, player_tracks) in enumerate(
             zip(pose_sequence, ball_sequence, player_sequence)
         ):
-            self.update(i, pose_frame, ball_tracks, player_tracks)
+            rim_box = rim_sequence[i] if (rim_sequence is not None and i < len(rim_sequence)) else None
+            self.update(i, pose_frame, ball_tracks, player_tracks, rim_box=rim_box)
         return list(self._events)
 
     @property
@@ -130,8 +150,9 @@ class ReboundDetector:
         first_trend = first_part[-1] - first_part[0]   # positive = descending
         last_trend = last_part[-1] - last_part[0]      # negative = ascending
 
-        # Require meaningful movement in both segments to filter noise
-        return first_trend > 8.0 and last_trend < -4.0
+        # Require a clear bounce in both segments to filter noise (tightened to cut
+        # over-counting from small jitters / dribbles).
+        return first_trend > 18.0 and last_trend < -12.0
 
 
 def _ball_center(ball_tracks: dict) -> Optional[tuple[float, float]]:

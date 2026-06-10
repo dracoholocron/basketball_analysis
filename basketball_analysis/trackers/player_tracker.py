@@ -86,11 +86,12 @@ class PlayerTracker:
         _scale = (target_height / max_height) if max_height != target_height else 1.0
 
         _imgsz = getattr(settings, "player_imgsz", 640)
+        _half = bool(getattr(settings, "yolo_half", False)) and str(self._device).startswith("cuda")
 
         def _flush(frames: list) -> None:
             for r in self.model.predict(
                 frames, conf=self.conf, verbose=False, device=self._device,
-                imgsz=_imgsz,
+                imgsz=_imgsz, half=_half,
             ):
                 if self._cls_names is None:
                     self._cls_names = r.names
@@ -140,6 +141,7 @@ class PlayerTracker:
         cfg = self._botsort_cfg()
         _scale = (target_height / max_height) if max_height != target_height else 1.0
         _imgsz = getattr(settings, "player_imgsz", 640)
+        _half = bool(getattr(settings, "yolo_half", False)) and str(self._device).startswith("cuda")
         logger.info("PlayerTracker: BoT-SORT (GMC) tracking, cfg=%s", os.path.basename(cfg))
 
         player_tracks: list[dict] = []
@@ -150,7 +152,7 @@ class PlayerTracker:
         for frame in iter_video_frames(video_path, max_height=max_height):
             res = self.model.track(
                 frame, persist=True, conf=self.conf, imgsz=_imgsz,
-                tracker=cfg, verbose=False, device=self._device,
+                tracker=cfg, verbose=False, device=self._device, half=_half,
             )
             r = res[0]
             if self._cls_names is None:
