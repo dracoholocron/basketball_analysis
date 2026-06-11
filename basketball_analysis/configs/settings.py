@@ -223,11 +223,14 @@ class EngineSettings(BaseSettings):
         ),
     )
     sam2_vos_optimized: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Build the SAM2 video predictor with vos_optimized=True (torch.compile of "
-            "the heavy components) for faster propagation. Same weights → same masks. "
-            "Auto-falls back to the standard predictor if compile is unsupported."
+            "the heavy components) for faster propagation — same weights → same masks. "
+            "OFF by default: torch.compile/Triton fails to LINK on this RTX 5070 + WSL "
+            "(collect2 ld error) and the compile is lazy (during propagation), which "
+            "disables SAM2 for the whole run → ball-coverage regression. Enable "
+            "(BA_SAM2_VOS_OPTIMIZED=true) only where Triton compiles cleanly."
         ),
     )
     video_encoder: str = Field(

@@ -134,7 +134,7 @@ services:
       BA_BALL_SAM2: "true"            # propagate manual ball clicks with SAM2 (color-agnostic)
       BA_SAM2_STRIDE: "1"             # raise (2-3) on very long videos to cut SAM2 time
       BA_SAM2_CHUNK: "500"            # frames per SAM2 chunk (next chunk decoded/written while GPU runs current)
-      BA_SAM2_VOS_OPTIMIZED: "true"   # torch.compile SAM2 video predictor (faster, same weights); auto-fallback
+      BA_SAM2_VOS_OPTIMIZED: "false"  # torch.compile/Triton fails to link on this RTX 5070+WSL (disables SAM2); enable only where Triton compiles
       BA_VIDEO_ENCODER: "libx264"     # NVENC blocked by driver/SDK mismatch on this RTX 5070 (lib exposed but nvEncodeAPI unsupported); flip to "nvenc" after a driver update
       BA_POSE_TOPDOWN: "true"         # per-player crop pose → distant players keep skeletons
       BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
