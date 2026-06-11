@@ -36,6 +36,13 @@ métricas; la activa marcada; botón **Activar**; botón **Re-escanear modelos**
   validación real + comparación contra el activo; no te fíes del mAP sobre pseudo-etiquetas).
 
 ## TensorRT FP16 (acelerar detectores sin perder calidad)
+> **Estado en este entorno (RTX 5070 / Blackwell sm_120 + WSL, 2026-06): NO funcional aún.** El export
+> instala y arranca, pero `tensorrt-cu12`/`onnxruntime-gpu` no traen kernels para sm_120 → `CUDA error:
+> no kernel image is available for execution on the device` (mismo bloqueo que NVENC y Triton/torch.compile;
+> PyTorch base sí soporta sm_120, por eso el pipeline corre). El `.pt` queda intacto. La tarea/endpoint/UI
+> quedan **latentes**: reintentar cuando publiquen TensorRT/onnxruntime con sm_120 (y rehornear las deps
+> en `worker/Dockerfile`). El resto de la guía aplica para una GPU/entorno soportado.
+
 Los detectores (`player`/`ball`/`court`/`pose`) cargan con `YOLO(path)` de Ultralytics, que también
 carga archivos **`.engine` (TensorRT)**. Para acelerar una etapa:
 - **Admin → Modelos → botón «TensorRT FP16»** del rol (o `POST /models/export-tensorrt/{role}`) →

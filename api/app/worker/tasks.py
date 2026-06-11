@@ -1048,7 +1048,7 @@ def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
 
 @celery_app.task(bind=True, name="app.worker.tasks.export_tensorrt_engine",
                  max_retries=0, acks_late=True)
-def export_tensorrt_engine(self: Task, role: str) -> dict:
+def export_tensorrt_engine(self: Task, role: str, dynamic: bool = True) -> dict:
     """Export the ACTIVE .pt detector of a role to a TensorRT FP16 .engine and register
     it INACTIVE. Engines are GPU/driver-specific so this MUST run on the GPU worker.
 
@@ -1104,7 +1104,7 @@ def export_tensorrt_engine(self: Task, role: str) -> dict:
         model = YOLO(src_pt)
         exported = model.export(
             format="engine", half=True, imgsz=_imgsz, batch=_batch,
-            dynamic=True, workers=0, device=0, verbose=False,
+            dynamic=bool(dynamic), workers=0, device=0, verbose=False,
         )  # writes <stem>.engine next to the .pt
         if not exported or not os.path.exists(str(exported)):
             return {"error": "export produced no .engine (is the 'tensorrt' package installed in the image?)"}

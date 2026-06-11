@@ -30,6 +30,13 @@ RUN pip install --no-cache-dir easyocr || \
 # Baked in so the first model.track() call doesn't trigger a runtime auto-install.
 RUN pip install --no-cache-dir lap
 
+# NOTE: TensorRT FP16 export (export_tensorrt_engine task) is currently NON-FUNCTIONAL on
+# this RTX 5070 (Blackwell sm_120) + WSL: tensorrt-cu12/onnxruntime-gpu builds lack sm_120
+# kernels ("CUDA error: no kernel image is available for execution on the device"), same as
+# NVENC and Triton/torch.compile. So we do NOT bake the ~4.3GB export deps into the image.
+# The export task/endpoint/UI remain (dormant); if attempted, ultralytics auto-installs the
+# deps at runtime. Re-enable a baked install here once sm_120-capable TensorRT ships.
+
 # API service deps (for Celery + DB + Storage)
 COPY api/requirements.txt /tmp/api_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/api_requirements.txt
