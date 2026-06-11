@@ -138,6 +138,7 @@ def run_analysis(
         # ── 4. Fetch manual annotation (if any) ───────────────────────────
         manual_landmarks = None
         camera_motion = "static"
+        team_exemplars = None
         with Session(engine) as db:
             ann = db.get(GameAnnotation, None)  # query by game_id below
             from sqlalchemy import select as sa_select
@@ -147,10 +148,16 @@ def run_analysis(
             if ann is not None:
                 manual_landmarks = ann.landmarks  # list[dict] or None
                 camera_motion = ann.camera_motion or "static"
+                team_exemplars = ann.team_exemplars  # dict or None
                 if manual_landmarks:
                     logger.info(
                         "Using %d manual landmarks for game %s (motion=%s)",
                         len(manual_landmarks), game_id, camera_motion,
+                    )
+                if team_exemplars:
+                    logger.info(
+                        "Using team exemplars for game %s (teams=%s)",
+                        game_id, list(team_exemplars.keys()),
                     )
 
         # ── 4b. Fetch manual ball annotation (for SAM2 tracking) ───────────
@@ -271,6 +278,7 @@ def run_analysis(
                 team2_jersey=team2_jersey,
                 court_profile=profile,
                 manual_landmarks=manual_landmarks,
+                team_exemplars=team_exemplars,
                 camera_motion=camera_motion,
                 on_progress=_pipeline_progress,
                 show_poses=show_poses,

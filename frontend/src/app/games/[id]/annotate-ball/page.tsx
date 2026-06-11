@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import {
   getBallAnnotation,
   getGameVideoUrl,
@@ -278,6 +279,7 @@ export default function AnnotateBallPage() {
                     {fmtTime(currentTime)} / {fmtTime(duration)}
                   </span>
                 </div>
+                <VideoControls videoRef={videoRef} />
                 <button
                   onClick={markNotVisible}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs"

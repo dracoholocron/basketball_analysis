@@ -203,12 +203,12 @@ def _global_motion_sequence(video_path: str, total_frames: int) -> list:
     propagation. Used to propagate manual hoop/backboard boxes across the whole
     video so a couple of marks follow the panning camera everywhere."""
     import cv2
-    from utils.video_utils import iter_video_frames
+    from utils.video_utils import iter_video_frames_prefetch
     from tactical_view_converter.tactical_view_converter import TacticalViewConverter
 
     H: list = [None] * total_frames
     prev_gray = None
-    for i, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+    for i, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=720)):
         if i >= total_frames:
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -387,6 +387,7 @@ def run_pipeline(
     court_kp_detector_path: str = COURT_KEYPOINT_DETECTOR_PATH,
     court_profile: CourtProfile | None = None,
     manual_landmarks: list[dict] | None = None,
+    team_exemplars: dict | None = None,
     camera_motion: str = "static",
     on_progress=None,
     chunk_size: int | None = None,
@@ -585,6 +586,11 @@ def run_pipeline(
             team_1_class_name=team1_jersey,
             team_2_class_name=team2_jersey,
         )
+        if team_exemplars:
+            try:
+                team_assigner.compute_exemplar_embeddings(input_video, team_exemplars)
+            except Exception as exc:
+                logger.warning("Team exemplar embeddings failed (%s) — using text/HSV", exc)
         player_assignment = team_assigner.get_player_teams_streaming(
             input_video,
             player_tracks,
@@ -676,6 +682,11 @@ def run_pipeline(
             team_1_class_name=team1_jersey,
             team_2_class_name=team2_jersey,
         )
+        if team_exemplars:
+            try:
+                team_assigner.compute_exemplar_embeddings(input_video, team_exemplars)
+            except Exception as exc:
+                logger.warning("Team exemplar embeddings failed (%s) — using text/HSV", exc)
         player_assignment = team_assigner.get_player_teams_across_frames(
             video_frames,
             player_tracks,

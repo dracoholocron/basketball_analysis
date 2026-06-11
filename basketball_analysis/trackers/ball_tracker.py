@@ -81,7 +81,7 @@ class BallTracker:
         pass.  Frames are batched for GPU throughput without loading the entire
         video into RAM.
         """
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         all_sv: list[sv.Detections] = []
         self._cls_names: dict | None = None
@@ -99,7 +99,7 @@ class BallTracker:
                     self._cls_names = r.names
                 all_sv.append(sv.Detections.from_ultralytics(r))
 
-        for frame in iter_video_frames(video_path, max_height=max_height):
+        for frame in iter_video_frames_prefetch(video_path, max_height=max_height):
             batch.append(frame)
             if len(batch) == batch_size:
                 _flush(batch)
@@ -213,7 +213,7 @@ class BallTracker:
         tile_size: int | None = None,
         overlap: float | None = None,
         sahi_conf: float | None = None,
-        min_gap_frames: int = 8,
+        min_gap_frames: int | None = None,
     ) -> list[dict]:
         """
         Selective SAHI: re-run tiled detection only on long gaps where no ball was found.
@@ -226,6 +226,11 @@ class BallTracker:
             tile_size = getattr(settings, "ball_sahi_tile", 640)
         if overlap is None:
             overlap = getattr(settings, "ball_sahi_overlap", 0.25)
+        if min_gap_frames is None:
+            # Higher → SAHI runs on fewer (longer) gaps; short gaps are filled by
+            # interpolation/Kalman. Tunable via BA_BALL_SAHI_MIN_GAP. Default 8 keeps
+            # the previous behavior.
+            min_gap_frames = getattr(settings, "ball_sahi_min_gap", 8)
 
         all_missing = sorted(i for i, bt in enumerate(ball_tracks) if 1 not in bt)
         if not all_missing:
@@ -262,11 +267,17 @@ class BallTracker:
         found = 0
         remaining = set(sahi_frames)
 
-        from utils.video_utils import iter_video_frames
-        for frame_idx, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+        # Decode ONLY the long-gap frames (grab()-skip the rest) — SAHI tiles/conf are
+        # unchanged, so recovered boxes are identical; we just avoid decoding frames we
+        # never feed to SAHI. Big speedup since gaps are a small fraction of the video.
+        from utils.video_utils import iter_video_frames_selective
+        _targets = set(sahi_frames)
+        for frame_idx, frame in iter_video_frames_selective(
+            video_path, lambda i: i in _targets, max_height=720
+        ):
             if frame_idx >= len(tracks):
                 break
-            if frame_idx not in remaining:
+            if frame is None or frame_idx not in remaining:
                 continue
             bbox = self._sahi_detect_frame(frame, tile_size, overlap, conf)
             if bbox is not None:

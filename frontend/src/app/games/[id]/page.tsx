@@ -3,6 +3,7 @@ import { useEffect, useState, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import {
   getGame,
   uploadVideo,
@@ -24,7 +25,7 @@ import {
 } from "recharts";
 import {
   Activity, AlertCircle, CheckCircle2, Crosshair, EyeOff, Film, Loader2,
-  Settings2, Target, Upload, X, Zap,
+  Settings2, Target, Upload, Users, X, Zap,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -108,6 +109,7 @@ export default function GameDetailPage() {
   const [gameEndS, setGameEndS] = useState("");
   const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large">("base_plus");
   const fileRef = useRef<HTMLInputElement>(null);
+  const annotatedVideoRef = useRef<HTMLVideoElement>(null);
 
   const showPoses = (game?.show_poses as boolean) ?? true;
 
@@ -285,14 +287,16 @@ export default function GameDetailPage() {
     }
   }
 
+  const chartTeam1 = metrics?.home_team_name || "Local";
+  const chartTeam2 = metrics?.away_team_name || "Visitante";
   const possessionData = metrics ? [
-    { name: "Team 1", value: metrics.team1_possession_pct },
-    { name: "Team 2", value: metrics.team2_possession_pct },
+    { name: chartTeam1, value: metrics.team1_possession_pct },
+    { name: chartTeam2, value: metrics.team2_possession_pct },
   ] : [];
 
   const passData = metrics ? [
-    { name: "Passes",       team1: metrics.team1_passes,       team2: metrics.team2_passes },
-    { name: "Interceptions",team1: metrics.team1_interceptions, team2: metrics.team2_interceptions },
+    { name: "Pases",          team1: metrics.team1_passes,        team2: metrics.team2_passes },
+    { name: "Intercepciones", team1: metrics.team1_interceptions, team2: metrics.team2_interceptions },
   ] : [];
 
   const shotCount    = cvEvents.filter(e => e.event_type === "shot_attempt").length;
@@ -359,6 +363,15 @@ export default function GameDetailPage() {
               >
                 <Crosshair size={16} />
                 Anotar aro
+              </Link>
+            )}
+            {videoReady && (
+              <Link
+                href={`/games/${id}/annotate-teams`}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                <Users size={16} />
+                Anotar equipos
               </Link>
             )}
             <div className="flex flex-col gap-2">
@@ -495,12 +508,16 @@ export default function GameDetailPage() {
                 {annotatedVideoUrl ? (
                   <>
                     <video
+                      ref={annotatedVideoRef}
                       controls
                       className="w-full rounded-lg bg-black"
                       src={annotatedVideoUrl}
                     >
                       Tu navegador no soporta la reproducción de video.
                     </video>
+                    <div className="mt-2">
+                      <VideoControls videoRef={annotatedVideoRef} />
+                    </div>
                     <a
                       href={annotatedVideoUrl}
                       download
@@ -807,8 +824,8 @@ export default function GameDetailPage() {
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 { label: "Total Frames", value: metrics.total_frames.toLocaleString() },
-                { label: "Posesión Equipo 1", value: `${metrics.team1_possession_pct}%` },
-                { label: "Posesión Equipo 2", value: `${metrics.team2_possession_pct}%` },
+                { label: `Posesión ${chartTeam1}`, value: `${metrics.team1_possession_pct}%` },
+                { label: `Posesión ${chartTeam2}`, value: `${metrics.team2_possession_pct}%` },
                 { label: "Jugadores", value: metrics.players.length },
               ].map(kpi => (
                 <div key={kpi.label} className="bg-slate-800 rounded-xl p-5 text-center">
@@ -839,8 +856,8 @@ export default function GameDetailPage() {
                     <XAxis dataKey="name" stroke="#94a3b8" /><YAxis allowDecimals={false} stroke="#94a3b8" />
                     <Tooltip contentStyle={{ background: "#1e293b", border: "none" }} />
                     <Legend />
-                    <Bar dataKey="team1" name="Equipo 1" fill={TEAM_COLORS[0]} />
-                    <Bar dataKey="team2" name="Equipo 2" fill={TEAM_COLORS[1]} />
+                    <Bar dataKey="team1" name={chartTeam1} fill={TEAM_COLORS[0]} />
+                    <Bar dataKey="team2" name={chartTeam2} fill={TEAM_COLORS[1]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>

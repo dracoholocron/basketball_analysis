@@ -71,6 +71,30 @@ class AnnotationRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TeamExemplar(BaseModel):
+    frame_t: float = 0.0
+    bbox_norm: list[float]  # [x1, y1, x2, y2] normalized 0..1 to the frame
+
+    @field_validator("bbox_norm")
+    @classmethod
+    def _validate_bbox(cls, v: list[float]) -> list[float]:
+        if len(v) != 4:
+            raise ValueError("bbox_norm must be [x1, y1, x2, y2]")
+        return v
+
+
+class TeamExemplarsUpdate(BaseModel):
+    # {"1": [TeamExemplar, ...], "2": [...]}
+    team_exemplars: dict[str, list[TeamExemplar]]
+
+
+class TeamExemplarsRead(BaseModel):
+    game_id: uuid.UUID
+    team_exemplars: Optional[dict] = None
+
+    model_config = {"from_attributes": True}
+
+
 class LandmarkCatalogItem(BaseModel):
     id: str
     label: str
@@ -169,6 +193,58 @@ async def upsert_annotation(
     await db.commit()
     await db.refresh(ann)
     return ann
+
+
+# ── Team exemplars (FashionCLIP image matching) ─────────────────────────────
+
+
+@router.get("/games/{game_id}/team-exemplars", response_model=TeamExemplarsRead)
+async def get_team_exemplars(
+    game_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Return the per-team jersey exemplars for a game (or empty)."""
+    result = await db.execute(
+        select(GameAnnotation).where(GameAnnotation.game_id == game_id)
+    )
+    ann = result.scalar_one_or_none()
+    return TeamExemplarsRead(
+        game_id=game_id,
+        team_exemplars=(ann.team_exemplars if ann else None),
+    )
+
+
+@router.put("/games/{game_id}/team-exemplars", response_model=TeamExemplarsRead)
+async def upsert_team_exemplars(
+    game_id: uuid.UUID,
+    payload: TeamExemplarsUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin", "coach")),
+):
+    """Create/update jersey exemplars per team. Doesn't touch court landmarks."""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    data = {
+        team: [ex.model_dump() for ex in exemplars]
+        for team, exemplars in payload.team_exemplars.items()
+    }
+
+    result = await db.execute(
+        select(GameAnnotation).where(GameAnnotation.game_id == game_id)
+    )
+    ann = result.scalar_one_or_none()
+    if ann is None:
+        ann = GameAnnotation(game_id=game_id, team_exemplars=data)
+        db.add(ann)
+    else:
+        ann.team_exemplars = data
+
+    await db.commit()
+    await db.refresh(ann)
+    return TeamExemplarsRead(game_id=game_id, team_exemplars=ann.team_exemplars)
 
 
 # ── Camera motion detection ─────────────────────────────────────────────────

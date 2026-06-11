@@ -32,6 +32,8 @@ métricas; la activa marcada; botón **Activar**; botón **Re-escanear modelos**
   `models/ball_detector__ft_<fecha>.pt` (NO sobrescribe el activo) y lo registra
   **inactivo** con sus métricas (mAP50, etc.). Lo revisas en la UI y lo **activas**
   cuando quieras. Para revertir, activas la versión anterior.
+  **Antes de activar un fine-tune, sigue [FINE_TUNING.md](FINE_TUNING.md)** (set de
+  validación real + comparación contra el activo; no te fíes del mAP sobre pseudo-etiquetas).
 
 ## Subir un modelo manualmente
 Copia el `.pt` al volumen `models_data` (p.ej.

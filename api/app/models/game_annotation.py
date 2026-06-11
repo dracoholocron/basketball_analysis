@@ -21,6 +21,11 @@ class GameAnnotation(Base):
     # "static" | "moderate" | "moving" | "unknown"
     camera_motion: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # FashionCLIP image exemplars per team for jersey-appearance matching:
+    # {"1": [{"frame_t": 2.0, "bbox_norm": [x1,y1,x2,y2]}, ...], "2": [...]}
+    # bbox_norm is normalized [0..1] to the video frame (resolution-independent).
+    team_exemplars: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

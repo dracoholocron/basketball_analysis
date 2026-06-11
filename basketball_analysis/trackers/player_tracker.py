@@ -68,12 +68,13 @@ class PlayerTracker:
         """
         YOLO detection over the full video using frame-by-frame iteration.
 
-        Reads frames via iter_video_frames (max_height=720 by default) so that
-        bounding-box coordinates are always in the same 720p space as the draw
-        pass.  Frames are batched for GPU throughput without loading the entire
-        video into RAM.
+        Reads frames via iter_video_frames_prefetch (max_height=720 by default) so
+        that bounding-box coordinates are always in the same 720p space as the draw
+        pass.  A background thread decodes the next frames while the GPU runs YOLO,
+        overlapping decode with compute (identical frames → identical detections).
+        Frames are batched for GPU throughput without loading the entire video into RAM.
         """
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         all_sv: list[sv.Detections] = []
         self._cls_names: dict | None = None
@@ -100,7 +101,7 @@ class PlayerTracker:
                     det.xyxy = det.xyxy * _scale
                 all_sv.append(det)
 
-        for frame in iter_video_frames(video_path, max_height=max_height):
+        for frame in iter_video_frames_prefetch(video_path, max_height=max_height):
             batch.append(frame)
             if len(batch) == batch_size:
                 _flush(batch)
@@ -136,7 +137,7 @@ class PlayerTracker:
                 self.build_referee_tracks_from_sv_detections(sv_det),
             )
 
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         cfg = self._botsort_cfg()
         _scale = (target_height / max_height) if max_height != target_height else 1.0
@@ -149,7 +150,7 @@ class PlayerTracker:
         ref_counter = 0
         self._cls_names = None
 
-        for frame in iter_video_frames(video_path, max_height=max_height):
+        for frame in iter_video_frames_prefetch(video_path, max_height=max_height):
             res = self.model.track(
                 frame, persist=True, conf=self.conf, imgsz=_imgsz,
                 tracker=cfg, verbose=False, device=self._device, half=_half,

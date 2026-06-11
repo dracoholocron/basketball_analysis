@@ -246,6 +246,26 @@ export async function getLandmarkCatalog(): Promise<LandmarkCatalogItem[]> {
   return data;
 }
 
+// ── Team exemplars (FashionCLIP jersey matching) ────────────────────────────────
+export interface TeamExemplar {
+  frame_t: number;
+  bbox_norm: [number, number, number, number];  // x1,y1,x2,y2 normalized 0..1
+}
+export type TeamExemplars = Record<string, TeamExemplar[]>;  // "1" | "2" → exemplars
+
+export async function getTeamExemplars(gameId: string): Promise<TeamExemplars | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/team-exemplars`);
+    return (data?.team_exemplars as TeamExemplars) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function putTeamExemplars(gameId: string, exemplars: TeamExemplars): Promise<void> {
+  await api.put(`/games/${gameId}/team-exemplars`, { team_exemplars: exemplars });
+}
+
 // ── Roster mapping (detected identities → real players) ─────────────────────────
 export interface RosterPlayer { id: string; name: string; jersey_number?: string | null; }
 export interface MappingIdentity {
@@ -383,6 +403,53 @@ export async function updatePlayer(playerId: string, payload: Record<string, unk
 
 export async function deletePlayer(playerId: string) {
   await api.delete(`/players/${playerId}`);
+}
+
+// ── Divisions (team age groups, player M2M) ─────────────────────────────────────
+export interface Division {
+  id: string;
+  team_id: string;
+  name: string;
+  category?: string | null;
+  season_id?: string | null;
+  player_count: number;
+}
+
+export async function listTeamDivisions(teamId: string): Promise<Division[]> {
+  const { data } = await api.get(`/teams/${teamId}/divisions`);
+  return data;
+}
+
+export async function createDivision(teamId: string, payload: Record<string, unknown>) {
+  const { data } = await api.post(`/teams/${teamId}/divisions`, payload);
+  return data;
+}
+
+export async function updateDivision(divisionId: string, payload: Record<string, unknown>) {
+  const { data } = await api.put(`/divisions/${divisionId}`, payload);
+  return data;
+}
+
+export async function deleteDivision(divisionId: string) {
+  await api.delete(`/divisions/${divisionId}`);
+}
+
+export async function listDivisionPlayers(divisionId: string) {
+  const { data } = await api.get(`/divisions/${divisionId}/players`);
+  return data;
+}
+
+export async function listPlayerDivisions(playerId: string): Promise<Division[]> {
+  const { data } = await api.get(`/players/${playerId}/divisions`);
+  return data;
+}
+
+export async function assignPlayerToDivision(divisionId: string, playerId: string) {
+  await api.post(`/divisions/${divisionId}/players/${playerId}`);
+}
+
+export async function unassignPlayerFromDivision(divisionId: string, playerId: string) {
+  await api.delete(`/divisions/${divisionId}/players/${playerId}`);
 }
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────

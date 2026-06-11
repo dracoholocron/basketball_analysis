@@ -3,13 +3,17 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
-import { listTeams, createTeam, listOrganizations, getMe } from "@/lib/api";
-import { PlusCircle, Users, ChevronLeft, AlertCircle, Building2 } from "lucide-react";
+import {
+  listTeams, createTeam, listOrganizations, getMe,
+  listTeamDivisions, createDivision, deleteDivision, type Division,
+} from "@/lib/api";
+import { PlusCircle, Users, ChevronLeft, AlertCircle, Building2, Layers, Trash2 } from "lucide-react";
 
 interface Team { id: string; name: string; level?: string; jersey_description?: string; organization_id: string; }
 interface Org { id: string; name: string; }
 
 const LEVELS = ["mini_basket", "primaria", "secundaria", "juvenil", "nba"];
+const DIVISION_CATEGORIES = ["U12", "U14", "U15", "U18_mixto"];
 
 export default function TeamsPage() {
   const [teams, setTeams] = useState<Team[]>([]);
@@ -151,7 +155,118 @@ export default function TeamsPage() {
             </div>
           </form>
         </div>
+
+        <DivisionsManager teams={teams} />
       </div>
     </AppShell>
+  );
+}
+
+function DivisionsManager({ teams }: { teams: Team[] }) {
+  const [teamId, setTeamId] = useState("");
+  const [divs, setDivs] = useState<Division[]>([]);
+  const [form, setForm] = useState({ name: "", category: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!teamId && teams.length) setTeamId(teams[0].id);
+  }, [teams, teamId]);
+
+  const refresh = (tid: string) => {
+    if (!tid) return;
+    listTeamDivisions(tid).then(setDivs).catch(() => setDivs([]));
+  };
+  useEffect(() => { refresh(teamId); }, [teamId]);
+
+  async function addDivision(e: React.FormEvent) {
+    e.preventDefault();
+    if (!teamId || !form.name.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      await createDivision(teamId, { name: form.name.trim(), category: form.category || undefined });
+      setForm({ name: "", category: "" });
+      refresh(teamId);
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(typeof msg === "string" ? msg : "No se pudo crear la división");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeDivision(id: string) {
+    await deleteDivision(id).catch(() => null);
+    refresh(teamId);
+  }
+
+  return (
+    <div className="card">
+      <div className="flex items-center gap-2 mb-4">
+        <Layers size={18} className="text-purple-600" />
+        <h2 className="font-display font-bold text-slate-900">Divisiones (grupos de edad)</h2>
+      </div>
+      <p className="text-xs text-slate-400 mb-3">
+        Un equipo puede tener varias divisiones (U12, U14, U15, U18 mixto…). Un jugador puede estar en
+        varias divisiones — se asignan desde <strong>Jugadores</strong>.
+      </p>
+
+      <div className="mb-4">
+        <label className="label">Equipo</label>
+        <select className="input" value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+          {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-2 text-sm text-red-600 ring-1 ring-red-100 mb-3">
+          <AlertCircle size={15} /> {error}
+        </div>
+      )}
+
+      {divs.length === 0 ? (
+        <p className="text-sm text-slate-400 py-3 text-center">Sin divisiones para este equipo</p>
+      ) : (
+        <ul className="divide-y divide-slate-50 mb-4">
+          {divs.map((d) => (
+            <li key={d.id} className="flex items-center justify-between py-2">
+              <div>
+                <span className="font-medium text-slate-800">{d.name}</span>
+                {d.category && (
+                  <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-purple-50 text-purple-600">
+                    {d.category.replace("_", " ")}
+                  </span>
+                )}
+                <span className="ml-2 text-xs text-slate-400">{d.player_count} jugador(es)</span>
+              </div>
+              <button onClick={() => removeDivision(d.id)} className="text-slate-400 hover:text-red-500" title="Eliminar">
+                <Trash2 size={15} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <form onSubmit={addDivision} className="grid grid-cols-1 gap-3 sm:grid-cols-3 border-t border-slate-100 pt-4">
+        <div className="sm:col-span-1">
+          <label className="label">Nombre *</label>
+          <input className="input" required placeholder="U14 A" value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </div>
+        <div>
+          <label className="label">Categoría</label>
+          <select className="input" value={form.category}
+            onChange={(e) => setForm({ ...form, category: e.target.value })}>
+            <option value="">— ninguna —</option>
+            {DIVISION_CATEGORIES.map((c) => <option key={c} value={c}>{c.replace("_", " ")}</option>)}
+          </select>
+        </div>
+        <div className="flex items-end justify-end">
+          <button type="submit" className="btn-primary" disabled={busy || !teamId}>
+            <PlusCircle size={15} /> {busy ? "…" : "Añadir división"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }

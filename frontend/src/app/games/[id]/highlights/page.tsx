@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import { api } from "@/lib/api";
 import {
   Download, Film, Loader2, RefreshCw, Monitor, Smartphone,
@@ -20,6 +21,25 @@ interface Highlight {
   created_at?: string;
   score?: number;
   excitement?: number;
+}
+
+function ClipPlayer({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  return (
+    <div className="absolute inset-0 flex flex-col">
+      <video
+        ref={ref}
+        src={src}
+        className="flex-1 w-full object-contain bg-black min-h-0"
+        controls
+        playsInline
+        preload="metadata"
+      />
+      <div className="bg-slate-900/90 px-2 py-1">
+        <VideoControls videoRef={ref} className="justify-center scale-90" />
+      </div>
+    </div>
+  );
 }
 
 const EVENT_LABELS: Record<string, string> = {
@@ -209,13 +229,7 @@ export default function HighlightsPage() {
                   portrait ? "aspect-[9/16]" : "aspect-video",
                 )}>
                   {highlight.clip_url ? (
-                    <video
-                      src={highlight.clip_url}
-                      className="w-full h-full object-contain bg-black"
-                      controls
-                      playsInline
-                      preload="metadata"
-                    />
+                    <ClipPlayer src={highlight.clip_url} />
                   ) : (
                     <Film size={32} className="text-slate-600" />
                   )}

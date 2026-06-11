@@ -2,6 +2,7 @@ from .organization import Organization
 from .user import User, UserRole
 from .team import Team
 from .player import Player
+from .division import Division, player_divisions
 from .season import Season
 from .game import Game
 from .video_asset import VideoAsset
@@ -25,6 +26,8 @@ __all__ = [
     "UserRole",
     "Team",
     "Player",
+    "Division",
+    "player_divisions",
     "Season",
     "Game",
     "VideoAsset",

@@ -428,12 +428,12 @@ class PoseEstimator:
         Reads frames at max_height=720 so player bbox crops align with the same
         720p coordinate space used by detection and the draw pass.
         """
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         pose_sequence: list[dict[int, np.ndarray]] = []
         total = len(player_tracks)
 
-        for frame_num, frame in enumerate(iter_video_frames(video_path, max_height=max_height)):
+        for frame_num, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=max_height)):
             if frame_num >= total:
                 break
             pose_sequence.append(

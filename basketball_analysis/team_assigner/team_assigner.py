@@ -55,6 +55,11 @@ class TeamAssigner:
         self._processor: CLIPProcessor | None = None
         self._device: str = "cpu"
 
+        # When set (via compute_exemplar_embeddings), classification uses cosine
+        # similarity of the jersey crop's CLIP IMAGE embedding to each team's mean
+        # exemplar embedding — instead of text prompts. {1: vec, 2: vec} (normalized).
+        self._team_embeddings: dict[int, np.ndarray] | None = None
+
     # ── Private helpers ────────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
@@ -110,6 +115,123 @@ class TeamAssigner:
         except Exception as exc:
             logger.debug("CLIP batch error: %s", exc)
         return result
+
+    def _image_embedding_batch(self, crops: list[np.ndarray]) -> list[np.ndarray | None]:
+        """Batch CLIP IMAGE embeddings (L2-normalized). None for empty crops."""
+        result: list[np.ndarray | None] = [None] * len(crops)
+        valid_indices = [i for i, c in enumerate(crops) if c.size > 0]
+        if not valid_indices:
+            return result
+        try:
+            import torch
+            pil_images = [
+                Image.fromarray(cv2.cvtColor(crops[i], cv2.COLOR_BGR2RGB))
+                for i in valid_indices
+            ]
+            inputs = self._processor(images=pil_images, return_tensors="pt")
+            inputs = {k: v.to(self._device) for k, v in inputs.items()}
+            with torch.no_grad():
+                feats = self._model.get_image_features(**inputs)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            feats_np = feats.cpu().numpy()
+            for j, i in enumerate(valid_indices):
+                result[i] = feats_np[j]
+        except Exception as exc:
+            logger.debug("CLIP image-embedding error: %s", exc)
+        return result
+
+    def _observe(self, crops: list[np.ndarray]) -> list[int]:
+        """Return a team observation (1|2) per crop.
+
+        Uses exemplar IMAGE-embedding cosine similarity when exemplars were provided
+        (compute_exemplar_embeddings); otherwise the text-prompt + HSV heuristic.
+        """
+        if self._team_embeddings is not None:
+            e1 = self._team_embeddings.get(1)
+            e2 = self._team_embeddings.get(2)
+            embs = self._image_embedding_batch(crops)
+            out: list[int] = []
+            for emb in embs:
+                if emb is None or e1 is None or e2 is None:
+                    out.append(1)
+                    continue
+                s1 = float(np.dot(emb, e1))
+                s2 = float(np.dot(emb, e2))
+                out.append(1 if s1 >= s2 else 2)
+            return out
+
+        # Text-prompt fallback (original behavior)
+        probs = self._clip_team_probabilities_batch(crops)
+        out = []
+        for crop, p in zip(crops, probs):
+            if p > 0.65:
+                out.append(1)
+            elif p < 0.35:
+                out.append(2)
+            else:
+                hue = self._hsv_hue_mean(crop)
+                out.append(1 if hue < 90 else 2)
+        return out
+
+    def compute_exemplar_embeddings(self, video_path: str, team_exemplars: dict | None) -> bool:
+        """Build per-team mean jersey embeddings from user-selected exemplars.
+
+        team_exemplars: {"1": [{"frame_t": s, "bbox_norm": [x1,y1,x2,y2]}, ...], "2": [...]}
+        bbox_norm is normalized 0..1 to the frame. Returns True if BOTH teams got an
+        embedding (→ cosine matching enabled); otherwise leaves text/HSV in place.
+        """
+        if not team_exemplars:
+            return False
+        self._load_model()
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.warning("TeamAssigner: cannot open video for exemplars: %s", video_path)
+            return False
+        embeddings: dict[int, np.ndarray] = {}
+        try:
+            for team_key, items in team_exemplars.items():
+                try:
+                    team = int(team_key)
+                except (TypeError, ValueError):
+                    continue
+                if team not in (1, 2) or not items:
+                    continue
+                crops: list[np.ndarray] = []
+                for it in items:
+                    bbox_norm = it.get("bbox_norm")
+                    if not bbox_norm or len(bbox_norm) < 4:
+                        continue
+                    cap.set(cv2.CAP_PROP_POS_MSEC, float(it.get("frame_t", 0.0)) * 1000.0)
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        continue
+                    h, w = frame.shape[:2]
+                    x1, x2 = sorted((max(0, int(bbox_norm[0] * w)), min(w, int(bbox_norm[2] * w))))
+                    y1, y2 = sorted((max(0, int(bbox_norm[1] * h)), min(h, int(bbox_norm[3] * h))))
+                    if x2 - x1 < 4 or y2 - y1 < 4:
+                        continue
+                    crop = self._jersey_crop(frame, [x1, y1, x2, y2])
+                    if crop.size > 0:
+                        crops.append(crop)
+                embs = [e for e in self._image_embedding_batch(crops) if e is not None]
+                if not embs:
+                    continue
+                mean = np.mean(np.stack(embs), axis=0)
+                norm = np.linalg.norm(mean)
+                if norm > 0:
+                    embeddings[team] = mean / norm
+        finally:
+            cap.release()
+
+        if len(embeddings) >= 2:
+            self._team_embeddings = embeddings
+            logger.info("TeamAssigner: exemplar cosine matching enabled (%d teams)", len(embeddings))
+            return True
+        logger.info(
+            "TeamAssigner: only %d team(s) had usable exemplars — keeping text/HSV",
+            len(embeddings),
+        )
+        return False
 
     def _hsv_hue_mean(self, crop: np.ndarray) -> float:
         """Return mean hue [0-180] of the jersey crop in HSV space."""
@@ -225,12 +347,9 @@ class TeamAssigner:
                     self._jersey_crop(video_frames[frame_num], player_track[pid]["bbox"])
                     for pid in needs_inference
                 ]
-                probs = self._clip_team_probabilities_batch(crops)
-                for player_id, p_team1 in zip(needs_inference, probs):
-                    hue = self._hsv_hue_mean(self._jersey_crop(video_frames[frame_num], player_track[player_id]["bbox"])) if 0.35 <= p_team1 <= 0.65 else 90.0
-                    obs = 1 if p_team1 > 0.65 else (2 if p_team1 < 0.35 else (1 if hue < 90 else 2))
-                    team = self._vote(player_id, obs)
-                    last_known[player_id] = team
+                observations = self._observe(crops)
+                for player_id, obs in zip(needs_inference, observations):
+                    last_known[player_id] = self._vote(player_id, obs)
 
             for player_id, track in player_track.items():
                 frame_assignments[player_id] = last_known.get(player_id, 1)
@@ -310,10 +429,8 @@ class TeamAssigner:
                         self._jersey_crop(frame, player_track[pid]["bbox"])
                         for pid in needs_inference
                     ]
-                    probs = self._clip_team_probabilities_batch(crops)
-                    for pid, p_team1 in zip(needs_inference, probs):
-                        hue = self._hsv_hue_mean(self._jersey_crop(frame, player_track[pid]["bbox"])) if 0.35 <= p_team1 <= 0.65 else 90.0
-                        obs = 1 if p_team1 > 0.65 else (2 if p_team1 < 0.35 else (1 if hue < 90 else 2))
+                    observations = self._observe(crops)
+                    for pid, obs in zip(needs_inference, observations):
                         last_known[pid] = self._vote(pid, obs)
 
             for player_id in player_track:

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import { api, sam3Track, sam3Result } from "@/lib/api";
 import { ArrowLeft, FlaskConical, Loader2, Play } from "lucide-react";
 
@@ -11,6 +12,7 @@ interface GameOpt { id: string; label: string; }
 export default function Sam3LabPage() {
   const [games, setGames] = useState<GameOpt[]>([]);
   const [gameId, setGameId] = useState("");
+  const sam3VideoRef = useRef<HTMLVideoElement>(null);
   const [prompt, setPrompt] = useState("basketball");
   const [startS, setStartS] = useState("");
   const [endS, setEndS] = useState("");
@@ -134,7 +136,10 @@ export default function Sam3LabPage() {
               <span className="text-slate-400"> (frames donde SAM 3 detectó «{prompt}»)</span>
             </div>
             {outUrl && (
-              <video src={outUrl} controls playsInline className="w-full rounded-lg bg-black" />
+              <>
+                <video ref={sam3VideoRef} src={outUrl} controls playsInline className="w-full rounded-lg bg-black" />
+                <VideoControls videoRef={sam3VideoRef} />
+              </>
             )}
           </div>
         )}
