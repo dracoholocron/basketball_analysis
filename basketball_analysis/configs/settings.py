@@ -214,6 +214,22 @@ class EngineSettings(BaseSettings):
             "Raise (2-3) on very long videos to cut SAM2 time."
         ),
     )
+    sam2_chunk: int = Field(
+        default=500,
+        description=(
+            "Frames per SAM2 propagation chunk (state offloaded to CPU). Larger = "
+            "fewer chunk-boundary stalls but more CPU RAM. Decode/write of the next "
+            "chunk is double-buffered against GPU processing of the current one."
+        ),
+    )
+    video_encoder: str = Field(
+        default="nvenc",
+        description=(
+            "Annotated-video H.264 encoder: 'nvenc' (GPU, falls back to libx264 if "
+            "unavailable) or 'libx264' (CPU only). NVENC frees the otherwise-idle GPU "
+            "during the encode stage."
+        ),
+    )
 
     # ── Player detection resolution ──────────────────────────────────────────────
     player_max_h: int = Field(
@@ -321,6 +337,14 @@ class EngineSettings(BaseSettings):
         description=(
             "YOLO-pose top-down: run pose on each tracked player's crop (upscaled) "
             "instead of the full frame, so small/distant players still get a skeleton."
+        ),
+    )
+    pose_topdown_batch: int = Field(
+        default=64,
+        description=(
+            "Top-down pose: number of player crops batched into one predict() call "
+            "(accumulated across frames). Larger = higher GPU utilization; bounded by "
+            "VRAM (crops are small). Identical keypoints, fewer kernel launches."
         ),
     )
     event_pose_conf_threshold: float = Field(

@@ -1070,23 +1070,43 @@ def run_pipeline(
     _writer.release()
     logger.info("Streaming draw complete: %d frames written", _frame_idx + 1)
 
-    # Re-encode to H.264 for browser compatibility
+    # Re-encode to H.264 for browser compatibility. Prefer GPU NVENC (the encode
+    # stage showed the GPU ~idle at ~8% / 16W) and fall back to CPU libx264 if NVENC
+    # is unavailable (no NVENC on the GPU/driver, or ffmpeg built without it). Both
+    # produce browser-friendly yuv420p H.264 + faststart → visually equivalent output.
     if _use_ffmpeg and _tmp_video and os.path.exists(_tmp_video):
-        _cmd = [
+        _nvenc = [
             "ffmpeg", "-y", "-i", _tmp_video,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-movflags", "+faststart",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             output_video,
         ]
-        _result = _subprocess.run(_cmd, capture_output=True)
+        _x264 = [
+            "ffmpeg", "-y", "-i", _tmp_video,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            output_video,
+        ]
+        _pref = str(getattr(_settings, "video_encoder", "nvenc")).lower()
+        _candidates = [_nvenc, _x264] if _pref != "libx264" else [_x264]
+        _ok = False
+        for _cmd in _candidates:
+            _result = _subprocess.run(_cmd, capture_output=True)
+            if _result.returncode == 0:
+                logger.info("Annotated video encoded with %s", _cmd[_cmd.index("-c:v") + 1])
+                _ok = True
+                break
+            logger.warning(
+                "ffmpeg encode with %s failed: %s",
+                _cmd[_cmd.index("-c:v") + 1], _result.stderr.decode()[-500:],
+            )
         try:
-            os.remove(_tmp_video)
+            if _ok and os.path.exists(_tmp_video):
+                os.remove(_tmp_video)
         except OSError:
             pass
-        if _result.returncode != 0:
-            logger.warning("ffmpeg re-encode failed: %s", _result.stderr.decode())
-            if os.path.exists(_tmp_video):
-                os.rename(_tmp_video, output_video)
+        if not _ok and os.path.exists(_tmp_video):
+            os.rename(_tmp_video, output_video)
     logger.info("Saved annotated video to %s", output_video)
 
     # Build summary metrics

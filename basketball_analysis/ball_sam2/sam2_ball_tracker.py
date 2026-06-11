@@ -38,7 +38,7 @@ _CKPT_URLS = {
 class Sam2BallTracker:
     def __init__(self, checkpoint: str, config: str, device: str = "cuda",
                  box_half: float = 18.0, max_ball_px: float = 60.0,
-                 chunk_size: int = 500):
+                 chunk_size: int | None = None):
         self.checkpoint = checkpoint
         self.config = config
         self.device = device
@@ -48,8 +48,10 @@ class Sam2BallTracker:
         self.max_ball_px = max_ball_px
         # SAM2 caches per-frame features in RAM → init_state over a whole long
         # video OOMs. Process in chunks, carrying the last ball box forward as the
-        # seed for the next chunk to keep continuity.
-        self.chunk_size = chunk_size
+        # seed for the next chunk to keep continuity. Tunable via BA_SAM2_CHUNK.
+        if chunk_size is None:
+            chunk_size = int(getattr(settings, "sam2_chunk", 500)) if settings else 500
+        self.chunk_size = max(1, chunk_size)
 
     # ── checkpoint handling ─────────────────────────────────────────────────
     def _ensure_checkpoint(self) -> str | None:
@@ -114,9 +116,11 @@ class Sam2BallTracker:
             return None
 
         import gc
+        import queue
         import shutil
+        import threading
         import cv2
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         stride = max(1, int(getattr(settings, "sam2_stride", 1)))
         device = self.device if torch.cuda.is_available() else "cpu"
@@ -176,30 +180,57 @@ class Sam2BallTracker:
             if device == "cuda":
                 torch.cuda.empty_cache()
 
-        # Single pass over the video: write frames into rolling chunk dirs (disk
-        # bounded to ~chunk_size frames) and process each chunk as it fills.
-        chunk_dir: str | None = None
-        src_idx: list[int] = []
-        local = 0
+        # Double-buffered pipeline: a producer thread decodes (prefetched) and writes
+        # the NEXT chunk's frames to disk while the GPU processes the CURRENT one, so
+        # the per-chunk frame-write + setup no longer stalls the GPU (the profile
+        # showed ~88%↔5% GPU sawtooth between chunks). Identical results: same chunk
+        # boundaries/contents and the consumer processes chunks strictly in order, so
+        # carry_box continuity is unchanged. Queue is bounded → disk stays ~2 chunks.
+        chunk_q: "queue.Queue" = queue.Queue(maxsize=1)
+        _SENTINEL = object()
+        _prod_err: list[BaseException] = []
+
+        def _producer() -> None:
+            cd: str | None = None
+            sidx: list[int] = []
+            loc = 0
+            try:
+                for gi, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=720)):
+                    if gi >= total_frames:
+                        break
+                    if gi % stride != 0:
+                        continue
+                    if cd is None:
+                        cd = tempfile.mkdtemp(prefix="sam2_chunk_")
+                        sidx = []
+                        loc = 0
+                    cv2.imwrite(os.path.join(cd, f"{loc}.jpg"), frame)
+                    sidx.append(gi)
+                    loc += 1
+                    if loc >= self.chunk_size:
+                        chunk_q.put((cd, sidx))
+                        cd = None
+                if cd is not None and loc > 0:
+                    chunk_q.put((cd, sidx))
+            except BaseException as exc:  # propagate to consumer
+                _prod_err.append(exc)
+            finally:
+                chunk_q.put(_SENTINEL)
+
+        producer = threading.Thread(target=_producer, name="sam2-chunk-writer", daemon=True)
+        producer.start()
         try:
-            for gi, frame in enumerate(iter_video_frames(video_path, max_height=720)):
-                if gi >= total_frames:
+            while True:
+                item = chunk_q.get()
+                if item is _SENTINEL:
                     break
-                if gi % stride != 0:
-                    continue
-                if chunk_dir is None:
-                    chunk_dir = tempfile.mkdtemp(prefix="sam2_chunk_")
-                    src_idx = []
-                    local = 0
-                cv2.imwrite(os.path.join(chunk_dir, f"{local}.jpg"), frame)
-                src_idx.append(gi)
-                local += 1
-                if local >= self.chunk_size:
-                    _process_chunk(chunk_dir, src_idx)
-                    shutil.rmtree(chunk_dir, ignore_errors=True)
-                    chunk_dir = None
-            if chunk_dir is not None and local > 0:
-                _process_chunk(chunk_dir, src_idx)
+                cd, sidx = item
+                try:
+                    _process_chunk(cd, sidx)
+                finally:
+                    shutil.rmtree(cd, ignore_errors=True)
+            if _prod_err:
+                raise _prod_err[0]
 
             covered = sum(1 for r in results if r)
             logger.info(
@@ -212,8 +243,15 @@ class Sam2BallTracker:
             logger.warning("SAM2 ball tracking failed: %s — falling back to YOLO", exc)
             return None
         finally:
-            if chunk_dir is not None:
-                shutil.rmtree(chunk_dir, ignore_errors=True)
+            # Drain any buffered chunk dirs so a partial run doesn't leak temp files.
+            try:
+                while True:
+                    leftover = chunk_q.get_nowait()
+                    if leftover is _SENTINEL or leftover is None:
+                        continue
+                    shutil.rmtree(leftover[0], ignore_errors=True)
+            except Exception:
+                pass
 
     # ── helpers ───────────────────────────────────────────────────────────────
     @staticmethod

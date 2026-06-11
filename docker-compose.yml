@@ -133,6 +133,9 @@ services:
       BA_BALL_VISUAL_TRACK: "false"   # CSRT needs opencv-contrib (not installed); fine-tune is the real gray-ball fix
       BA_BALL_SAM2: "true"            # propagate manual ball clicks with SAM2 (color-agnostic)
       BA_SAM2_STRIDE: "1"             # raise (2-3) on very long videos to cut SAM2 time
+      BA_SAM2_CHUNK: "500"            # frames per SAM2 chunk (next chunk decoded/written while GPU runs current)
+      BA_VIDEO_ENCODER: "nvenc"       # GPU H.264 encode (h264_nvenc) for the annotated video; falls back to libx264
+      BA_POSE_TOPDOWN_BATCH: "64"     # top-down pose: crops batched across frames per predict() (more GPU)
       BA_POSE_TOPDOWN: "true"         # per-player crop pose → distant players keep skeletons
       BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
       BA_PLAYER_MAX_H: "1080"         # player detection at native res → recover distant players
