@@ -46,6 +46,10 @@ ordena por minutos y el filtro "Solo con dorsal" las oculta.
 4. La simulación (`matchups._get_team_stats`) combina el % de tiro del **box score**
    (autoridad) con **ritmo/posesiones y presión defensiva** derivados de CV.
 
+## Versionado de modelos
+La versión activa de cada modelo (player/ball/court/pose) se elige en **Admin → Modelos**;
+revertir es un clic y aplica al próximo análisis. Detalle: [MODEL_VERSIONS.md](MODEL_VERSIONS.md).
+
 ## Tracking de balón (SAM 2.1) y piloto SAM 3
 La calidad del tracking de balón es **seleccionable por análisis** (small/base_plus/large)
 en el modal — afecta posesión/pases/tiros. Detalle y guía del piloto SAM 3 (prompt de

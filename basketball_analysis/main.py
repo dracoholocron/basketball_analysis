@@ -400,6 +400,7 @@ def run_pipeline(
     analysis_end_s: float | None = None,
     sam2_checkpoint: str | None = None,
     sam2_config: str | None = None,
+    pose_model_path: str | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -463,7 +464,7 @@ def run_pipeline(
 
     player_tracker = PlayerTracker(_player_path)
     ball_tracker = BallTracker(_ball_path)
-    court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path)
+    court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path or COURT_KEYPOINT_DETECTOR_PATH)
 
     _player_stub = os.path.join(stub_path, "player_track_stubs.pkl")
     _ball_stub = os.path.join(stub_path, "ball_track_stubs.pkl")
@@ -617,7 +618,7 @@ def run_pipeline(
             if pose_sequence is None:
                 try:
                     from pose_estimator import PoseEstimator
-                    _pe = PoseEstimator()
+                    _pe = PoseEstimator(model_path=pose_model_path)
                     logger.info("Running pose estimation (backend=%s)…", _pe._backend)
                     pose_sequence = _pe.estimate_sequence_streaming(
                         input_video, player_tracks, _chunk_size
@@ -690,7 +691,7 @@ def run_pipeline(
             if pose_sequence is None:
                 try:
                     from pose_estimator import PoseEstimator
-                    _pe = PoseEstimator()
+                    _pe = PoseEstimator(model_path=pose_model_path)
                     logger.info("Running pose estimation (backend=%s)…", _pe._backend)
                     pose_sequence = _pe.estimate_sequence(video_frames, player_tracks)
                     save_stub(_pose_stub, pose_sequence)

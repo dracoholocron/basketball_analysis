@@ -251,12 +251,22 @@ def run_analysis(
             except Exception:
                 pass
 
+        # Resolve the ACTIVE model version per role (registry). Falls back to settings
+        # defaults for any role without an active version.
+        _active = _active_model_paths(engine)
+        if _active:
+            logger.info("Active model versions: %s", _active)
+
         try:
             metrics = run_pipeline(
                 input_video=local_video,
                 output_video=output_video,
                 stub_path=stub_dir,
                 use_stubs=False,
+                player_detector_path=_active.get("player"),
+                ball_detector_path=_active.get("ball"),
+                court_kp_detector_path=_active.get("court"),
+                pose_model_path=_active.get("pose"),
                 team1_jersey=team1_jersey,
                 team2_jersey=team2_jersey,
                 court_profile=profile,
@@ -1010,11 +1020,150 @@ def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
         best = getattr(model.trainer, "best", None)
         if not best or not os.path.exists(best):
             return {"error": "training produced no best.pt"}
-        # backup + swap
-        shutil.copy(base, base + ".bak")
-        shutil.copy(best, base)
-        logger.info("Ball detector fine-tuned and swapped in: %s ← %s", base, best)
-        return {"ok": True, "labeled_frames": n_labels, "best": str(best)}
+        # Versioned save (do NOT overwrite the active model). Register INACTIVE so the
+        # user reviews metrics and activates from /admin/models when ready.
+        import time as _time
+        ts = _time.strftime("%Y%m%d-%H%M")
+        models_dir = os.path.join(engine_path, "models")
+        ver_name = f"ball_detector__ft_{ts}.pt"
+        ver_path = os.path.join(models_dir, ver_name)
+        shutil.copy(best, ver_path)
+        metrics = _read_finetune_metrics("/app/ball_dataset/runs/finetune/results.csv")
+        _register_model_version("ball", f"models/{ver_name}",
+                                label=f"fine-tune {ts}", source="finetune", metrics=metrics)
+        logger.info("Ball detector fine-tuned → registered INACTIVE version: %s", ver_path)
+        return {"ok": True, "labeled_frames": n_labels, "version": ver_name, "metrics": metrics}
     except Exception as exc:
         logger.exception("finetune_ball_detector failed")
         return {"error": str(exc)}
+
+
+# ── Model version registry helpers (worker side — has the models_data volume) ──────
+
+_MODELS_ROLE_PATTERNS = [
+    ("player", ("player_detector", "player")),
+    ("ball",   ("ball_detector", "ball")),
+    ("court",  ("court_keypoint", "court")),
+    ("pose",   ("pose",)),
+]
+_CANONICAL = {
+    "player": "player_detector.pt",
+    "ball": "ball_detector_model.pt",
+    "court": "court_keypoint_detector.pt",
+    "pose": "yolo11n-pose.pt",
+}
+
+
+def _role_for_file(name: str) -> str | None:
+    low = name.lower()
+    if low.startswith("sam2") or low.startswith("sam3") or "multiclass" in low:
+        return None
+    for role, pats in _MODELS_ROLE_PATTERNS:
+        if any(p in low for p in pats):
+            return role
+    return None
+
+
+def _read_finetune_metrics(results_csv: str) -> dict | None:
+    try:
+        import csv as _csv
+        with open(results_csv) as f:
+            rows = list(_csv.DictReader(f))
+        if not rows:
+            return None
+        last = rows[-1]
+        def g(k):
+            for kk in last:
+                if kk.strip() == k:
+                    try:
+                        return round(float(last[kk]), 4)
+                    except ValueError:
+                        return None
+            return None
+        return {"epochs": len(rows), "mAP50": g("metrics/mAP50(B)"),
+                "mAP50-95": g("metrics/mAP50-95(B)"), "precision": g("metrics/precision(B)"),
+                "recall": g("metrics/recall(B)")}
+    except Exception:
+        return None
+
+
+def _register_model_version(role: str, filename: str, label: str | None,
+                            source: str, metrics: dict | None,
+                            activate_if_none: bool = False) -> None:
+    """Upsert a ModelVersion row (by role+filename). Optionally activate when the role
+    has no active version yet."""
+    from ..models.model_version import ModelVersion
+    engine = _sync_engine()
+    with Session(engine) as db:
+        existing = db.query(ModelVersion).filter(
+            ModelVersion.role == role, ModelVersion.filename == filename
+        ).one_or_none()
+        if existing is None:
+            has_active = db.query(ModelVersion).filter(
+                ModelVersion.role == role, ModelVersion.is_active.is_(True)
+            ).first() is not None
+            mv = ModelVersion(
+                role=role, filename=filename, label=label, source=source, metrics=metrics,
+                is_active=(activate_if_none and not has_active),
+            )
+            db.add(mv)
+        else:
+            if metrics is not None:
+                existing.metrics = metrics
+        db.commit()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.scan_models", max_retries=0)
+def scan_models(self: Task) -> dict:
+    """Register model files in the models_data volume into the registry (idempotent).
+    Activates the canonical file for any role that has no active version yet."""
+    import glob
+    from ..models.model_version import ModelVersion
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    models_dir = os.path.join(engine_path, "models")
+    found = 0
+    for path in glob.glob(os.path.join(models_dir, "*.pt")):
+        name = os.path.basename(path)
+        role = _role_for_file(name)
+        if role is None:
+            continue
+        _register_model_version(role, f"models/{name}", label=name, source="builtin",
+                                metrics=None, activate_if_none=False)
+        found += 1
+    # Ensure each role has an active version (prefer canonical).
+    engine = _sync_engine()
+    activated = {}
+    with Session(engine) as db:
+        for role in ("player", "ball", "court", "pose"):
+            has_active = db.query(ModelVersion).filter(
+                ModelVersion.role == role, ModelVersion.is_active.is_(True)
+            ).first()
+            if has_active:
+                continue
+            canonical = f"models/{_CANONICAL[role]}"
+            pick = db.query(ModelVersion).filter(
+                ModelVersion.role == role, ModelVersion.filename == canonical
+            ).one_or_none() or db.query(ModelVersion).filter(
+                ModelVersion.role == role
+            ).order_by(ModelVersion.created_at.asc()).first()
+            if pick:
+                pick.is_active = True
+                activated[role] = pick.filename
+        db.commit()
+    logger.info("scan_models: registered %d files; activated defaults: %s", found, activated)
+    return {"ok": True, "registered": found, "activated": activated}
+
+
+def _active_model_paths(engine) -> dict:
+    """role -> absolute model path for the ACTIVE version (only roles with an active row)."""
+    from ..models.model_version import ModelVersion
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    out: dict[str, str] = {}
+    try:
+        with Session(engine) as db:
+            for mv in db.query(ModelVersion).filter(ModelVersion.is_active.is_(True)).all():
+                rel = mv.filename
+                out[mv.role] = rel if os.path.isabs(rel) else os.path.join(engine_path, rel)
+    except Exception as exc:
+        logger.warning("active model paths unavailable: %s", exc)
+    return out

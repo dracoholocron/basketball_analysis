@@ -29,6 +29,7 @@ celery_app.conf.update(
         "app.worker.tasks.run_analysis": {"queue": "gpu"},
         "app.worker.tasks.generate_highlights": {"queue": "gpu"},
         "app.worker.tasks.finetune_ball_detector": {"queue": "gpu"},
+        "app.worker.tasks.scan_models": {"queue": "gpu"},
         "app.worker.cpu_tasks.run_simulation_task": {"queue": "cpu"},
         "app.worker.gpu_tasks.run_pose_analysis_task": {"queue": "gpu"},
         # SAM 3 pilot runs on an isolated lab worker (profile 'lab'), own queue.

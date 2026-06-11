@@ -314,6 +314,24 @@ export async function sam3Result(taskId: string) {
   };
 }
 
+// ── Model version registry ──────────────────────────────────────────────────────
+export interface ModelVersion {
+  id: string; role: string; filename: string; label?: string | null;
+  source: string; metrics?: Record<string, number | null> | null; is_active: boolean;
+}
+export async function listModelVersions(): Promise<{ roles: Record<string, ModelVersion[]> }> {
+  const { data } = await api.get("/models");
+  return data;
+}
+export async function activateModelVersion(id: string) {
+  const { data } = await api.post(`/models/${id}/activate`);
+  return data;
+}
+export async function scanModels() {
+  const { data } = await api.post("/models/scan");
+  return data as { task_id: string; queued: boolean };
+}
+
 // ── Seasons ───────────────────────────────────────────────────────────────────
 export async function listSeasons(skip = 0, limit = 50) {
   const { data } = await api.get("/seasons", { params: { skip, limit } });

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Cookies from "js-cookie";
 import AppShell from "@/components/layout/AppShell";
-import { Building2, Trophy, Users, UserCircle2, ChevronRight, Dumbbell, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Building2, Trophy, Users, UserCircle2, ChevronRight, Dumbbell, Loader2, CheckCircle2, AlertCircle, Boxes } from "lucide-react";
 import { triggerBallFinetune } from "@/lib/api";
 
 const ADMIN_SECTIONS = [
@@ -36,6 +36,13 @@ const ADMIN_SECTIONS = [
     title: "Players",
     description: "Register players, assign jersey numbers and positions",
     color: "from-violet-50 to-purple-50 border-violet-200",
+  },
+  {
+    href: "/admin/models",
+    icon: <Boxes size={28} className="text-sky-600" />,
+    title: "Models",
+    description: "Choose the active version of each model (player, ball, court, pose)",
+    color: "from-sky-50 to-cyan-50 border-sky-200",
   },
 ];
 

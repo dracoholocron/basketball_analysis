@@ -8,6 +8,7 @@ from .video_asset import VideoAsset
 from .job import Job, JobStatus, JobStage
 from .metrics import PlayerMetric, FrameMetric
 from .player_game_stats import PlayerGameStats
+from .model_version import ModelVersion
 from .matchup import Matchup
 from .game_event import GameEvent
 from .box_score import BoxScore, PlayerBoxScore
@@ -33,6 +34,7 @@ __all__ = [
     "PlayerMetric",
     "FrameMetric",
     "PlayerGameStats",
+    "ModelVersion",
     "Matchup",
     "GameEvent",
     "BoxScore",
