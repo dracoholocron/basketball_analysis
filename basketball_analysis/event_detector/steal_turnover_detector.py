@@ -27,10 +27,19 @@ try:
     _CONF = _settings.event_pose_conf_threshold
 except Exception:
     _CONF = 0.12
+def _s(name, default):
+    try:
+        from configs.settings import settings as _settings_obj
+        return getattr(_settings_obj, name, default)
+    except Exception:
+        return default
+
 _WRIST_TO_BALL_PX = 70     # max wrist-to-ball distance to consider contact
-_MIN_HOLD_FRAMES = 6       # consecutive frames of contact to confirm possession (~0.4s)
-_COOLDOWN_FRAMES = 90      # ~3s at 30fps — min gap between steal events
-_RIM_PROXIMITY_FACTOR = 3.0  # possession changes within N·rim-width of a rim are NOT steals
+# Tunable via settings/env (BA_STEAL_*). Higher hold/cooldown → fewer false steals in
+# scrums (a real steal = a sustained possession actually changing teams).
+_MIN_HOLD_FRAMES = _s("steal_min_hold_frames", 9)        # ~0.6s sustained possession
+_COOLDOWN_FRAMES = _s("steal_cooldown_frames", 150)      # ~5s between steal events
+_RIM_PROXIMITY_FACTOR = _s("steal_rim_factor", 3.0)      # changes within N·rim-width = not steals
 
 
 class StealTurnoverDetector:

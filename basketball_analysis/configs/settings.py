@@ -276,6 +276,18 @@ class EngineSettings(BaseSettings):
         default=0.5,
         description="Drop provisional (no-dorsal) identities seen less than this (noise/false tracks)",
     )
+    steal_min_hold_frames: int = Field(
+        default=9,
+        description="Steal detector: consecutive contact frames to confirm a possessor (higher = fewer false steals)",
+    )
+    steal_cooldown_frames: int = Field(
+        default=150,
+        description="Steal detector: min frames between steal events (~5s at 30fps)",
+    )
+    steal_rim_factor: float = Field(
+        default=3.0,
+        description="Steal detector: possession changes within N·rim-width of a rim are NOT steals (shots/rebounds)",
+    )
 
     # ── Jersey number OCR (player identity) ──────────────────────────────────────
     jersey_ocr: bool = Field(
