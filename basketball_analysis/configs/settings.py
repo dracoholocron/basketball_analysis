@@ -222,6 +222,14 @@ class EngineSettings(BaseSettings):
             "chunk is double-buffered against GPU processing of the current one."
         ),
     )
+    sam2_vos_optimized: bool = Field(
+        default=True,
+        description=(
+            "Build the SAM2 video predictor with vos_optimized=True (torch.compile of "
+            "the heavy components) for faster propagation. Same weights → same masks. "
+            "Auto-falls back to the standard predictor if compile is unsupported."
+        ),
+    )
     video_encoder: str = Field(
         default="nvenc",
         description=(
@@ -337,14 +345,6 @@ class EngineSettings(BaseSettings):
         description=(
             "YOLO-pose top-down: run pose on each tracked player's crop (upscaled) "
             "instead of the full frame, so small/distant players still get a skeleton."
-        ),
-    )
-    pose_topdown_batch: int = Field(
-        default=64,
-        description=(
-            "Top-down pose: number of player crops batched into one predict() call "
-            "(accumulated across frames). Larger = higher GPU utilization; bounded by "
-            "VRAM (crops are small). Identical keypoints, fewer kernel launches."
         ),
     )
     event_pose_conf_threshold: float = Field(

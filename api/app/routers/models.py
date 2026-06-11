@@ -73,6 +73,17 @@ async def scan_models(_=Depends(_admin)):
     return {"task_id": res.id, "queued": True}
 
 
+@router.post("/export-tensorrt/{role}")
+async def export_tensorrt(role: str, _=Depends(_admin)):
+    """Ask the GPU worker to export the active .pt of a role to a TensorRT FP16 .engine
+    (registered INACTIVE; activate after validating quality). Engines are GPU-specific."""
+    if role not in ROLES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"role must be one of {ROLES}")
+    res = celery_app.send_task("app.worker.tasks.export_tensorrt_engine", args=[role], queue="gpu")
+    return {"task_id": res.id, "queued": True, "role": role}
+
+
 @router.delete("/{version_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_model_version(
     version_id: uuid.UUID, db: AsyncSession = Depends(get_db), _=Depends(_admin),

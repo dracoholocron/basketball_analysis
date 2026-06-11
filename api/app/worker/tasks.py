@@ -1046,6 +1046,84 @@ def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
         return {"error": str(exc)}
 
 
+@celery_app.task(bind=True, name="app.worker.tasks.export_tensorrt_engine",
+                 max_retries=0, acks_late=True)
+def export_tensorrt_engine(self: Task, role: str) -> dict:
+    """Export the ACTIVE .pt detector of a role to a TensorRT FP16 .engine and register
+    it INACTIVE. Engines are GPU/driver-specific so this MUST run on the GPU worker.
+
+    Loading is transparent: the trackers use ultralytics ``YOLO(path)`` which also loads
+    ``.engine``. FP16 keeps mAP ~unchanged; the user validates and activates per role
+    from /admin/models (revert = 1 click). See FINE_TUNING.md / MODEL_VERSIONS.md.
+    """
+    import shutil
+    import time as _time
+    from ..models.model_version import ModelVersion
+
+    role = (role or "").strip().lower()
+    if role not in ("player", "ball", "court", "pose"):
+        return {"error": f"unknown role '{role}' (expected player|ball|court|pose)"}
+
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    if engine_path not in sys.path:
+        sys.path.insert(0, engine_path)
+    models_dir = os.path.join(engine_path, "models")
+
+    # Resolve the active .pt for the role (fall back to the canonical file).
+    sync = _sync_engine()
+    rel = None
+    with Session(sync) as db:
+        active = db.query(ModelVersion).filter(
+            ModelVersion.role == role, ModelVersion.is_active.is_(True)
+        ).one_or_none()
+        if active and active.filename.endswith(".pt"):
+            rel = active.filename
+    if rel is None:
+        rel = f"models/{_CANONICAL[role]}"
+    src_pt = os.path.join(engine_path, rel) if not os.path.isabs(rel) else rel
+    if not os.path.exists(src_pt):
+        return {"error": f"active .pt not found for role '{role}': {src_pt}"}
+
+    # imgsz/batch per role match what the pipeline uses (engines bake input size; dynamic
+    # allows batch ≤ max and variable HxW so pose top-down crops still work).
+    _imgsz = {
+        "player": int(os.environ.get("BA_PLAYER_IMGSZ", "1280")),
+        "ball":   int(os.environ.get("BA_BALL_IMGSZ", "960")),
+        "court":  int(os.environ.get("BA_COURT_KP_IMGSZ", "1536")),
+        "pose":   640,
+    }[role]
+    _batch = int(os.environ.get(
+        "BA_COURT_KP_BATCH_SIZE" if role == "court" else "BA_YOLO_BATCH_SIZE",
+        "24" if role == "court" else "32",
+    ))
+
+    try:
+        from ultralytics import YOLO
+        logger.info("TensorRT export: role=%s src=%s imgsz=%d batch=%d (FP16)",
+                    role, os.path.basename(src_pt), _imgsz, _batch)
+        model = YOLO(src_pt)
+        exported = model.export(
+            format="engine", half=True, imgsz=_imgsz, batch=_batch,
+            dynamic=True, workers=0, device=0, verbose=False,
+        )  # writes <stem>.engine next to the .pt
+        if not exported or not os.path.exists(str(exported)):
+            return {"error": "export produced no .engine (is the 'tensorrt' package installed in the image?)"}
+        ts = _time.strftime("%Y%m%d-%H%M")
+        ver_name = f"{role}__trt_fp16_{ts}.engine"
+        ver_path = os.path.join(models_dir, ver_name)
+        shutil.move(str(exported), ver_path)
+        _register_model_version(
+            role, f"models/{ver_name}",
+            label=f"TensorRT FP16 imgsz{_imgsz} {ts}", source="tensorrt",
+            metrics={"imgsz": _imgsz, "batch": _batch, "precision": "fp16"},
+        )
+        logger.info("TensorRT export done → registered INACTIVE: %s", ver_path)
+        return {"ok": True, "role": role, "version": ver_name, "imgsz": _imgsz}
+    except Exception as exc:
+        logger.exception("export_tensorrt_engine failed")
+        return {"error": str(exc)}
+
+
 # ── Model version registry helpers (worker side — has the models_data volume) ──────
 
 _MODELS_ROLE_PATTERNS = [

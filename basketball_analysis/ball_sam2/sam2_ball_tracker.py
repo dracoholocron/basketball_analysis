@@ -126,7 +126,23 @@ class Sam2BallTracker:
         device = self.device if torch.cuda.is_available() else "cpu"
         results: list[dict] = [{} for _ in range(total_frames)]
         carry_box: list[float] | None = None
-        predictor = build_sam2_video_predictor(self.config, ckpt, device=device)
+        # vos_optimized=True torch.compiles the heavy SAM2 components (image/memory
+        # encoder, memory attention) → major VOS speedup with the SAME weights (quality
+        # identical; the first chunk pays the compile cost). Falls back to the normal
+        # predictor if compile is unsupported on this GPU/driver. Toggle: BA_SAM2_VOS_OPTIMIZED.
+        _want_vos = bool(getattr(settings, "sam2_vos_optimized", True)) and device == "cuda"
+        predictor = None
+        if _want_vos:
+            try:
+                predictor = build_sam2_video_predictor(
+                    self.config, ckpt, device=device, vos_optimized=True,
+                )
+                logger.info("SAM2: vos_optimized (torch.compile) enabled")
+            except Exception as exc:
+                logger.warning("SAM2 vos_optimized unavailable (%s) — using standard predictor", exc)
+                predictor = None
+        if predictor is None:
+            predictor = build_sam2_video_predictor(self.config, ckpt, device=device)
 
         def _process_chunk(chunk_dir: str, src_idx: list[int]) -> None:
             """Run SAM2 over one on-disk chunk; src_idx[local] = source frame index."""

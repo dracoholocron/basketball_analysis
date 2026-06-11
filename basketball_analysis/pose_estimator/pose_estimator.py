@@ -430,50 +430,12 @@ class PoseEstimator:
         """
         from utils.video_utils import iter_video_frames_prefetch
 
+        pose_sequence: list[dict[int, np.ndarray]] = []
         total = len(player_tracks)
 
-        # Fast path: YOLO top-down → batch crops ACROSS frames into larger predict()
-        # calls (GPU sat at ~43% with per-frame batches). Identical results: same
-        # crops, model, and back-mapping — only the batch grouping changes. Falls back
-        # to the per-frame path for rtmpose/dummy/non-topdown.
-        _topdown = False
-        if self._backend == "yolo" and not self._dummy and self._yolo_model is not None:
-            try:
-                from configs.settings import settings as _s
-                _topdown = getattr(_s, "pose_topdown", True)
-                _batch = int(getattr(_s, "pose_topdown_batch", 64))
-            except Exception:
-                _topdown, _batch = True, 64
-
-        if _topdown:
-            pose_sequence = [{} for _ in range(total)]
-            buf_crops: list[np.ndarray] = []
-            buf_meta: list[tuple] = []  # (frame_num, track_id, ox, oy, scale)
-
-            def _flush() -> None:
-                if not buf_crops:
-                    return
-                preds = self._yolo_model.predict(buf_crops, verbose=False, device=self._device)
-                for (fn, tid, ox, oy, scale), r in zip(buf_meta, preds):
-                    mapped = self._scatter_topdown_pred(r, (tid, ox, oy, scale))
-                    if mapped is not None:
-                        pose_sequence[fn][mapped[0]] = mapped[1]
-                buf_crops.clear()
-                buf_meta.clear()
-
-            for frame_num, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=max_height)):
-                if frame_num >= total:
-                    break
-                crops, metas = self._topdown_crops(frame, player_tracks[frame_num])
-                for crop, (tid, ox, oy, scale) in zip(crops, metas):
-                    buf_crops.append(crop)
-                    buf_meta.append((frame_num, tid, ox, oy, scale))
-                if len(buf_crops) >= _batch:
-                    _flush()
-            _flush()
-            return pose_sequence
-
-        pose_sequence: list[dict[int, np.ndarray]] = []
+        # Per-frame top-down (crops batched per frame inside estimate_frame). Cross-frame
+        # batching was tried and reverted: it raised VRAM (2.9→8.3 GB) without speeding
+        # up — pose isn't bound by the number of predict() calls. Prefetch overlaps decode.
         for frame_num, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=max_height)):
             if frame_num >= total:
                 break

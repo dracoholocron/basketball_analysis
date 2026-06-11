@@ -35,6 +35,19 @@ métricas; la activa marcada; botón **Activar**; botón **Re-escanear modelos**
   **Antes de activar un fine-tune, sigue [FINE_TUNING.md](FINE_TUNING.md)** (set de
   validación real + comparación contra el activo; no te fíes del mAP sobre pseudo-etiquetas).
 
+## TensorRT FP16 (acelerar detectores sin perder calidad)
+Los detectores (`player`/`ball`/`court`/`pose`) cargan con `YOLO(path)` de Ultralytics, que también
+carga archivos **`.engine` (TensorRT)**. Para acelerar una etapa:
+- **Admin → Modelos → botón «TensorRT FP16»** del rol (o `POST /models/export-tensorrt/{role}`) →
+  tarea `export_tensorrt_engine` en el **worker-gpu** que exporta el `.pt` activo a
+  `models/<role>__trt_fp16_<fecha>.engine` (`half=True`, `imgsz` del rol, `dynamic=True`) y lo
+  registra **INACTIVO**.
+- **Valida antes de activar** (ver [FINE_TUNING.md](FINE_TUNING.md)): corre un análisis con el engine
+  activo y compara métricas/eventos/cobertura contra el `.pt`. FP16 mantiene mAP, pero confírmalo.
+- Activar/revertir = 1 clic. **Los engines son específicos de GPU/driver/imgsz/batch**: si cambias de
+  GPU o driver, regenéralos (la tarea de export, no `scan_models`). Requiere el paquete `tensorrt` en
+  la imagen del worker; si falta, la tarea devuelve error y se sigue usando el `.pt`.
+
 ## Subir un modelo manualmente
 Copia el `.pt` al volumen `models_data` (p.ej.
 `docker cp mi_modelo.pt basketball_analysis-worker-gpu-1:/app/engine/models/ball_detector__exp.pt`)

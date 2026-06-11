@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
-import { listModelVersions, activateModelVersion, scanModels, type ModelVersion } from "@/lib/api";
-import { ChevronLeft, Loader2, RefreshCw, CheckCircle2, Circle, Boxes } from "lucide-react";
+import { listModelVersions, activateModelVersion, scanModels, exportTensorrtEngine, type ModelVersion } from "@/lib/api";
+import { ChevronLeft, Loader2, RefreshCw, CheckCircle2, Circle, Boxes, Zap } from "lucide-react";
 import { clsx } from "clsx";
 
 const ROLE_LABELS: Record<string, string> = {
@@ -37,6 +37,14 @@ export default function AdminModelsPage() {
       await scanModels();
       setMsg("Re-escaneo encolado… recarga en unos segundos para ver los modelos registrados.");
     } catch (e: unknown) { setMsg(e instanceof Error ? e.message : "Error al escanear"); }
+    finally { setBusy(null); }
+  };
+  const onExportTrt = async (role: string) => {
+    setBusy(`trt-${role}`); setMsg("");
+    try {
+      await exportTensorrtEngine(role);
+      setMsg(`Export TensorRT (${role}) encolado en la GPU… tarda unos minutos. Recarga para ver la versión .engine (queda INACTIVA hasta que la actives).`);
+    } catch (e: unknown) { setMsg(e instanceof Error ? e.message : "Error al exportar"); }
     finally { setBusy(null); }
   };
 
@@ -81,8 +89,16 @@ export default function AdminModelsPage() {
             const versions = roles[role] ?? [];
             return (
               <div key={role} className="bg-slate-800 rounded-xl border border-slate-700">
-                <div className="px-4 py-3 border-b border-slate-700 text-sm font-semibold text-white">
-                  {ROLE_LABELS[role]} <span className="text-slate-500 font-normal">({versions.length})</span>
+                <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-white">
+                    {ROLE_LABELS[role]} <span className="text-slate-500 font-normal">({versions.length})</span>
+                  </span>
+                  <button onClick={() => onExportTrt(role)} disabled={busy === `trt-${role}`}
+                    title="Exportar el modelo activo a TensorRT FP16 (GPU). Queda inactivo hasta validar y activar."
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 disabled:opacity-50">
+                    {busy === `trt-${role}` ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+                    TensorRT FP16
+                  </button>
                 </div>
                 {versions.length === 0 ? (
                   <p className="px-4 py-4 text-sm text-slate-500">Sin versiones registradas. Usa «Re-escanear».</p>

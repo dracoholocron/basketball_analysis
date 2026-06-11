@@ -351,6 +351,10 @@ export async function scanModels() {
   const { data } = await api.post("/models/scan");
   return data as { task_id: string; queued: boolean };
 }
+export async function exportTensorrtEngine(role: string) {
+  const { data } = await api.post(`/models/export-tensorrt/${role}`);
+  return data as { task_id: string; queued: boolean; role: string };
+}
 
 // ── Seasons ───────────────────────────────────────────────────────────────────
 export async function listSeasons(skip = 0, limit = 50) {
