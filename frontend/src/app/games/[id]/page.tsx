@@ -42,6 +42,10 @@ interface PlayerMetric {
   possession_frames: number;
   passes_made: number;
   interceptions_made: number;
+  shots_attempted?: number;
+  shots_made?: number;
+  shots_missed?: number;
+  rebounds?: number;
 }
 
 interface Metrics {
@@ -54,6 +58,10 @@ interface Metrics {
   team2_passes: number;
   team1_interceptions: number;
   team2_interceptions: number;
+  team1_shots_attempted?: number;
+  team2_shots_attempted?: number;
+  team1_shots_made?: number;
+  team2_shots_made?: number;
   players: PlayerMetric[];
 }
 
@@ -301,6 +309,15 @@ export default function GameDetailPage() {
 
   const shotCount    = cvEvents.filter(e => e.event_type === "shot_attempt").length;
   const reboundCount = cvEvents.filter(e => e.event_type === "rebound").length;
+
+  // Field-goal shooting from attributed per-player metrics (team-coherent).
+  const t1Att = metrics?.team1_shots_attempted ?? 0;
+  const t2Att = metrics?.team2_shots_attempted ?? 0;
+  const t1Made = metrics?.team1_shots_made ?? 0;
+  const t2Made = metrics?.team2_shots_made ?? 0;
+  const shotsAttempted = t1Att + t2Att;
+  const shotsMade = t1Made + t2Made;
+  const fgPct = (m: number, a: number) => (a > 0 ? Math.round((100 * m) / a) : 0);
   const stealCount   = cvEvents.filter(e => e.event_type === "steal").length;
 
   return (
@@ -802,6 +819,41 @@ export default function GameDetailPage() {
           </div>
         )}
 
+        {/* Field-goal shooting (attempts / makes / FG%, with team split) */}
+        {metrics && shotsAttempted > 0 && (
+          <div className="bg-slate-800 rounded-xl p-5">
+            <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
+              <Target size={16} className="text-orange-400" /> Tiros de campo
+            </h2>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              {[
+                { label: "Anotados", value: shotsMade },
+                { label: "Intentos", value: shotsAttempted },
+                { label: "FG%", value: `${fgPct(shotsMade, shotsAttempted)}%` },
+              ].map(({ label, value }) => (
+                <div key={label} className="text-center">
+                  <p className="text-3xl font-bold text-orange-400">{value}</p>
+                  <p className="text-xs text-slate-400 mt-1">{label}</p>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg bg-slate-700/40 px-3 py-2" style={{ borderLeft: `3px solid ${TEAM_COLORS[0]}` }}>
+                <p className="text-slate-300 font-medium truncate">{chartTeam1}</p>
+                <p className="text-slate-400">{t1Made}/{t1Att} · <span className="text-white">{fgPct(t1Made, t1Att)}% FG</span></p>
+              </div>
+              <div className="rounded-lg bg-slate-700/40 px-3 py-2" style={{ borderLeft: `3px solid ${TEAM_COLORS[1]}` }}>
+                <p className="text-slate-300 font-medium truncate">{chartTeam2}</p>
+                <p className="text-slate-400">{t2Made}/{t2Att} · <span className="text-white">{fgPct(t2Made, t2Att)}% FG</span></p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-3">
+              Intentos detectados por el aro; aciertos reforzados por el tablero anotado. Atribuidos al
+              tirador (posesión previa) y a su equipo.
+            </p>
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="flex gap-1 bg-slate-800 p-1 rounded-lg w-fit">
           {(["stats", "events", "players"] as const).map(tab => (
@@ -949,7 +1001,7 @@ export default function GameDetailPage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-700 text-left text-xs text-slate-400">
-                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep."].map(h => (
+                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep.", "Tiros (FG)"].map(h => (
                     <th key={h} className="px-4 py-3 font-medium">{h}</th>
                   ))}
                 </tr>
@@ -986,6 +1038,11 @@ export default function GameDetailPage() {
                       <td className="px-4 py-3 text-slate-200">{p.possession_frames}</td>
                       <td className="px-4 py-3 text-slate-200">{p.passes_made}</td>
                       <td className="px-4 py-3 text-slate-200">{p.interceptions_made}</td>
+                      <td className="px-4 py-3 text-slate-200">
+                        {(p.shots_attempted ?? 0) > 0
+                          ? `${p.shots_made ?? 0}/${p.shots_attempted} (${fgPct(p.shots_made ?? 0, p.shots_attempted ?? 0)}%)`
+                          : "—"}
+                      </td>
                     </tr>
                   );
                 })}

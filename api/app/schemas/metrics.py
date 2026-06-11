@@ -42,6 +42,8 @@ class GameMetrics(BaseModel):
     team2_interceptions: int
     team1_shots_attempted: int = 0
     team2_shots_attempted: int = 0
+    team1_shots_made: int = 0
+    team2_shots_made: int = 0
     team1_rebounds: int = 0
     team2_rebounds: int = 0
     team1_steals_cv: int = 0

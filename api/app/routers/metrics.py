@@ -91,6 +91,8 @@ async def get_game_metrics(
         team2_interceptions=sum(p.interceptions_made for p in t2),
         team1_shots_attempted=sum(p.shots_attempted for p in t1),
         team2_shots_attempted=sum(p.shots_attempted for p in t2),
+        team1_shots_made=sum(p.shots_made for p in t1),
+        team2_shots_made=sum(p.shots_made for p in t2),
         team1_rebounds=sum(p.rebounds for p in t1),
         team2_rebounds=sum(p.rebounds for p in t2),
         team1_steals_cv=sum(p.steals_cv for p in t1),
