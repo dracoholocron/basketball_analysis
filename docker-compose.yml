@@ -151,7 +151,7 @@ services:
       BA_TRACK_STITCH: "true"         # link track fragments by spatio-temporal continuity
       BA_TRACK_STITCH_MAX_GAP_S: "2.5" # aggressive: bridge longer occlusions/missed stretches
       BA_TRACK_STITCH_MAX_DIST_FRAC: "0.12"  # px/s tolerance (scales with gap length)
-      BA_MIN_TRACK_SECONDS: "0.5"     # drop provisional (no-dorsal) identities seen < this
+      BA_MIN_TRACK_SECONDS: "1.5"     # drop provisional (no-dorsal) identities seen < this (curbs identity inflation on long videos)
       BA_JERSEY_OCR: "true"           # OCR jersey numbers → consolidate tracks into real athletes
       BA_JERSEY_OCR_SAMPLE_EVERY: "5"
       BA_JERSEY_OCR_MIN_VOTES: "2"

@@ -214,6 +214,18 @@ class EngineSettings(BaseSettings):
             "Raise (2-3) on very long videos to cut SAM2 time."
         ),
     )
+    sam2_long_frames: int = Field(
+        default=18000,
+        description=(
+            "Videos with more frames than this use sam2_stride_long instead of sam2_stride "
+            "(SAM2 cost dominates long videos; ball coverage stays high via interpolation). "
+            "0 disables the adaptive bump."
+        ),
+    )
+    sam2_stride_long: int = Field(
+        default=2,
+        description="SAM2 stride applied when total_frames > sam2_long_frames.",
+    )
     sam2_chunk: int = Field(
         default=500,
         description=(

@@ -542,7 +542,17 @@ def run_pipeline(
                 _sam2_ckpt = sam2_checkpoint or _settings.sam2_checkpoint
                 _sam2_cfg = sam2_config or _settings.sam2_config
                 logger.info("SAM2 ball tracker checkpoint: %s", _sam2_ckpt)
-                sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg)
+                # Adaptive stride: long videos use a larger SAM2 stride (cost dominates;
+                # interpolation/Kalman keeps ball coverage high). Configurable thresholds.
+                _long_n = int(getattr(_settings, "sam2_long_frames", 0) or 0)
+                _eff_stride = None
+                if _long_n and total_frames > _long_n:
+                    _eff_stride = int(getattr(_settings, "sam2_stride_long", 2))
+                    logger.info(
+                        "SAM2 adaptive stride=%d (video %d frames > %d)",
+                        _eff_stride, total_frames, _long_n,
+                    )
+                sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg, stride=_eff_stride)
                 sam2_tracks = sam2.track(
                     input_video, ball_points, len(ball_tracks), actual_fps,
                     src_scale=_manual_src_scale,
@@ -736,6 +746,11 @@ def run_pipeline(
         "Hoop detection done (%d frames, %d with hoop)",
         len(hoop_tracks), sum(1 for h in hoop_tracks if h is not None),
     )
+    # Snapshot the AUTOMATIC detector coverage BEFORE any manual override replaces
+    # hoop_tracks (manual boxes are propagated to ~all frames). This is the honest
+    # "aros detectados" signal; manual coverage is conveyed separately by the
+    # configured-hoops count.
+    _hoop_auto_present: list[bool] = [h is not None for h in hoop_tracks]
 
     # ── Manual hoop override (boxes are trusted over the YOLO hoop detector) ─────
     # Each rim box carries the frame it was annotated on (frame_t × fps) and a
@@ -1178,6 +1193,7 @@ def run_pipeline(
         "steal_events": steal_events,
         # Per-frame hoop bbox (or None when not detected)
         "hoop_tracks": hoop_tracks,
+        "hoop_auto_present": _hoop_auto_present,   # YOLO auto-detection coverage (pre manual override)
         # Per-frame referee bboxes (negative track IDs to avoid collision)
         "referee_tracks": referee_tracks,
         # High-action frame windows from ball movement analysis [(start, end), ...]

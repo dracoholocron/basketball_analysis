@@ -38,10 +38,13 @@ _CKPT_URLS = {
 class Sam2BallTracker:
     def __init__(self, checkpoint: str, config: str, device: str = "cuda",
                  box_half: float = 18.0, max_ball_px: float = 60.0,
-                 chunk_size: int | None = None):
+                 chunk_size: int | None = None, stride: int | None = None):
         self.checkpoint = checkpoint
         self.config = config
         self.device = device
+        # Optional stride override (else settings.sam2_stride). Used for the adaptive
+        # long-video bump computed by the caller.
+        self.stride_override = stride
         # A ball at 720p is ~20-40px. Seed SAM2 with a small box around the click
         # (not a bare point) so it segments the ball, not the nearby player.
         self.box_half = box_half
@@ -122,7 +125,8 @@ class Sam2BallTracker:
         import cv2
         from utils.video_utils import iter_video_frames_prefetch
 
-        stride = max(1, int(getattr(settings, "sam2_stride", 1)))
+        stride = max(1, int(self.stride_override if self.stride_override is not None
+                            else getattr(settings, "sam2_stride", 1)))
         device = self.device if torch.cuda.is_available() else "cpu"
         results: list[dict] = [{} for _ in range(total_frames)]
         carry_box: list[float] | None = None

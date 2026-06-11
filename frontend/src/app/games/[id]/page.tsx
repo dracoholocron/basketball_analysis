@@ -873,11 +873,11 @@ export default function GameDetailPage() {
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 <div className="text-center">
                   <p className="text-3xl font-bold text-emerald-400">{cov}%</p>
-                  <p className="text-xs text-slate-400 mt-1">Frames con aro detectado</p>
+                  <p className="text-xs text-slate-400 mt-1">Detección automática</p>
                 </div>
                 <div className="text-center">
                   <p className="text-3xl font-bold text-emerald-400">{hf.toLocaleString()}</p>
-                  <p className="text-xs text-slate-400 mt-1">Frames detectados</p>
+                  <p className="text-xs text-slate-400 mt-1">Frames auto-detectados</p>
                 </div>
                 <div className="text-center">
                   <p className="text-3xl font-bold text-emerald-400">{cfg}</p>
@@ -885,7 +885,9 @@ export default function GameDetailPage() {
                 </div>
               </div>
               <p className="text-xs text-slate-500 mt-3">
-                Detección automática del aro por frame{cfg > 0 ? "; las canastas anotadas a mano sobrescriben al detector y mejoran el conteo de tiros" : " (anota el aro para mayor precisión en tiros)"}.
+                El % es la <strong>detección automática</strong> del aro (suele ser baja).{cfg > 0
+                  ? " Tienes canastas anotadas a mano: se propagan a todo el video y son las que usan el conteo de tiros (no dependen de este %)."
+                  : " Anota el aro para fijar la canasta en todo el video y mejorar el conteo de tiros (no depende de este %)."}
               </p>
             </div>
           );

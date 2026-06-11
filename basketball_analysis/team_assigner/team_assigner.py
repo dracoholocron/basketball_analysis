@@ -361,7 +361,9 @@ class TeamAssigner:
                     last_known[player_id] = self._vote(player_id, obs)
 
             for player_id, track in player_track.items():
-                frame_assignments[player_id] = last_known.get(player_id, 1)
+                # 0 = unknown (never classified). Don't default to team 1 — that floods
+                # team 1 with fragmented/short tracks and skews team-level stats.
+                frame_assignments[player_id] = last_known.get(player_id, 0)
             player_assignment.append(frame_assignments)
 
         logger.info("TeamAssigner: done — %d frames processed", total)
@@ -443,7 +445,9 @@ class TeamAssigner:
                         last_known[pid] = self._vote(pid, obs)
 
             for player_id in player_track:
-                frame_assignments[player_id] = last_known.get(player_id, 1)
+                # 0 = unknown (never classified); avoids defaulting fragmented tracks to
+                # team 1 (which skewed team-level stats on long videos).
+                frame_assignments[player_id] = last_known.get(player_id, 0)
             player_assignment.append(frame_assignments)
 
         logger.info(

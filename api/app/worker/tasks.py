@@ -422,7 +422,12 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         votes = team_votes.get(tid)
         if not votes:
             return None
-        return votes.most_common(1)[0][0]
+        # Ignore 0 = "unknown" votes; only fall back to None when a track never got a
+        # real (team 1/2) classification. Prevents unclassified tracks → team 1.
+        real = {t: c for t, c in votes.items() if t in (1, 2)}
+        if not real:
+            return None
+        return max(real, key=real.get)
 
     # Per-player: possession frames (frames where this track_id held the ball)
     possession_frames: dict[int, int] = defaultdict(int)
@@ -529,7 +534,7 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
     # Optional roster map: (team_id 1/2, dorsal) -> players.id
     roster_map = _build_roster_map(engine, j_uuid)
 
-    min_track_frames = int(float(os.getenv("BA_MIN_TRACK_SECONDS", "0.5")) * fps)
+    min_track_frames = int(float(os.getenv("BA_MIN_TRACK_SECONDS", "1.0")) * fps)
     dropped_short = 0
     player_rows: list[PlayerMetric] = []
     ordinal = 0
@@ -564,10 +569,14 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         present = sum(int(frames_present.get(t, 0)) for t in members)
         minutes = (present / fps) / 60.0 if fps else 0.0
 
-        # Drop provisional (no-dorsal) identities seen too briefly — these are
-        # detection blips / partial occlusions, not real players. Identities with a
-        # confident dorsal are always kept.
-        if dorsal is None and present < min_track_frames:
+        # Drop provisional (no-dorsal) identities that are noise: seen too briefly, OR
+        # never classified into a team (team is None → never on a decoded frame, i.e. a
+        # blip) AND with zero activity. Identities with a confident dorsal are always
+        # kept. This curbs the identity inflation seen on long videos.
+        no_activity = (poss + pmade + imade + shots + rebs + steals) == 0
+        if dorsal is None and (
+            present < min_track_frames or (team is None and no_activity)
+        ):
             dropped_short += 1
             continue
 
@@ -604,7 +613,9 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
 
     # Build FrameMetric rows with ball_holder_team resolved per frame
     # Force all values to native Python int — numpy.int64 breaks psycopg2
-    hoop_tracks: list = metrics.get("hoop_tracks", []) or []
+    # hoop_present = AUTOMATIC detector coverage (pre manual override) → honest "aros
+    # detectados"; manual annotation coverage is shown via the configured-hoops count.
+    hoop_auto: list = metrics.get("hoop_auto_present") or metrics.get("hoop_tracks", []) or []
     frame_rows: list[FrameMetric] = []
     for frame_idx in range(int(total_frames)):
         raw_holder = ball_acquisition[frame_idx] if frame_idx < len(ball_acquisition) else -1
@@ -626,7 +637,7 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
                 frame_number=int(frame_idx),
                 ball_holder_track_id=int(holder_id) if holder_id != -1 else None,
                 ball_holder_team=int(holder_team) if holder_team is not None else None,
-                hoop_present=bool(frame_idx < len(hoop_tracks) and hoop_tracks[frame_idx]),
+                hoop_present=bool(frame_idx < len(hoop_auto) and hoop_auto[frame_idx]),
             )
         )
 
