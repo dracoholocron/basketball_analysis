@@ -817,7 +817,7 @@ def run_pipeline(
                 pose_sequence, ball_tracks, player_tracks, rim_sequence=hoop_tracks
             )
             steal_events = StealTurnoverDetector().process_sequence(
-                pose_sequence, ball_tracks, player_assignment
+                pose_sequence, ball_tracks, player_assignment, rim_sequence=hoop_tracks
             )
             save_stub(_event_stub, {
                 "shot_events": shot_events,

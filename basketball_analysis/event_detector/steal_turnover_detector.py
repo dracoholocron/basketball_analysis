@@ -28,8 +28,9 @@ try:
 except Exception:
     _CONF = 0.12
 _WRIST_TO_BALL_PX = 70     # max wrist-to-ball distance to consider contact
-_MIN_HOLD_FRAMES = 3       # consecutive frames of contact to confirm possession
-_COOLDOWN_FRAMES = 30      # ~1s at 30fps — min gap between steal events
+_MIN_HOLD_FRAMES = 6       # consecutive frames of contact to confirm possession (~0.4s)
+_COOLDOWN_FRAMES = 90      # ~3s at 30fps — min gap between steal events
+_RIM_PROXIMITY_FACTOR = 3.0  # possession changes within N·rim-width of a rim are NOT steals
 
 
 class StealTurnoverDetector:
@@ -51,10 +52,12 @@ class StealTurnoverDetector:
         wrist_ball_px: float = _WRIST_TO_BALL_PX,
         min_hold_frames: int = _MIN_HOLD_FRAMES,
         cooldown_frames: int = _COOLDOWN_FRAMES,
+        rim_proximity_factor: float = _RIM_PROXIMITY_FACTOR,
     ) -> None:
         self.wrist_ball_px = wrist_ball_px
         self.min_hold_frames = min_hold_frames
         self.cooldown_frames = cooldown_frames
+        self.rim_proximity_factor = rim_proximity_factor
         self._candidate: Optional[int] = None      # nearest-wrist player this run
         self._candidate_streak: int = 0
         self._confirmed: Optional[int] = None       # last confirmed possessor
@@ -67,6 +70,7 @@ class StealTurnoverDetector:
         pose_frame: dict[int, np.ndarray],
         ball_tracks: dict,
         team_of: Optional[dict] = None,
+        rim_box: Optional[list] = None,
     ) -> list[dict]:
         ball_center = _ball_center(ball_tracks)
         new_events: list[dict] = []
@@ -103,6 +107,7 @@ class StealTurnoverDetector:
                 and new_possessor != self._confirmed
                 and frame_idx - self._last_event_frame >= self.cooldown_frames
                 and _is_opposing(team_of, new_possessor, self._confirmed)
+                and not _near_rim(ball_center, rim_box, self.rim_proximity_factor)
             ):
                 event = {
                     "type": "steal",
@@ -122,6 +127,7 @@ class StealTurnoverDetector:
         pose_sequence: list[dict[int, np.ndarray]],
         ball_sequence: list[dict],
         player_assignment: Optional[list[dict]] = None,
+        rim_sequence: Optional[list] = None,
     ) -> list[dict]:
         self._candidate = None
         self._candidate_streak = 0
@@ -134,7 +140,8 @@ class StealTurnoverDetector:
                 if player_assignment is not None and i < len(player_assignment)
                 else None
             )
-            self.update(i, pose_frame, ball_tracks, team_of)
+            rim_box = rim_sequence[i] if (rim_sequence is not None and i < len(rim_sequence)) else None
+            self.update(i, pose_frame, ball_tracks, team_of, rim_box=rim_box)
         return list(self._events)
 
     @property
@@ -155,6 +162,17 @@ def _is_opposing(team_of: Optional[dict], a: int, b: int) -> bool:
     if ta is None or tb is None:
         return False
     return ta != tb
+
+
+def _near_rim(center: Optional[tuple], rim_box: Optional[list], factor: float = 3.0) -> bool:
+    """True if the ball is within factor·rim-width of the rim → likely a shot/rebound,
+    not a steal. No-op (False) when no rim box is available for the frame."""
+    if center is None or not rim_box or len(rim_box) < 4:
+        return False
+    rcx = (rim_box[0] + rim_box[2]) / 2.0
+    rcy = (rim_box[1] + rim_box[3]) / 2.0
+    rim_w = max(1.0, rim_box[2] - rim_box[0])
+    return ((center[0] - rcx) ** 2 + (center[1] - rcy) ** 2) ** 0.5 <= factor * rim_w
 
 
 def _ball_center(ball_tracks: dict) -> Optional[tuple[float, float]]:
