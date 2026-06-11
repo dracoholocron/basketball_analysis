@@ -48,4 +48,7 @@ class GameMetrics(BaseModel):
     team2_rebounds: int = 0
     team1_steals_cv: int = 0
     team2_steals_cv: int = 0
+    hoop_detected_frames: int = 0      # frames where the detector located a hoop/rim
+    hoops_configured: int = 0          # distinct manually-annotated hoops (rim boxes)
+    hoops_with_backboard: int = 0      # of those, how many also have a backboard box
     players: list[PlayerMetricRead]

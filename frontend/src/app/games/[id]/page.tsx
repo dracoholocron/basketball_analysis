@@ -62,6 +62,9 @@ interface Metrics {
   team2_shots_attempted?: number;
   team1_shots_made?: number;
   team2_shots_made?: number;
+  hoop_detected_frames?: number;
+  hoops_configured?: number;
+  hoops_with_backboard?: number;
   players: PlayerMetric[];
 }
 
@@ -853,6 +856,40 @@ export default function GameDetailPage() {
             </p>
           </div>
         )}
+
+        {/* Hoops detected / configured */}
+        {metrics && (() => {
+          const tf = metrics.total_frames || 0;
+          const hf = metrics.hoop_detected_frames ?? 0;
+          const cov = tf > 0 ? Math.round((100 * hf) / tf) : 0;
+          const cfg = metrics.hoops_configured ?? 0;
+          const bb = metrics.hoops_with_backboard ?? 0;
+          if (hf === 0 && cfg === 0) return null;
+          return (
+            <div className="bg-slate-800 rounded-xl p-5">
+              <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                <Crosshair size={16} className="text-emerald-400" /> Aros
+              </h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-emerald-400">{cov}%</p>
+                  <p className="text-xs text-slate-400 mt-1">Frames con aro detectado</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-emerald-400">{hf.toLocaleString()}</p>
+                  <p className="text-xs text-slate-400 mt-1">Frames detectados</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-emerald-400">{cfg}</p>
+                  <p className="text-xs text-slate-400 mt-1">Canastas anotadas{bb > 0 ? ` (${bb} c/ tablero)` : ""}</p>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mt-3">
+                Detección automática del aro por frame{cfg > 0 ? "; las canastas anotadas a mano sobrescriben al detector y mejoran el conteo de tiros" : " (anota el aro para mayor precisión en tiros)"}.
+              </p>
+            </div>
+          );
+        })()}
 
         {/* Tabs */}
         <div className="flex gap-1 bg-slate-800 p-1 rounded-lg w-fit">

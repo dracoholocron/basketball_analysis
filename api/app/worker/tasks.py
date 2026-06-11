@@ -604,6 +604,7 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
 
     # Build FrameMetric rows with ball_holder_team resolved per frame
     # Force all values to native Python int — numpy.int64 breaks psycopg2
+    hoop_tracks: list = metrics.get("hoop_tracks", []) or []
     frame_rows: list[FrameMetric] = []
     for frame_idx in range(int(total_frames)):
         raw_holder = ball_acquisition[frame_idx] if frame_idx < len(ball_acquisition) else -1
@@ -625,6 +626,7 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
                 frame_number=int(frame_idx),
                 ball_holder_track_id=int(holder_id) if holder_id != -1 else None,
                 ball_holder_team=int(holder_team) if holder_team is not None else None,
+                hoop_present=bool(frame_idx < len(hoop_tracks) and hoop_tracks[frame_idx]),
             )
         )
 
