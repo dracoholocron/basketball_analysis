@@ -117,7 +117,12 @@ class TeamAssigner:
         return result
 
     def _image_embedding_batch(self, crops: list[np.ndarray]) -> list[np.ndarray | None]:
-        """Batch CLIP IMAGE embeddings (L2-normalized). None for empty crops."""
+        """Batch CLIP IMAGE embeddings (L2-normalized). None for empty crops.
+
+        Uses the same full-forward call shape as the (working) text path and reads
+        ``outputs.image_embeds`` — robust across transformers versions where
+        ``get_image_features`` returns an output object instead of a tensor.
+        """
         result: list[np.ndarray | None] = [None] * len(crops)
         valid_indices = [i for i, c in enumerate(crops) if c.size > 0]
         if not valid_indices:
@@ -128,10 +133,14 @@ class TeamAssigner:
                 Image.fromarray(cv2.cvtColor(crops[i], cv2.COLOR_BGR2RGB))
                 for i in valid_indices
             ]
-            inputs = self._processor(images=pil_images, return_tensors="pt")
+            classes = [self.team_1_class_name, self.team_2_class_name]
+            inputs = self._processor(
+                text=classes, images=pil_images, return_tensors="pt", padding=True
+            )
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
             with torch.no_grad():
-                feats = self._model.get_image_features(**inputs)
+                outputs = self._model(**inputs)
+            feats = outputs.image_embeds  # [N, dim], CLIP image projection space
             feats = feats / feats.norm(dim=-1, keepdim=True)
             feats_np = feats.cpu().numpy()
             for j, i in enumerate(valid_indices):
