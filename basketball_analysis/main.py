@@ -355,6 +355,7 @@ def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[
     - both present & disagree → use SAM2 (anchored to user clicks, trustworthy
       for off-domain balls).
     """
+    from configs.settings import settings as _settings
     n = len(yolo_tracks)
     sam2_primary = bool(getattr(_settings, "ball_sam2_primary", True))
     out: list[dict] = []
@@ -395,6 +396,7 @@ def _gate_yolo_ball(ball_tracks: list[dict]) -> tuple[list[dict], int]:
     """Drop implausible YOLO ball boxes (false positives): too large/small or non-square
     for a ball at 720p. Returns (filtered_tracks, dropped_count). Thresholds via settings.
     Mirrors the size/aspect checks SAM2 applies to its masks."""
+    from configs.settings import settings as _settings
     max_px = float(getattr(_settings, "ball_plausible_max_px", 70.0))
     min_px = float(getattr(_settings, "ball_plausible_min_px", 4.0))
     min_aspect = float(getattr(_settings, "ball_plausible_aspect", 0.4))
