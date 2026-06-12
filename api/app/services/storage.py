@@ -14,11 +14,16 @@ from pathlib import Path
 from typing import BinaryIO
 
 import boto3
+from botocore.client import Config
 from botocore.exceptions import ClientError
 
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Path-style addressing (bucket in the path, not the host) — required for MinIO and for
+# a public S3 domain (virtual-host style would become bucket.s3.domain, which breaks).
+_S3_CONFIG = Config(s3={"addressing_style": "path"})
 
 
 class StorageService:
@@ -28,7 +33,21 @@ class StorageService:
             endpoint_url=f"{'https' if settings.minio_secure else 'http'}://{settings.minio_endpoint}",
             aws_access_key_id=settings.minio_access_key,
             aws_secret_access_key=settings.minio_secret_key,
+            config=_S3_CONFIG,
         )
+        # Separate client bound to the PUBLIC endpoint, used only to SIGN browser-facing
+        # presigned URLs so the signature matches the host the browser actually hits.
+        # Falls back to the internal client when no distinct public endpoint is set.
+        if settings.minio_public_endpoint and settings.minio_public_endpoint != settings.minio_endpoint:
+            self._public_client = boto3.client(
+                "s3",
+                endpoint_url=f"{'https' if settings.minio_public_secure else 'http'}://{settings.minio_public_endpoint}",
+                aws_access_key_id=settings.minio_access_key,
+                aws_secret_access_key=settings.minio_secret_key,
+                config=_S3_CONFIG,
+            )
+        else:
+            self._public_client = self._client
         self._ensure_buckets()
 
     def _ensure_buckets(self) -> None:
@@ -86,22 +105,16 @@ class StorageService:
     ) -> str:
         """Generate a presigned GET URL.
 
-        When *public=True*, the internal docker hostname in the URL is replaced
-        with ``settings.minio_public_endpoint`` so the URL is reachable from
-        outside the Docker network (e.g. a browser).
+        When *public=True*, the URL is signed with the PUBLIC-endpoint client so it is
+        reachable from a browser AND its SigV4 signature is valid for that host (no
+        fragile host string-replacement, which breaks the signature over HTTPS/a domain).
         """
-        url = self._client.generate_presigned_url(
+        client = self._public_client if public else self._client
+        return client.generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": key},
             ExpiresIn=expiry,
         )
-        if public:
-            url = url.replace(
-                settings.minio_endpoint,
-                settings.minio_public_endpoint,
-                1,
-            )
-        return url
 
     def delete_object(self, bucket: str, key: str) -> None:
         self._client.delete_object(Bucket=bucket, Key=key)

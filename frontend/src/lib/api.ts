@@ -1,7 +1,12 @@
 import axios from "axios";
 import Cookies from "js-cookie";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Default to SAME-ORIGIN ("" → relative "/api/v1") so a production build without an
+// explicit NEXT_PUBLIC_API_URL still works behind the reverse proxy (Caddy routes
+// /api/* to the API on the same domain). Avoids the bundle being pinned to
+// http://localhost:8000 (which triggers Chrome's Private Network Access prompt and
+// breaks login on other devices). Docker dev sets NEXT_PUBLIC_API_URL=http://localhost:8000.
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export const api = axios.create({
   baseURL: `${BASE_URL}/api/v1`,

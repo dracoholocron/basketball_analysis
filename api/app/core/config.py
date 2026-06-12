@@ -27,9 +27,11 @@ class APISettings(BaseSettings):
 
     # MinIO / S3
     minio_endpoint: str = Field(default="minio:9000")
-    # Public endpoint used to rewrite presigned URLs for browser access.
-    # Should be set to the hostname:port accessible from the user's browser.
+    # Public endpoint (host[:port]) reachable from the user's browser. Presigned
+    # download URLs are SIGNED against this endpoint (not string-replaced), so the
+    # signature stays valid over HTTPS/a real domain. Prod: e.g. s3.basketai.dracoteck.com
     minio_public_endpoint: str = Field(default="localhost:9000")
+    minio_public_secure: bool = Field(default=False)  # True → presigned URLs use https
     minio_access_key: str = Field(default="minioadmin")
     minio_secret_key: str = Field(default="minioadmin")
     minio_bucket_videos: str = Field(default="videos")

@@ -1,21 +1,8 @@
-# Replace {$DOMAIN} with your actual domain or set the DOMAIN env variable
+# Set DOMAIN (e.g. basketai.dracoteck.com). Caddy auto-provisions TLS for it and the
+# s3.<DOMAIN> subdomain. Point both A records at this host.
 {$DOMAIN:localhost} {
 
-    # Frontend (Next.js)
-    handle / {
-        reverse_proxy frontend:3000
-    }
-    handle /games* {
-        reverse_proxy frontend:3000
-    }
-    handle /login* {
-        reverse_proxy frontend:3000
-    }
-    handle /_next/* {
-        reverse_proxy frontend:3000
-    }
-
-    # API
+    # ── API (match these prefixes FIRST) ─────────────────────────────────────
     handle /api/* {
         reverse_proxy api:8000
     }
@@ -28,4 +15,20 @@
     handle /redoc* {
         reverse_proxy api:8000
     }
+    handle /openapi.json {
+        reverse_proxy api:8000
+    }
+
+    # ── Frontend (Next.js) — catch-all for every other path ──────────────────
+    # Covers /, /login, /games/*, /admin/*, /players/*, /teams/*, /_next/*, etc.
+    handle {
+        reverse_proxy frontend:3000
+    }
+}
+
+# ── MinIO (S3) — public endpoint for browser-facing presigned URLs ───────────
+# Videos/outputs are served via presigned URLs signed for this host. Set
+# BA_MINIO_PUBLIC_ENDPOINT=s3.<DOMAIN> and BA_MINIO_PUBLIC_SECURE=true on the API.
+s3.{$DOMAIN:localhost} {
+    reverse_proxy minio:9000
 }
