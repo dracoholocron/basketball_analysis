@@ -28,6 +28,8 @@ class BallPoint(BaseModel):
     frame_t: float = 0.0          # seconds in the video
     pixel: list[float]            # [x, y] in intrinsic video resolution
     visible: bool = True          # False = ball NOT present in this frame
+    negative: bool = False        # True = this pixel is a WRONG object (not the ball);
+                                  # fed to SAM2 as a label-0 rejection prompt
 
     @field_validator("pixel")
     @classmethod
@@ -45,6 +47,7 @@ class BallAnnotationRead(BaseModel):
     id: uuid.UUID
     game_id: uuid.UUID
     points: Optional[list] = None
+    flagged: Optional[list] = None   # [{start_s,end_s,reason}] from the last analysis
 
     model_config = {"from_attributes": True}
 

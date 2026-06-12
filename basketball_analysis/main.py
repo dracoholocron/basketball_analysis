@@ -413,6 +413,69 @@ def _gate_yolo_ball(ball_tracks: list[dict]) -> tuple[list[dict], int]:
     return ball_tracks, dropped
 
 
+def _flag_ball_segments(ball_tracks: list[dict], ball_source: list[str],
+                        fps: float) -> list[dict]:
+    """Auto-flag suspect SAM2 segments (drift candidates: shoe/chair latch-on) for
+    human review in the annotate-ball UI. Heuristics over sam2-sourced frames only:
+      - jump:   center snaps > ~120px between consecutive sam2 frames (drift onset)
+      - size:   box side deviates >2.2x from the median sam2 ball size
+      - static: box stays within ~12px for > ~6s (a chair/shoe parks; review it)
+    Flags are SUGGESTIONS (nothing is deleted); merged into [{start_s,end_s,reason}].
+    """
+    pts = []   # (frame, cx, cy, side)
+    for i, (bt, src) in enumerate(zip(ball_tracks, ball_source)):
+        if src != "sam2":
+            continue
+        box = bt.get(1, {}).get("bbox", [])
+        if len(box) < 4:
+            continue
+        pts.append((i, (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0,
+                    max(abs(box[2] - box[0]), abs(box[3] - box[1]))))
+    if len(pts) < 10:
+        return []
+
+    sides = sorted(p[3] for p in pts)
+    med_side = sides[len(sides) // 2] or 1.0
+    sus: set[int] = set()
+
+    for k in range(1, len(pts)):
+        f0, x0, y0, _ = pts[k - 1]
+        f1, x1, y1, s1 = pts[k]
+        gap = max(1, f1 - f0)
+        if gap <= 5 and ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5 > 130:
+            sus.add(f1)                                    # drift-onset snap
+        if s1 > 2.2 * med_side or s1 < med_side / 2.2:
+            sus.add(f1)                                    # implausible size
+
+    # static: sliding check — same spot for > 6s
+    win = int(6 * fps)
+    j = 0
+    for k in range(len(pts)):
+        while pts[k][0] - pts[j][0] > win:
+            j += 1
+        if pts[k][0] - pts[j][0] >= win:
+            xs = [p[1] for p in pts[j:k + 1]]
+            ys = [p[2] for p in pts[j:k + 1]]
+            if (max(xs) - min(xs)) < 12 and (max(ys) - min(ys)) < 12:
+                sus.update(p[0] for p in pts[j:k + 1])
+
+    if not sus:
+        return []
+    # Merge suspect frames into segments (≤1s apart), cap the list for the UI.
+    ordered = sorted(sus)
+    segs: list[dict] = []
+    start = prev = ordered[0]
+    for f in ordered[1:]:
+        if f - prev > int(fps):
+            segs.append({"start_s": round(start / fps, 2), "end_s": round(prev / fps, 2),
+                         "reason": "posible objeto incorrecto (drift de SAM2)"})
+            start = f
+        prev = f
+    segs.append({"start_s": round(start / fps, 2), "end_s": round(prev / fps, 2),
+                 "reason": "posible objeto incorrecto (drift de SAM2)"})
+    return segs[:20]
+
+
 def _tag_ball_sources(tracks: list[dict], source: list[str], label: str) -> None:
     """After a ball stage, attribute frames newly given a ball to ``label`` (yolo/sam2/
     sahi/kalman/interp) and clear frames that lost the ball. In-place on ``source``."""
@@ -663,6 +726,13 @@ def run_pipeline(
             _bsrc.get("kalman", 0), _bsrc.get("interp", 0),
             sum(1 for s in ball_source if not s), len(ball_source),
         )
+        ball_flagged_segments = _flag_ball_segments(ball_tracks, ball_source, actual_fps)
+        if ball_flagged_segments:
+            logger.info(
+                "Ball review flags: %d suspect segment(s): %s",
+                len(ball_flagged_segments),
+                ", ".join(f"{s['start_s']:.0f}-{s['end_s']:.0f}s" for s in ball_flagged_segments),
+            )
 
         _progress("team_assignment", 55)
         team_assigner = TeamAssigner(
@@ -756,9 +826,17 @@ def run_pipeline(
         )
         logger.info("Court keypoints done")
 
+        # Source attribution mirrors the streaming branch (yolo → kalman/interp); the
+        # legacy path has no SAM2/SAHI stages.
+        ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
         ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "")
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "kalman")
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "interp")
+        from collections import Counter as _Counter
+        ball_flagged_segments: list[dict] = []
 
         _progress("team_assignment", 55)
         team_assigner = TeamAssigner(
@@ -1290,6 +1368,7 @@ def run_pipeline(
         "hoop_auto_present": _hoop_auto_present,   # YOLO auto-detection coverage (pre manual override)
         "ball_source_counts": dict(_Counter(s for s in ball_source if s)),  # yolo/sam2/sahi/kalman/interp
         "ball_total_frames": len(ball_source),
+        "ball_flagged_segments": ball_flagged_segments,   # SAM2 drift candidates for review
         # Per-frame referee bboxes (negative track IDs to avoid collision)
         "referee_tracks": referee_tracks,
         # High-action frame windows from ball movement analysis [(start, end), ...]

@@ -186,12 +186,20 @@ export interface BallPoint {
   frame_t: number;
   pixel: [number, number];   // intrinsic video resolution
   visible: boolean;          // false = ball NOT present in this frame
+  negative?: boolean;        // true = WRONG object (not the ball) — SAM2 rejection prompt
+}
+
+export interface BallFlaggedSegment {
+  start_s: number;
+  end_s: number;
+  reason: string;
 }
 
 export interface BallAnnotation {
   id: string;
   game_id: string;
   points: BallPoint[] | null;
+  flagged?: BallFlaggedSegment[] | null;  // SAM2 drift candidates from the last analysis
 }
 
 export async function getBallAnnotation(gameId: string): Promise<BallAnnotation | null> {

@@ -118,11 +118,19 @@ class Sam2BallTracker:
 
         # Group seed clicks by frame index; collect "not visible" frames to blank.
         seeds: dict[int, list[tuple[float, float]]] = {}
+        negatives: dict[int, list[tuple[float, float]]] = {}   # "NOT the ball" clicks
         not_visible: set[int] = set()
         for p in ball_points:
             fi = int(round(float(p.get("frame_t", 0.0)) * fps))
             fi = max(0, min(total_frames - 1, fi))
-            if p.get("visible", True):
+            if p.get("negative"):
+                # User marked a wrongly-tracked object (shoe, chair…): feed SAM2 a
+                # label-0 point there so its memory rejects that object.
+                px = p.get("pixel") or [0, 0]
+                negatives.setdefault(fi, []).append(
+                    (float(px[0]) * src_scale, float(px[1]) * src_scale)
+                )
+            elif p.get("visible", True):
                 px = p["pixel"]
                 seeds.setdefault(fi, []).append(
                     (float(px[0]) * src_scale, float(px[1]) * src_scale)
@@ -131,6 +139,9 @@ class Sam2BallTracker:
                 not_visible.add(fi)
         if not seeds:
             return None
+        if negatives:
+            logger.info("SAM2 ball: %d negative (wrong-object) clicks",
+                        sum(len(v) for v in negatives.values()))
 
         import gc
         import queue
@@ -205,6 +216,21 @@ class Sam2BallTracker:
                         points=np.array([[cx, cy]], dtype=np.float32),
                         labels=np.array([1], dtype=np.int32),
                     )
+                # Negative refinement clicks in this chunk: label-0 points telling SAM2
+                # "this object is NOT the ball" (rejects drift onto shoes/chairs). Only
+                # valid once the object exists (positive seeds above).
+                for fi, pts in negatives.items():
+                    if lo <= fi <= hi:
+                        li = min(len(src_idx) - 1, max(0, round((fi - lo) / stride)))
+                        for (nx, ny) in pts:
+                            try:
+                                predictor.add_new_points_or_box(
+                                    inference_state=state, frame_idx=li, obj_id=1,
+                                    points=np.array([[nx, ny]], dtype=np.float32),
+                                    labels=np.array([0], dtype=np.int32),
+                                )
+                            except Exception as exc:
+                                logger.debug("SAM2 negative click skipped (f%d): %s", fi, exc)
                 for reverse in (False, True):
                     if reverse and first_local == 0:
                         continue

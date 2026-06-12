@@ -10,10 +10,13 @@ import {
   getGameVideoUrl,
   putBallAnnotation,
   type BallPoint,
+  type BallFlaggedSegment,
 } from "@/lib/api";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
+  Ban,
   Camera,
   CheckCircle2,
   EyeOff,
@@ -27,7 +30,8 @@ import {
 } from "lucide-react";
 import { clsx } from "clsx";
 
-const BALL_COLOR = "#f97316"; // orange
+const BALL_COLOR = "#f97316";  // orange — the ball
+const WRONG_COLOR = "#ef4444"; // red — wrong object (negative prompt)
 
 function fmtTime(s: number) {
   const m = Math.floor(s / 60);
@@ -53,6 +57,8 @@ export default function AnnotateBallPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [points, setPoints] = useState<BallPoint[]>([]);
+  const [mode, setMode] = useState<"ball" | "wrong">("ball");
+  const [flagged, setFlagged] = useState<BallFlaggedSegment[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -68,6 +74,7 @@ export default function AnnotateBallPage() {
     getBallAnnotation(id)
       .then((ann) => {
         if (ann?.points && ann.points.length > 0) setPoints(ann.points);
+        if (ann?.flagged && ann.flagged.length > 0) setFlagged(ann.flagged);
       })
       .catch(() => null);
     getGameVideoUrl(id)
@@ -92,18 +99,27 @@ export default function AnnotateBallPage() {
     points
       .filter((p) => Math.abs(p.frame_t - currentTime) < 0.4)
       .forEach((p) => {
-        if (!p.visible) return; // negatives have no on-screen position
+        if (!p.visible && !p.negative) return; // "not visible" has no on-screen position
         const x = cr.x + (video.videoWidth ? p.pixel[0] / video.videoWidth * cr.w : 0);
         const y = cr.y + (video.videoHeight ? p.pixel[1] / video.videoHeight * cr.h : 0);
+        const color = p.negative ? WRONG_COLOR : BALL_COLOR;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.arc(x, y, 10, 0, Math.PI * 2);
-        ctx.strokeStyle = BALL_COLOR;
-        ctx.lineWidth = 2.5;
         ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = BALL_COLOR;
-        ctx.fill();
+        if (p.negative) {
+          // X mark: "this object is NOT the ball"
+          ctx.beginPath();
+          ctx.moveTo(x - 6, y - 6); ctx.lineTo(x + 6, y + 6);
+          ctx.moveTo(x + 6, y - 6); ctx.lineTo(x - 6, y + 6);
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+        }
       });
   }, [points, currentTime]);
 
@@ -119,8 +135,13 @@ export default function AnnotateBallPage() {
     const frame_t = v.currentTime ?? 0;
 
     setPoints((prev) => {
-      const i = prev.findIndex((p) => Math.abs(p.frame_t - frame_t) < 0.4);
-      const pt: BallPoint = { frame_t, pixel: [x, y], visible: true };
+      const isNeg = mode === "wrong";
+      const pt: BallPoint = { frame_t, pixel: [x, y], visible: true, negative: isNeg };
+      // Positives and negatives coexist on the same frame (ball here + wrong object
+      // there); replace only a point of the SAME kind near this time.
+      const i = prev.findIndex(
+        (p) => Math.abs(p.frame_t - frame_t) < 0.4 && !!p.negative === isNeg,
+      );
       if (i >= 0) {
         const next = [...prev];
         next[i] = pt;
@@ -128,7 +149,7 @@ export default function AnnotateBallPage() {
       }
       return [...prev, pt].sort((a, b) => a.frame_t - b.frame_t);
     });
-  }, []);
+  }, [mode]);
 
   const markNotVisible = () => {
     const v = videoRef.current;
@@ -178,7 +199,8 @@ export default function AnnotateBallPage() {
     }
   };
 
-  const visibleCount = points.filter((p) => p.visible).length;
+  const visibleCount = points.filter((p) => p.visible && !p.negative).length;
+  const negativeCount = points.filter((p) => p.negative).length;
 
   return (
     <AppShell>
@@ -280,23 +302,69 @@ export default function AnnotateBallPage() {
                   </span>
                 </div>
                 <VideoControls videoRef={videoRef} />
-                <button
-                  onClick={markNotVisible}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs"
-                >
-                  <EyeOff size={13} /> Balón no visible en este frame
-                </button>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs text-slate-400">Clic marca:</span>
+                  <div className="flex items-center gap-1 bg-slate-900 rounded-lg p-1">
+                    <button onClick={() => setMode("ball")}
+                      className={clsx("flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors",
+                        mode === "ball" ? "bg-orange-600 text-white" : "text-slate-400 hover:text-white")}>
+                      <Target size={12} /> Balón
+                    </button>
+                    <button onClick={() => setMode("wrong")}
+                      title="Marca un objeto que SAM2 rastreó por error (zapato, silla…): le dice al modelo que eso NO es el balón"
+                      className={clsx("flex items-center gap-1.5 px-3 py-1 text-xs rounded-md transition-colors",
+                        mode === "wrong" ? "bg-red-600 text-white" : "text-slate-400 hover:text-white")}>
+                      <Ban size={12} /> Objeto incorrecto
+                    </button>
+                  </div>
+                  <button
+                    onClick={markNotVisible}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs"
+                  >
+                    <EyeOff size={13} /> Balón no visible en este frame
+                  </button>
+                </div>
               </div>
             )}
           </div>
 
-          {/* Sidebar — marks list */}
+          {/* Sidebar — review flags + marks list */}
           <div className="w-72 shrink-0 flex flex-col gap-4">
+            {flagged.length > 0 && (
+              <div className="bg-amber-900/20 rounded-xl border border-amber-700/40 p-4 space-y-2">
+                <h2 className="text-sm font-semibold text-amber-300 flex items-center gap-2">
+                  <AlertTriangle size={14} /> Segmentos a revisar ({flagged.length})
+                </h2>
+                <p className="text-[11px] text-amber-200/70">
+                  Posible drift de SAM2 (objeto incorrecto) en el último análisis. Salta al
+                  momento, y si rastreó algo que no es el balón, márcalo con
+                  <strong> Objeto incorrecto</strong> (y re-marca el balón si se ve).
+                </p>
+                <ul className="space-y-1">
+                  {flagged.map((s, i) => (
+                    <li key={i}>
+                      <button
+                        className="w-full text-left text-xs px-2 py-1.5 rounded-lg bg-amber-900/30 hover:bg-amber-800/40 text-amber-100"
+                        onClick={() => {
+                          if (videoRef.current) {
+                            videoRef.current.pause();
+                            videoRef.current.currentTime = s.start_s;
+                            setCurrentTime(s.start_s);
+                          }
+                        }}
+                      >
+                        ▶ {fmtTime(s.start_s)} – {fmtTime(s.end_s)}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3 flex-1 overflow-y-auto">
               <h2 className="text-sm font-semibold text-white flex items-center gap-2">
                 <Target size={14} /> Marcas del balón
                 <span className="ml-auto text-xs font-normal text-slate-400">
-                  {visibleCount} vis · {points.length - visibleCount} no
+                  {visibleCount} balón · {negativeCount} incorr. · {points.length - visibleCount - negativeCount} no vis
                 </span>
               </h2>
               {points.length === 0 ? (
@@ -312,7 +380,7 @@ export default function AnnotateBallPage() {
                     >
                       <span
                         className="w-2.5 h-2.5 rounded-full shrink-0"
-                        style={{ backgroundColor: p.visible ? BALL_COLOR : "#64748b" }}
+                        style={{ backgroundColor: p.negative ? WRONG_COLOR : p.visible ? BALL_COLOR : "#64748b" }}
                       />
                       <div className="flex-1 min-w-0">
                         <button
@@ -327,7 +395,11 @@ export default function AnnotateBallPage() {
                           {p.frame_t.toFixed(1)}s
                         </button>
                         <div className="text-slate-400">
-                          {p.visible ? `[${Math.round(p.pixel[0])}, ${Math.round(p.pixel[1])}]` : "no visible"}
+                          {p.negative
+                            ? "objeto incorrecto"
+                            : p.visible
+                            ? `[${Math.round(p.pixel[0])}, ${Math.round(p.pixel[1])}]`
+                            : "no visible"}
                         </div>
                       </div>
                       <button

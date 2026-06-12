@@ -649,7 +649,8 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         )
 
     with Session(engine) as db:
-        if db.get(Job, j_uuid) is None:
+        job_row = db.get(Job, j_uuid)
+        if job_row is None:
             logger.warning(
                 "Job %s vanished before metrics persist — skipping %d player rows",
                 job_id, len(player_rows),
@@ -659,6 +660,17 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         batch_size = 1000
         for i in range(0, len(frame_rows), batch_size):
             db.bulk_save_objects(frame_rows[i : i + batch_size])
+
+        # Persist SAM2 drift review-flags to the game's ball annotation (shown in the
+        # annotate-ball UI as "segmentos a revisar"). Overwrites previous run's flags.
+        flagged = metrics.get("ball_flagged_segments")
+        if flagged is not None and job_row.game_id is not None:
+            ball_ann = db.query(BallAnnotation).filter(
+                BallAnnotation.game_id == job_row.game_id
+            ).one_or_none()
+            if ball_ann is not None:
+                ball_ann.flagged = flagged
+                logger.info("Ball review flags persisted: %d segment(s)", len(flagged))
         db.commit()
     logger.info(
         "Persisted %d player metrics, %d frame metrics", len(player_rows), total_frames
