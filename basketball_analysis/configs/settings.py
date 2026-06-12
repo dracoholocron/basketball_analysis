@@ -183,6 +183,32 @@ class EngineSettings(BaseSettings):
         default=True,
         description="Apply a constant-velocity Kalman filter to smooth/predict the ball",
     )
+    ball_draw_predicted: bool = Field(
+        default=False,
+        description=(
+            "Draw the ball on frames filled only by Kalman/interp prediction (no real "
+            "detection). Default False → the ball is shown ONLY where YOLO/SAM2/SAHI "
+            "actually saw it (no phantom balls). Tracks still keep predicted positions "
+            "for metrics; this only controls the drawn video."
+        ),
+    )
+    ball_sam2_primary: bool = Field(
+        default=True,
+        description=(
+            "Fusion mode: trust SAM2 wherever it has the ball; YOLO only fills SAM2 gaps. "
+            "Curbs YOLO false positives over/near the real ball. False = legacy fusion "
+            "(agree→YOLO, disagree→SAM2)."
+        ),
+    )
+    ball_plausible_max_px: float = Field(
+        default=70.0, description="Max ball box side (px @720p); larger YOLO boxes are dropped as FP.",
+    )
+    ball_plausible_min_px: float = Field(
+        default=4.0, description="Min ball box side (px @720p); smaller YOLO boxes are dropped.",
+    )
+    ball_plausible_aspect: float = Field(
+        default=0.4, description="Min min/max side ratio for a YOLO ball box (squareness).",
+    )
     ball_visual_track: bool = Field(
         default=False,
         description=(

@@ -355,27 +355,60 @@ def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[
     - both present & disagree → use SAM2 (anchored to user clicks, trustworthy
       for off-domain balls).
     """
-    import math
     n = len(yolo_tracks)
+    sam2_primary = bool(getattr(_settings, "ball_sam2_primary", True))
     out: list[dict] = []
     src: list[str] = []   # per-frame ball source: yolo | sam2 | "" (none)
     for i in range(n):
         y = yolo_tracks[i] if i < len(yolo_tracks) else {}
         s = sam2_tracks[i] if i < len(sam2_tracks) else {}
         yc, sc = _ball_center(y), _ball_center(s)
-        if yc and sc:
-            d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
-            if d <= 50:
-                out.append(y); src.append("yolo")      # agree → YOLO (precise)
+        if sam2_primary:
+            # SAM2 is the trusted (temporal, prompt-anchored) signal: wherever it has the
+            # ball, use it. YOLO only FILLS gaps SAM2 didn't reach (and only if its box is
+            # plausible — already gated upstream). Kills YOLO false positives near/over the
+            # real ball that the old "agree→YOLO / disagree→SAM2" let through.
+            if sc:
+                out.append(s); src.append("sam2")
+            elif yc:
+                out.append(y); src.append("yolo")
             else:
-                out.append(s); src.append("sam2")      # disagree → SAM2 (anchored)
-        elif yc:
-            out.append(y); src.append("yolo")
-        elif sc:
-            out.append(s); src.append("sam2")
+                out.append({}); src.append("")
         else:
-            out.append({}); src.append("")
+            import math
+            if yc and sc:
+                d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
+                if d <= 50:
+                    out.append(y); src.append("yolo")
+                else:
+                    out.append(s); src.append("sam2")
+            elif yc:
+                out.append(y); src.append("yolo")
+            elif sc:
+                out.append(s); src.append("sam2")
+            else:
+                out.append({}); src.append("")
     return out, src
+
+
+def _gate_yolo_ball(ball_tracks: list[dict]) -> tuple[list[dict], int]:
+    """Drop implausible YOLO ball boxes (false positives): too large/small or non-square
+    for a ball at 720p. Returns (filtered_tracks, dropped_count). Thresholds via settings.
+    Mirrors the size/aspect checks SAM2 applies to its masks."""
+    max_px = float(getattr(_settings, "ball_plausible_max_px", 70.0))
+    min_px = float(getattr(_settings, "ball_plausible_min_px", 4.0))
+    min_aspect = float(getattr(_settings, "ball_plausible_aspect", 0.4))
+    dropped = 0
+    for bt in ball_tracks:
+        box = bt.get(1, {}).get("bbox", [])
+        if len(box) < 4:
+            continue
+        w = abs(box[2] - box[0]); h = abs(box[3] - box[1])
+        big = max(w, h); small = min(w, h)
+        if big > max_px or big < min_px or (big > 6 and small / max(big, 1e-6) < min_aspect):
+            bt.pop(1, None)   # implausible → drop this YOLO detection
+            dropped += 1
+    return ball_tracks, dropped
 
 
 def _tag_ball_sources(tracks: list[dict], source: list[str], label: str) -> None:
@@ -530,6 +563,11 @@ def run_pipeline(
             del sv_ball
             save_stub(_ball_stub, ball_tracks)
         logger.info("Ball tracks done (%d frames)", len(ball_tracks))
+        # Gate out implausible YOLO ball boxes (false positives) by size/aspect before
+        # anything else uses them.
+        ball_tracks, _gated = _gate_yolo_ball(ball_tracks)
+        if _gated:
+            logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
         # Per-frame ball SOURCE attribution (so YOLO vs SAM2 vs SAHI vs interpolation is
         # measurable + visible). Starts as YOLO where the detector fired this frame.
         ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
@@ -1091,7 +1129,10 @@ def run_pipeline(
         )
         if show_poses:
             _frame = pose_drawer.draw_frame(_frame, _frame_idx, pose_sequence)
-        _frame = ball_tracks_drawer.draw_frame(_frame, _frame_idx, ball_tracks, ball_source)
+        _frame = ball_tracks_drawer.draw_frame(
+            _frame, _frame_idx, ball_tracks, ball_source,
+            draw_predicted=bool(getattr(_settings, "ball_draw_predicted", False)),
+        )
         _frame = court_keypoint_drawer.draw_frame(_frame, _frame_idx, court_keypoints_per_frame)
         _frame = frame_number_drawer.draw_frame(_frame, _frame_idx)
         _frame = team_ball_control_drawer.draw_frame(_frame, _frame_idx, team_ball_control)
@@ -1155,6 +1196,24 @@ def run_pipeline(
         if not _ok and os.path.exists(_tmp_video):
             os.rename(_tmp_video, output_video)
     logger.info("Saved annotated video to %s", output_video)
+
+    # Optional ball-source debug dump (frame, bbox, source) next to the output video, for
+    # the TP/FP-by-source audit tool (tools/ball_source_audit.py). Enable with BA_BALL_DEBUG.
+    if os.environ.get("BA_BALL_DEBUG", "").lower() in ("1", "true", "yes"):
+        try:
+            import json as _json
+            _dbg = [
+                {"frame": _i, "bbox": ball_tracks[_i].get(1, {}).get("bbox"),
+                 "source": ball_source[_i] if _i < len(ball_source) else ""}
+                for _i in range(len(ball_tracks))
+                if 1 in ball_tracks[_i]
+            ]
+            _dbg_path = output_video + ".ball_debug.json"
+            with open(_dbg_path, "w") as _f:
+                _json.dump(_dbg, _f)
+            logger.info("Ball debug dump: %d detections → %s", len(_dbg), _dbg_path)
+        except Exception as _exc:
+            logger.warning("Ball debug dump failed: %s", _exc)
 
     # Build summary metrics
     team1_pos = 0

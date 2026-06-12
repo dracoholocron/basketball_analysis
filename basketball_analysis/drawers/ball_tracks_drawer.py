@@ -22,12 +22,19 @@ class BallTracksDrawer:
             for i, frame in enumerate(video_frames)
         ]
 
-    def draw_frame(self, frame, frame_num, tracks, sources=None):
+    # Sources considered "predicted" (no real detection this frame) — skipped from the
+    # drawn video by default so the ball only appears where it was actually seen.
+    PREDICTED_SOURCES = ("kalman", "interp")
+
+    def draw_frame(self, frame, frame_num, tracks, sources=None, draw_predicted=False):
         frame = frame.copy()
         ball_dict = tracks[frame_num] if frame_num < len(tracks) else {}
         src = ""
         if sources is not None and frame_num < len(sources):
             src = sources[frame_num] or ""
+        # Don't draw phantom balls (Kalman/interp extrapolation) unless explicitly asked.
+        if src in self.PREDICTED_SOURCES and not draw_predicted:
+            return frame
         color, tag = self.SOURCE_STYLE.get(src, (self.COLOR, "Ball"))
         for _, ball in ball_dict.items():
             bbox = ball.get("bbox")
