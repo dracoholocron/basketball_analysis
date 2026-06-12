@@ -563,12 +563,13 @@ def run_pipeline(
                 # Adaptive stride: long videos use a larger SAM2 stride (cost dominates;
                 # interpolation/Kalman keeps ball coverage high). Configurable thresholds.
                 _long_n = int(getattr(_settings, "sam2_long_frames", 0) or 0)
+                _nframes = len(ball_tracks)   # total_frames isn't bound yet at this stage
                 _eff_stride = None
-                if _long_n and total_frames > _long_n:
+                if _long_n and _nframes > _long_n:
                     _eff_stride = int(getattr(_settings, "sam2_stride_long", 2))
                     logger.info(
                         "SAM2 adaptive stride=%d (video %d frames > %d)",
-                        _eff_stride, total_frames, _long_n,
+                        _eff_stride, _nframes, _long_n,
                     )
                 sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg, stride=_eff_stride)
                 sam2_tracks = sam2.track(
