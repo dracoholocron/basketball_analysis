@@ -19,6 +19,7 @@ from .scouting_report import ScoutingReport, PlayerScoutingNote
 from .simulation import GameSimulation, KeyToVictory, SituationalAdjustment
 from .training import TrainingSession, PoseKeypoints, ShootingFormMetric
 from .game_annotation import GameAnnotation
+from .ball_track_session import BallTrackSession
 
 __all__ = [
     "Organization",
@@ -53,4 +54,5 @@ __all__ = [
     "PoseKeypoints",
     "ShootingFormMetric",
     "GameAnnotation",
+    "BallTrackSession",
 ]

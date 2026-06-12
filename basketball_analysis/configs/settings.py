@@ -291,6 +291,24 @@ class EngineSettings(BaseSettings):
             "write+read I/O on WSL. Needs shm_size in compose (one chunk ≈ 50-120MB)."
         ),
     )
+    ball_session_lost_s: float = Field(
+        default=2.0,
+        description=(
+            "Interactive ball session: auto-pause when SAM2 has no accepted ball mask "
+            "for this many seconds (the model 'lost' the ball → ask the user)."
+        ),
+    )
+    ball_session_drift_frames: int = Field(
+        default=3,
+        description=(
+            "Interactive ball session: auto-pause after this many consecutive drift-y "
+            "frames (center snap >130px or size >2.2x the running median)."
+        ),
+    )
+    ball_session_preview_every: int = Field(
+        default=100,
+        description="Interactive ball session: emit a preview JPEG every N processed frames.",
+    )
     sam2_vos_optimized: bool = Field(
         default=False,
         description=(

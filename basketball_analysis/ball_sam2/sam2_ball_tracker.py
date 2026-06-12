@@ -338,6 +338,262 @@ class Sam2BallTracker:
             except Exception:
                 pass
 
+    # ── interactive session (pause → correct → resume) ─────────────────────────
+    def track_interactive(
+        self,
+        video_path: str,
+        ball_points: list[dict],
+        total_frames: int,
+        fps: float,
+        src_scale: float = 1.0,
+        start_frame: int = 0,
+        results: list[dict] | None = None,
+        should_pause=None,
+        on_progress=None,
+    ) -> dict | None:
+        """Incremental ball tracking for the interactive session.
+
+        Processes from ``start_frame`` to the end, chunk by chunk (sequential, stride 1
+        — corrections need frame precision), updating ``results`` in place. Pauses and
+        RETURNS (the Celery task ends; the GPU worker is free while the user thinks) when:
+          - ``should_pause()`` is truthy (user pressed Pause; poll throttled by caller),
+          - the ball has no accepted mask for > ball_session_lost_s (reason "lost"),
+          - drift heuristics fire for ball_session_drift_frames consecutive frames
+            (center snap >130px or size >2.2x running median; reason "drift"),
+          - a chunk has neither a user seed nor a carry box (ball unknown → "lost").
+
+        ``on_progress(frame_idx, covered, bbox, frame_jpg_path)`` is called every
+        ball_session_preview_every frames (jpg path = the decoded chunk frame on disk,
+        ready for preview drawing). Returns {"status": "done"|"paused", "pause_reason",
+        "pause_frame", "results", "covered"} or None on hard failure.
+        """
+        _is_etam = "efficienttam" in (self.checkpoint or "").lower() or \
+                   "efficienttam" in (self.config or "").lower()
+        try:
+            import torch
+            if _is_etam:
+                from efficient_track_anything.build_efficienttam import (
+                    build_efficienttam_video_predictor as _build_predictor,
+                )
+            else:
+                from sam2.build_sam import build_sam2_video_predictor as _build_predictor
+        except Exception as exc:
+            logger.warning("track_interactive: backend unavailable (%s)", exc)
+            return None
+        ckpt = self._ensure_checkpoint()
+        if ckpt is None:
+            return None
+
+        import shutil
+        from collections import deque
+
+        import cv2
+
+        # Parse clicks (same semantics as track()).
+        seeds: dict[int, list[tuple[float, float]]] = {}
+        negatives: dict[int, list[tuple[float, float]]] = {}
+        not_visible: set[int] = set()
+        for p in ball_points or []:
+            fi = int(round(float(p.get("frame_t", 0.0)) * fps))
+            fi = max(0, min(total_frames - 1, fi))
+            px = p.get("pixel") or [0, 0]
+            if p.get("negative"):
+                negatives.setdefault(fi, []).append(
+                    (float(px[0]) * src_scale, float(px[1]) * src_scale))
+            elif p.get("visible", True):
+                seeds.setdefault(fi, []).append(
+                    (float(px[0]) * src_scale, float(px[1]) * src_scale))
+            else:
+                not_visible.add(fi)
+
+        if results is None:
+            results = [{} for _ in range(total_frames)]
+        while len(results) < total_frames:
+            results.append({})
+
+        device = self.device if torch.cuda.is_available() else "cpu"
+        predictor = _build_predictor(self.config, ckpt, device=device)
+
+        lost_pause = max(1, int(float(getattr(settings, "ball_session_lost_s", 2.0)) * fps))
+        drift_pause = max(1, int(getattr(settings, "ball_session_drift_frames", 3)))
+        preview_every = max(10, int(getattr(settings, "ball_session_preview_every", 100)))
+
+        # Drift state seeded from existing track before start_frame (resume case).
+        size_hist: deque = deque(maxlen=200)
+        last_center: tuple[float, float] | None = None
+        for i in range(max(0, start_frame - 400), start_frame):
+            box = results[i].get(1, {}).get("bbox")
+            if box:
+                size_hist.append(max(box[2] - box[0], box[3] - box[1]))
+                last_center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+        _shm = "/dev/shm" if (bool(getattr(settings, "sam2_chunk_in_ram", True))
+                              and os.path.isdir("/dev/shm")) else None
+
+        def _mkdir() -> str:
+            if _shm:
+                try:
+                    return tempfile.mkdtemp(prefix="sam2_session_", dir=_shm)
+                except OSError:
+                    pass
+            return tempfile.mkdtemp(prefix="sam2_session_")
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.warning("track_interactive: cannot open video %s", video_path)
+            return None
+        if start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        paused = {"reason": None, "frame": None}
+        lost_streak = 0
+        lost_start = start_frame
+        drift_streak = 0
+        drift_start = start_frame
+        covered_prior = sum(1 for r in results[:start_frame] if r)
+        processed = 0
+
+        def _covered() -> int:
+            return covered_prior + sum(1 for r in results[start_frame:] if r)
+
+        autocast = (torch.autocast(device, dtype=torch.bfloat16)
+                    if device == "cuda" else _nullctx())
+        _off_video = bool(getattr(settings, "sam2_offload_video", True))
+        _off_state = bool(getattr(settings, "sam2_offload_state", False))
+        gi = start_frame
+        try:
+            while gi < total_frames and paused["reason"] is None:
+                # ── read + write one chunk ───────────────────────────────────
+                chunk_dir = _mkdir()
+                src_idx: list[int] = []
+                while len(src_idx) < self.chunk_size and gi + len(src_idx) < total_frames:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    if frame.shape[0] > 720:
+                        s = 720 / frame.shape[0]
+                        frame = cv2.resize(frame, (int(frame.shape[1] * s), 720),
+                                           interpolation=cv2.INTER_AREA)
+                    cv2.imwrite(os.path.join(chunk_dir, f"{len(src_idx)}.jpg"), frame)
+                    src_idx.append(gi + len(src_idx))
+                if not src_idx:
+                    shutil.rmtree(chunk_dir, ignore_errors=True)
+                    break
+                lo, hi = src_idx[0], src_idx[-1]
+
+                # ── seeds for this chunk: user clicks + carry from the last box ──
+                chunk_seeds: dict[int, tuple[float, float]] = {}
+                for fi, pts in seeds.items():
+                    if lo <= fi <= hi:
+                        chunk_seeds[fi - lo] = pts[0]
+                if 0 not in chunk_seeds and lo > 0:
+                    prev = results[lo - 1].get(1, {}).get("bbox")
+                    if prev:
+                        chunk_seeds[0] = ((prev[0] + prev[2]) / 2.0, (prev[1] + prev[3]) / 2.0)
+                if not chunk_seeds:
+                    # Ball position unknown and no seed here → ask the user.
+                    paused["reason"], paused["frame"] = "lost", lo
+                    shutil.rmtree(chunk_dir, ignore_errors=True)
+                    break
+
+                with torch.inference_mode(), autocast:
+                    state = predictor.init_state(
+                        video_path=chunk_dir,
+                        offload_video_to_cpu=_off_video,
+                        offload_state_to_cpu=_off_state,
+                    )
+                    hb = self.box_half
+                    for li, (cx, cy) in chunk_seeds.items():
+                        box = np.array([cx - hb, cy - hb, cx + hb, cy + hb], dtype=np.float32)
+                        predictor.add_new_points_or_box(
+                            inference_state=state, frame_idx=li, obj_id=1, box=box,
+                            points=np.array([[cx, cy]], dtype=np.float32),
+                            labels=np.array([1], dtype=np.int32),
+                        )
+                    for fi, pts in negatives.items():
+                        if lo <= fi <= hi:
+                            for (nx, ny) in pts:
+                                try:
+                                    predictor.add_new_points_or_box(
+                                        inference_state=state, frame_idx=fi - lo, obj_id=1,
+                                        points=np.array([[nx, ny]], dtype=np.float32),
+                                        labels=np.array([0], dtype=np.int32),
+                                    )
+                                except Exception:
+                                    pass
+
+                    for li, _ids, mask_logits in predictor.propagate_in_video(state):
+                        if li >= len(src_idx):
+                            continue
+                        g = src_idx[li]
+                        if g in not_visible:
+                            results[g] = {}
+                            bbox = None
+                        else:
+                            bbox, score = self._mask_to_bbox(mask_logits[0])
+                            results[g] = {1: {"bbox": bbox, "score": score}} if bbox else {}
+                        processed += 1
+
+                        # ── lost / drift bookkeeping ─────────────────────────
+                        if bbox is None:
+                            if lost_streak == 0:
+                                lost_start = g
+                            lost_streak += 1
+                            drift_streak = 0
+                        else:
+                            lost_streak = 0
+                            cx = (bbox[0] + bbox[2]) / 2
+                            cy = (bbox[1] + bbox[3]) / 2
+                            side = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+                            med = sorted(size_hist)[len(size_hist) // 2] if size_hist else side
+                            snap = (last_center is not None and
+                                    ((cx - last_center[0]) ** 2 + (cy - last_center[1]) ** 2) ** 0.5 > 130)
+                            odd_size = size_hist and (side > 2.2 * med or side < med / 2.2)
+                            if snap or odd_size:
+                                if drift_streak == 0:
+                                    drift_start = g
+                                drift_streak += 1
+                            else:
+                                drift_streak = 0
+                                size_hist.append(side)
+                            last_center = (cx, cy)
+
+                        if processed % preview_every == 0 and on_progress is not None:
+                            try:
+                                on_progress(g, _covered(),
+                                            results[g].get(1, {}).get("bbox"),
+                                            os.path.join(chunk_dir, f"{li}.jpg"))
+                            except Exception:
+                                pass
+
+                        if should_pause is not None and should_pause():
+                            paused["reason"], paused["frame"] = "user", g
+                            break
+                        if lost_streak >= lost_pause:
+                            paused["reason"], paused["frame"] = "lost", lost_start
+                            break
+                        if drift_streak >= drift_pause:
+                            paused["reason"], paused["frame"] = "drift", drift_start
+                            break
+
+                    del state
+                    if device == "cuda":
+                        torch.cuda.empty_cache()
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+                gi = hi + 1
+        finally:
+            cap.release()
+
+        status = "paused" if paused["reason"] else "done"
+        covered = _covered()
+        logger.info(
+            "track_interactive: %s at frame %s (reason=%s) — covered %d/%d",
+            status, paused["frame"] if paused["reason"] else total_frames,
+            paused["reason"], covered, total_frames,
+        )
+        return {"status": status, "pause_reason": paused["reason"],
+                "pause_frame": paused["frame"], "results": results, "covered": covered}
+
     # ── helpers ───────────────────────────────────────────────────────────────
     @staticmethod
     def _extract_frames(video_path: str, out_dir: str, total_frames: int) -> int:

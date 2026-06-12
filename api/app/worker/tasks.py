@@ -69,6 +69,7 @@ def run_analysis(
     team2_jersey: str = "dark blue shirt",
     show_poses: bool = True,
     pose_player_filter: list[int] | None = None,
+    use_curated_ball: bool = False,
 ):
     """Run the full analysis pipeline for one game video."""
     engine = _sync_engine()
@@ -136,6 +137,31 @@ def run_analysis(
         )
 
         # ── 4. Fetch manual annotation (if any) ───────────────────────────
+        # ── 4a-bis. Curated ball track (from a completed interactive session) ──
+        precomputed_ball_track = None
+        if use_curated_ball:
+            try:
+                import json as _json
+                from ..models.ball_track_session import BallTrackSession
+                with Session(engine) as db:
+                    sess = db.query(BallTrackSession).filter(
+                        BallTrackSession.game_id == uuid.UUID(game_id),
+                        BallTrackSession.status == "done",
+                        BallTrackSession.track_key.isnot(None),
+                    ).order_by(BallTrackSession.updated_at.desc()).first()
+                    _track_key = sess.track_key if sess else None
+                if _track_key:
+                    _tj = os.path.join(tmp, "curated_track.json")
+                    storage.download_file(api_settings.minio_bucket_outputs, _track_key, _tj)
+                    with open(_tj) as _f:
+                        precomputed_ball_track = {int(k): v for k, v in _json.load(_f).items()}
+                    logger.info("Using curated ball track: %d frames (session %s)",
+                                len(precomputed_ball_track), sess.id)
+                else:
+                    logger.warning("use_curated_ball requested but no completed session found")
+            except Exception as exc:
+                logger.warning("Curated ball track unavailable (%s) — running normal ball stage", exc)
+
         manual_landmarks = None
         camera_motion = "static"
         team_exemplars = None
@@ -282,6 +308,7 @@ def run_analysis(
                 court_profile=profile,
                 manual_landmarks=manual_landmarks,
                 team_exemplars=team_exemplars,
+                precomputed_ball_track=precomputed_ball_track,
                 camera_motion=camera_motion,
                 on_progress=_pipeline_progress,
                 show_poses=show_poses,
@@ -1154,6 +1181,221 @@ def export_tensorrt_engine(self: Task, role: str, dynamic: bool = True) -> dict:
     except Exception as exc:
         logger.exception("export_tensorrt_engine failed")
         return {"error": str(exc)}
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.ball_track_session_run",
+                 max_retries=0, acks_late=True)
+def ball_track_session_run(self: Task, session_id: str,
+                           resume_from_frame: int | None = None) -> dict:
+    """Interactive ball-tracking session runner (pause → correct → resume).
+
+    Runs SAM2 ball propagation incrementally from `resume_from_frame` (or a smart
+    default), checkpointing the partial track to MinIO and ending the task whenever it
+    pauses (user request / ball lost / drift) so the GPU worker is free while the user
+    corrects. Resume = a new invocation of this task.
+    """
+    import json as _json
+
+    from ..models.ball_track_session import BallTrackSession
+    from ..models.video_asset import VideoAsset
+    from ..models.game import Game
+
+    _engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    if _engine_path not in sys.path:
+        sys.path.insert(0, _engine_path)
+
+    engine = _sync_engine()
+    storage = StorageService()
+    s_uuid = uuid.UUID(session_id)
+
+    with Session(engine) as db:
+        sess = db.get(BallTrackSession, s_uuid)
+        if sess is None or sess.status == "cancelled":
+            return {"skipped": True}
+        game_id = sess.game_id
+        pause_frame_prev = sess.pause_frame
+        track_key_prev = sess.track_key
+        sess.status = "running"
+        sess.pause_requested = False
+        sess.error_message = None
+        db.commit()
+        # Latest source video + ball clicks + SAM2 quality for this game.
+        va = db.query(VideoAsset).filter(VideoAsset.game_id == game_id).order_by(
+            VideoAsset.uploaded_at.desc()).first()
+        video_key = va.s3_key if va else None
+        ball_ann = db.query(BallAnnotation).filter(
+            BallAnnotation.game_id == game_id).one_or_none()
+        ball_points = list(ball_ann.points or []) if ball_ann else []
+        _g = db.get(Game, game_id)
+        _quality = (getattr(_g, "ball_tracking_quality", None) or "base_plus") if _g else "base_plus"
+
+    def _fail(msg: str) -> dict:
+        with Session(engine) as db:
+            s = db.get(BallTrackSession, s_uuid)
+            if s:
+                s.status = "error"
+                s.error_message = msg[:480]
+                db.commit()
+        logger.error("ball session %s: %s", session_id, msg)
+        return {"error": msg}
+
+    if not video_key:
+        return _fail("no video uploaded for this game")
+    if not ball_points or not any(p.get("visible", True) and not p.get("negative")
+                                  for p in ball_points):
+        return _fail("no ball clicks — annotate at least one ball position first")
+
+    # Source video cached on the stubs volume (resumes don't re-download).
+    cache_dir = os.path.join(os.environ.get("ENGINE_PATH", "/app/engine"),
+                             "stubs", "session_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    local_video = os.path.join(cache_dir, f"{game_id}.mp4")
+    if not os.path.exists(local_video):
+        try:
+            storage.download_file(api_settings.minio_bucket_videos, video_key, local_video)
+        except Exception as exc:
+            return _fail(f"video download failed: {exc}")
+
+    try:
+        from utils.video_utils import get_video_properties
+        props = get_video_properties(local_video)
+        fps = float(props.get("fps") or 25.0)
+        total_frames = int(props.get("total_frames") or 0)
+        height = int(props.get("height") or 720)
+    except Exception as exc:
+        return _fail(f"video probe failed: {exc}")
+    src_scale = (720.0 / height) if height > 720 else 1.0
+
+    # Resume point: explicit > smart default (earliest click within 15s before the
+    # pause — covers "the user corrected a bit earlier than where we stopped").
+    start_frame = 0
+    if resume_from_frame is not None:
+        start_frame = max(0, int(resume_from_frame))
+    elif pause_frame_prev is not None:
+        w0 = max(0, int(pause_frame_prev - 15 * fps))
+        cand = [int(round(float(p.get("frame_t", 0)) * fps)) for p in ball_points
+                if w0 <= float(p.get("frame_t", 0)) * fps <= pause_frame_prev + 1]
+        start_frame = min(cand) if cand else int(pause_frame_prev)
+
+    # Partial track from the previous leg (truncate from the resume point).
+    results: list[dict] = [{} for _ in range(total_frames)]
+    if track_key_prev and start_frame > 0:
+        try:
+            tj = os.path.join(cache_dir, f"{session_id}_track.json")
+            storage.download_file(api_settings.minio_bucket_outputs, track_key_prev, tj)
+            with open(tj) as f:
+                prev = {int(k): v for k, v in _json.load(f).items()}
+            for fi, bbox in prev.items():
+                if 0 <= fi < start_frame:
+                    results[fi] = {1: {"bbox": bbox}}
+        except Exception as exc:
+            logger.warning("session %s: prior track load failed (%s) — restarting", session_id, exc)
+            start_frame = 0
+
+    # SAM2 checkpoint per the game's quality selector (same map as run_analysis).
+    _BY_QUALITY = {
+        "small":        ("models/sam2.1_hiera_small.pt",     "configs/sam2.1/sam2.1_hiera_s.yaml"),
+        "base_plus":    ("models/sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+        "large":        ("models/sam2.1_hiera_large.pt",     "configs/sam2.1/sam2.1_hiera_l.yaml"),
+        "efficienttam": ("models/efficienttam_s.pt",         "configs/efficienttam/efficienttam_s.yaml"),
+    }
+    ckpt, cfg = _BY_QUALITY.get(_quality, _BY_QUALITY["base_plus"])
+
+    import time as _time
+    import cv2
+
+    preview_key = f"sessions/{session_id}/preview.jpg"
+    track_key = f"sessions/{session_id}/track.json"
+    _last_pause_check = [0.0]
+    _pause_flag = [False]
+
+    def should_pause() -> bool:
+        now = _time.time()
+        if now - _last_pause_check[0] >= 2.0:        # throttle DB polls
+            _last_pause_check[0] = now
+            with Session(engine) as db:
+                s = db.get(BallTrackSession, s_uuid)
+                _pause_flag[0] = bool(s and (s.pause_requested or s.status == "cancelled"))
+        return _pause_flag[0]
+
+    def on_progress(frame_idx: int, covered: int, bbox, jpg_path: str) -> None:
+        with Session(engine) as db:
+            s = db.get(BallTrackSession, s_uuid)
+            if s:
+                s.current_frame = int(frame_idx)
+                s.total_frames = int(total_frames)
+                s.fps = fps
+                s.coverage_pct = round(100.0 * covered / max(1, total_frames), 1)
+                s.preview_key = preview_key
+                db.commit()
+        try:
+            img = cv2.imread(jpg_path)
+            if img is not None:
+                if bbox:
+                    x1, y1, x2, y2 = (int(v) for v in bbox)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 3)
+                if img.shape[1] > 640:
+                    sc = 640 / img.shape[1]
+                    img = cv2.resize(img, (640, int(img.shape[0] * sc)))
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if ok:
+                    import io
+                    storage.upload_file(io.BytesIO(buf.tobytes()),
+                                        api_settings.minio_bucket_outputs,
+                                        preview_key, content_type="image/jpeg")
+        except Exception:
+            pass
+
+    try:
+        from ball_sam2 import Sam2BallTracker
+        tracker = Sam2BallTracker(ckpt, cfg)
+        out = tracker.track_interactive(
+            local_video, ball_points, total_frames, fps, src_scale=src_scale,
+            start_frame=start_frame, results=results,
+            should_pause=should_pause, on_progress=on_progress,
+        )
+    except Exception as exc:
+        logger.exception("ball session %s crashed", session_id)
+        return _fail(str(exc))
+    if out is None:
+        return _fail("tracker unavailable (sam2/efficienttam import or checkpoint failed)")
+
+    # Persist the (partial or full) track.
+    track = {str(i): r[1]["bbox"] for i, r in enumerate(out["results"]) if 1 in r}
+    try:
+        import io
+        storage.upload_file(io.BytesIO(_json.dumps(track).encode()),
+                            api_settings.minio_bucket_outputs, track_key,
+                            content_type="application/json")
+    except Exception as exc:
+        return _fail(f"track upload failed: {exc}")
+
+    with Session(engine) as db:
+        s = db.get(BallTrackSession, s_uuid)
+        if s is None:
+            return {"ok": True}
+        s.track_key = track_key
+        s.coverage_pct = round(100.0 * out["covered"] / max(1, total_frames), 1)
+        s.total_frames = total_frames
+        s.fps = fps
+        if s.status == "cancelled":
+            pass
+        elif out["status"] == "done":
+            s.status = "done"
+            s.pause_reason = None
+            s.pause_frame = None
+            s.current_frame = total_frames
+        else:
+            s.status = "waiting_user"
+            s.pause_reason = out["pause_reason"]
+            s.pause_frame = int(out["pause_frame"] or 0)
+            s.current_frame = int(out["pause_frame"] or 0)
+        s.pause_requested = False
+        db.commit()
+        final_status = s.status
+    logger.info("ball session %s leg finished: %s (covered %d/%d)",
+                session_id, final_status, out["covered"], total_frames)
+    return {"ok": True, "status": final_status, "covered": out["covered"]}
 
 
 # ── Model version registry helpers (worker side — has the models_data volume) ──────

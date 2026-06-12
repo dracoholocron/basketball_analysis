@@ -6,11 +6,18 @@ import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import VideoControls from "@/components/video/VideoControls";
 import {
+  analyzeGame,
   getBallAnnotation,
+  getBallSession,
+  startBallSession,
+  pauseBallSession,
+  resumeBallSession,
+  cancelBallSession,
   getGameVideoUrl,
   putBallAnnotation,
   type BallPoint,
   type BallFlaggedSegment,
+  type BallSession,
 } from "@/lib/api";
 import {
   AlertCircle,
@@ -19,19 +26,24 @@ import {
   Ban,
   Camera,
   CheckCircle2,
+  ChevronRight,
   EyeOff,
   Info,
   Loader2,
   Pause,
   Play,
+  PlayCircle,
   Save,
+  Square,
   Target,
   Trash2,
+  Zap,
 } from "lucide-react";
 import { clsx } from "clsx";
 
 const BALL_COLOR = "#f97316";  // orange — the ball
 const WRONG_COLOR = "#ef4444"; // red — wrong object (negative prompt)
+const SESSION_ACTIVE = new Set(["queued", "running"]);
 
 function fmtTime(s: number) {
   const m = Math.floor(s / 60);
@@ -69,6 +81,94 @@ export default function AnnotateBallPage() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
+  // ── Interactive ball-tracking session ──────────────────────────────────────
+  const [session, setSession] = useState<BallSession | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [analyzingCurated, setAnalyzingCurated] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+
+  const stopPoll = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const startPoll = useCallback((gameId: string) => {
+    stopPoll();
+    pollRef.current = setInterval(async () => {
+      try {
+        const s = await getBallSession(gameId);
+        setSession(s);
+        if (s && !SESSION_ACTIVE.has(s.status)) stopPoll();
+      } catch { /* ignore */ }
+    }, 2000);
+  }, []);
+
+  useEffect(() => () => stopPoll(), []);
+
+  // Seek video to the pause frame so the user can correct right there
+  useEffect(() => {
+    if (session?.status === "waiting_user" && session.pause_frame != null && videoRef.current) {
+      const t = session.pause_frame / Math.max(session.fps, 1);
+      videoRef.current.currentTime = t;
+      setCurrentTime(t);
+    }
+  }, [session?.status, session?.pause_frame, session?.fps]);
+
+  const handleStartSession = async () => {
+    if (!id) return;
+    setSessionError(null);
+    setSessionLoading(true);
+    try {
+      const s = await startBallSession(id);
+      setSession(s);
+      startPoll(id);
+    } catch (e: unknown) {
+      setSessionError(e instanceof Error ? e.message : "Error al iniciar");
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const handlePauseSession = async () => {
+    if (!id) return;
+    try { const s = await pauseBallSession(id); setSession(s); }
+    catch { /* ignore */ }
+  };
+
+  const handleResumeSession = async () => {
+    if (!id) return;
+    setSessionError(null);
+    setSessionLoading(true);
+    try {
+      const s = await resumeBallSession(id);
+      setSession(s);
+      startPoll(id);
+    } catch (e: unknown) {
+      setSessionError(e instanceof Error ? e.message : "Error al reanudar");
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const handleCancelSession = async () => {
+    if (!id) return;
+    try { const s = await cancelBallSession(id); setSession(s); stopPoll(); }
+    catch { /* ignore */ }
+  };
+
+  const handleAnalyzeCurated = async () => {
+    if (!id) return;
+    setAnalyzingCurated(true);
+    try {
+      await analyzeGame(id, { use_curated_ball: true });
+      router.push(`/games/${id}`);
+    } catch (e: unknown) {
+      setSessionError(e instanceof Error ? e.message : "Error al lanzar análisis");
+      setAnalyzingCurated(false);
+    }
+  };
+
   useEffect(() => {
     if (!id) return;
     getBallAnnotation(id)
@@ -77,10 +177,15 @@ export default function AnnotateBallPage() {
         if (ann?.flagged && ann.flagged.length > 0) setFlagged(ann.flagged);
       })
       .catch(() => null);
+    // Load latest session status
+    getBallSession(id).then((s) => {
+      setSession(s);
+      if (s && SESSION_ACTIVE.has(s.status)) startPoll(id);
+    }).catch(() => null);
     getGameVideoUrl(id)
       .then((url) => setVideoUrl(url))
       .catch(() => setVideoError(true));
-  }, [id]);
+  }, [id, startPoll]);
 
   // Draw the ball mark near the current time
   useEffect(() => {
@@ -328,8 +433,176 @@ export default function AnnotateBallPage() {
             )}
           </div>
 
-          {/* Sidebar — review flags + marks list */}
+          {/* Sidebar — session + review flags + marks list */}
           <div className="w-72 shrink-0 flex flex-col gap-4">
+
+            {/* ── Interactive tracking session panel ──────────────────────── */}
+            <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 space-y-3">
+              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Zap size={14} className="text-orange-400" /> Tracking interactivo
+              </h2>
+
+              {sessionError && (
+                <p className="text-[11px] text-red-400 bg-red-900/20 rounded-lg px-2 py-1.5">
+                  {sessionError}
+                </p>
+              )}
+
+              {/* No session yet or cancelled */}
+              {(!session || session.status === "cancelled") && (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-slate-400">
+                    SAM2 rastrea el balón frame a frame. Pausa automática si lo pierde; tú
+                    corriges y continúas desde ese punto, sin re-analizar el video completo.
+                  </p>
+                  <button
+                    onClick={handleStartSession}
+                    disabled={sessionLoading || points.filter(p => p.visible && !p.negative).length < 1}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-medium"
+                  >
+                    {sessionLoading ? <Loader2 size={13} className="animate-spin" /> : <PlayCircle size={13} />}
+                    Iniciar tracking interactivo
+                  </button>
+                  {points.filter(p => p.visible && !p.negative).length < 1 && (
+                    <p className="text-[10px] text-amber-400">Añade al menos 1 marca de balón primero.</p>
+                  )}
+                </div>
+              )}
+
+              {/* Running / queued */}
+              {session && SESSION_ACTIVE.has(session.status) && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-300 flex items-center gap-1.5">
+                      <Loader2 size={11} className="animate-spin text-orange-400" />
+                      {session.status === "queued" ? "En cola…" : "Analizando…"}
+                    </span>
+                    <span className="text-slate-400">
+                      {session.coverage_pct.toFixed(1)}% cobertura
+                    </span>
+                  </div>
+                  {session.total_frames > 0 && (
+                    <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-orange-500 transition-all duration-500"
+                        style={{ width: `${Math.round(100 * session.current_frame / session.total_frames)}%` }}
+                      />
+                    </div>
+                  )}
+                  {session.preview_url && (
+                    // Cache-bust with timestamp so the browser reloads the fixed key
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={`${session.preview_url}&_t=${Date.now()}`}
+                      alt="preview"
+                      className="w-full rounded-lg object-contain bg-black"
+                    />
+                  )}
+                  <div className="text-[10px] text-slate-500 text-center">
+                    {session.current_frame} / {session.total_frames} frames
+                    {session.fps > 0 && ` · ${fmtTime(session.current_frame / session.fps)}`}
+                  </div>
+                  <button
+                    onClick={handlePauseSession}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs"
+                  >
+                    <Square size={11} /> Pausar
+                  </button>
+                </div>
+              )}
+
+              {/* Waiting for user correction */}
+              {session?.status === "waiting_user" && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-[11px] text-amber-300">
+                    <AlertTriangle size={11} />
+                    {session.pause_reason === "lost"
+                      ? "Balón perdido — el modelo no lo encontró"
+                      : session.pause_reason === "drift"
+                      ? "Posible drift — SAM2 puede estar rastreando el objeto incorrecto"
+                      : "Pausado manualmente"}
+                  </div>
+                  {session.preview_url && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={session.preview_url}
+                      alt="preview en pausa"
+                      className="w-full rounded-lg object-contain bg-black"
+                    />
+                  )}
+                  {session.pause_frame != null && (
+                    <p className="text-[10px] text-slate-400 text-center">
+                      Frame {session.pause_frame} · {fmtTime(session.pause_frame / Math.max(session.fps, 1))}
+                      {" "}(el video ya saltó ahí)
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-300">
+                    Corrige con los modos <strong>Balón</strong> /&nbsp;
+                    <strong>Objeto incorrecto</strong> en este frame, luego:
+                  </p>
+                  <button
+                    onClick={handleResumeSession}
+                    disabled={sessionLoading}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 disabled:opacity-50 text-white text-xs font-medium"
+                  >
+                    {sessionLoading ? <Loader2 size={13} className="animate-spin" /> : <ChevronRight size={13} />}
+                    Continuar desde aquí
+                  </button>
+                  <button
+                    onClick={handleCancelSession}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-red-900/40 text-slate-400 hover:text-red-400 text-xs"
+                  >
+                    Cancelar sesión
+                  </button>
+                </div>
+              )}
+
+              {/* Done */}
+              {session?.status === "done" && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-[11px] text-green-400">
+                    <CheckCircle2 size={11} />
+                    Tracking completado · {session.coverage_pct.toFixed(1)}% cobertura
+                  </div>
+                  {session.preview_url && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={session.preview_url} alt="preview final" className="w-full rounded-lg object-contain bg-black" />
+                  )}
+                  <button
+                    onClick={handleAnalyzeCurated}
+                    disabled={analyzingCurated}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-xs font-medium"
+                  >
+                    {analyzingCurated ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
+                    Analizar con track curado
+                  </button>
+                  <button
+                    onClick={handleStartSession}
+                    disabled={sessionLoading}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs"
+                  >
+                    Reiniciar sesión
+                  </button>
+                </div>
+              )}
+
+              {/* Error */}
+              {session?.status === "error" && (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-red-400">{session.error_message ?? "Error desconocido"}</p>
+                  <button
+                    onClick={handleStartSession}
+                    disabled={sessionLoading}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs"
+                  >
+                    {sessionLoading ? <Loader2 size={13} className="animate-spin" /> : <PlayCircle size={13} />}
+                    Reintentar
+                  </button>
+                </div>
+              )}
+            </div>
+            {/* ────────────────────────────────────────────────────────────── */}
+
             {flagged.length > 0 && (
               <div className="bg-amber-900/20 rounded-xl border border-amber-700/40 p-4 space-y-2">
                 <h2 className="text-sm font-semibold text-amber-300 flex items-center gap-2">

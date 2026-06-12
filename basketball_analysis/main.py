@@ -515,6 +515,7 @@ def run_pipeline(
     sam2_checkpoint: str | None = None,
     sam2_config: str | None = None,
     pose_model_path: str | None = None,
+    precomputed_ball_track: dict | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -621,21 +622,31 @@ def run_pipeline(
         )
 
         _progress("ball_tracking", 30)
-        ball_tracks = read_stub(use_stubs, _ball_stub)
-        if ball_tracks is None:
-            sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
-            ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
-            del sv_ball
-            save_stub(_ball_stub, ball_tracks)
-        logger.info("Ball tracks done (%d frames)", len(ball_tracks))
-        # Gate out implausible YOLO ball boxes (false positives) by size/aspect before
-        # anything else uses them.
-        ball_tracks, _gated = _gate_yolo_ball(ball_tracks)
-        if _gated:
-            logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
-        # Per-frame ball SOURCE attribution (so YOLO vs SAM2 vs SAHI vs interpolation is
-        # measurable + visible). Starts as YOLO where the detector fired this frame.
-        ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
+        if precomputed_ball_track is not None:
+            # Curated interactive-session track: skip YOLO / SAM2 / SAHI entirely.
+            _n_pre = len(player_tracks)
+            ball_tracks = [
+                {1: {"bbox": precomputed_ball_track[i]}} if i in precomputed_ball_track else {}
+                for i in range(_n_pre)
+            ]
+            ball_source = ["curated" if i in precomputed_ball_track else "" for i in range(_n_pre)]
+            _protected = set(precomputed_ball_track.keys())
+            logger.info(
+                "Using curated ball track: %d/%d frames detected (%.1f%%)",
+                len(_protected), _n_pre, 100.0 * len(_protected) / max(1, _n_pre),
+            )
+        else:
+            ball_tracks = read_stub(use_stubs, _ball_stub)
+            if ball_tracks is None:
+                sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
+                ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
+                del sv_ball
+                save_stub(_ball_stub, ball_tracks)
+            logger.info("Ball tracks done (%d frames)", len(ball_tracks))
+            ball_tracks, _gated = _gate_yolo_ball(ball_tracks)
+            if _gated:
+                logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
+            ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
 
         _progress("keypoint_detection", 45)
         court_keypoints_per_frame = read_stub(use_stubs, _court_stub)
@@ -646,73 +657,70 @@ def run_pipeline(
             save_stub(_court_stub, court_keypoints_per_frame)
         logger.info("Court keypoints done (%d frames)", len(court_keypoints_per_frame))
 
-        _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
-        _raw_detected = len(ball_tracks) - _missing_before_sahi
-        logger.info(
-            "Ball raw detection rate: %d/%d frames (%.1f%%) before SAHI",
-            _raw_detected, len(ball_tracks),
-            100.0 * _raw_detected / max(len(ball_tracks), 1),
-        )
+        if precomputed_ball_track is None:
+            _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
+            _raw_detected = len(ball_tracks) - _missing_before_sahi
+            logger.info(
+                "Ball raw detection rate: %d/%d frames (%.1f%%) before SAHI",
+                _raw_detected, len(ball_tracks),
+                100.0 * _raw_detected / max(len(ball_tracks), 1),
+            )
 
-        # ── SAM2 ball propagation (when manual ball points exist) ───────────
-        # Color-agnostic; fuse with YOLO: keep YOLO where it agrees/is precise,
-        # use SAM2 to fill gaps and resolve disagreements (anchored to clicks).
-        if ball_points and getattr(_settings, "ball_sam2", True):
-            try:
-                from ball_sam2 import Sam2BallTracker
-                _sam2_ckpt = sam2_checkpoint or _settings.sam2_checkpoint
-                _sam2_cfg = sam2_config or _settings.sam2_config
-                logger.info("SAM2 ball tracker checkpoint: %s", _sam2_ckpt)
-                # Adaptive stride: long videos use a larger SAM2 stride (cost dominates;
-                # interpolation/Kalman keeps ball coverage high). Configurable thresholds.
-                _long_n = int(getattr(_settings, "sam2_long_frames", 0) or 0)
-                _nframes = len(ball_tracks)   # total_frames isn't bound yet at this stage
-                _eff_stride = None
-                if _long_n and _nframes > _long_n:
-                    _eff_stride = int(getattr(_settings, "sam2_stride_long", 2))
-                    logger.info(
-                        "SAM2 adaptive stride=%d (video %d frames > %d)",
-                        _eff_stride, _nframes, _long_n,
+            # ── SAM2 ball propagation (when manual ball points exist) ────────
+            if ball_points and getattr(_settings, "ball_sam2", True):
+                try:
+                    from ball_sam2 import Sam2BallTracker
+                    _sam2_ckpt = sam2_checkpoint or _settings.sam2_checkpoint
+                    _sam2_cfg = sam2_config or _settings.sam2_config
+                    logger.info("SAM2 ball tracker checkpoint: %s", _sam2_ckpt)
+                    _long_n = int(getattr(_settings, "sam2_long_frames", 0) or 0)
+                    _nframes = len(ball_tracks)
+                    _eff_stride = None
+                    if _long_n and _nframes > _long_n:
+                        _eff_stride = int(getattr(_settings, "sam2_stride_long", 2))
+                        logger.info(
+                            "SAM2 adaptive stride=%d (video %d frames > %d)",
+                            _eff_stride, _nframes, _long_n,
+                        )
+                    sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg, stride=_eff_stride)
+                    sam2_tracks = sam2.track(
+                        input_video, ball_points, len(ball_tracks), actual_fps,
+                        src_scale=_manual_src_scale,
                     )
-                sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg, stride=_eff_stride)
-                sam2_tracks = sam2.track(
-                    input_video, ball_points, len(ball_tracks), actual_fps,
-                    src_scale=_manual_src_scale,
-                )
-                if sam2_tracks is not None:
-                    # Export SAM2 boxes as YOLO auto-labels for fine-tuning (purpose 2).
-                    if getattr(_settings, "ball_export_dataset", False):
-                        try:
-                            import uuid as _uuid
-                            from ball_sam2.export_dataset import export_yolo_dataset
-                            _nv = {
-                                int(round(float(p.get("frame_t", 0.0)) * actual_fps))
-                                for p in ball_points if not p.get("visible", True)
-                            }
-                            _written = export_yolo_dataset(
-                                input_video, sam2_tracks, "/app/ball_dataset",
-                                game_id=_uuid.uuid4().hex[:8], not_visible_frames=_nv,
-                            )
-                            logger.info("Ball dataset export: %d labeled frames", _written)
-                        except Exception as exc:
-                            logger.warning("Ball dataset export failed: %s", exc)
-                    ball_tracks, ball_source = _fuse_ball_tracks(ball_tracks, sam2_tracks)
-                    _m = sum(1 for bt in ball_tracks if 1 not in bt)
-                    logger.info(
-                        "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
-                        len(ball_tracks) - _m, len(ball_tracks),
-                        100.0 * (len(ball_tracks) - _m) / max(len(ball_tracks), 1),
-                    )
-            except Exception as exc:
-                logger.warning("SAM2 ball fusion skipped: %s", exc)
+                    if sam2_tracks is not None:
+                        if getattr(_settings, "ball_export_dataset", False):
+                            try:
+                                import uuid as _uuid
+                                from ball_sam2.export_dataset import export_yolo_dataset
+                                _nv = {
+                                    int(round(float(p.get("frame_t", 0.0)) * actual_fps))
+                                    for p in ball_points if not p.get("visible", True)
+                                }
+                                _written = export_yolo_dataset(
+                                    input_video, sam2_tracks, "/app/ball_dataset",
+                                    game_id=_uuid.uuid4().hex[:8], not_visible_frames=_nv,
+                                )
+                                logger.info("Ball dataset export: %d labeled frames", _written)
+                            except Exception as exc:
+                                logger.warning("Ball dataset export failed: %s", exc)
+                        ball_tracks, ball_source = _fuse_ball_tracks(ball_tracks, sam2_tracks)
+                        _m = sum(1 for bt in ball_tracks if 1 not in bt)
+                        logger.info(
+                            "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
+                            len(ball_tracks) - _m, len(ball_tracks),
+                            100.0 * (len(ball_tracks) - _m) / max(len(ball_tracks), 1),
+                        )
+                except Exception as exc:
+                    logger.warning("SAM2 ball fusion skipped: %s", exc)
 
-        _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
-        if _missing_before_sahi > 0:
-            ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
-        _tag_ball_sources(ball_tracks, ball_source, "sahi")
-        _protected = {i for i, s in enumerate(ball_source) if s == "sam2"}  # trust SAM2
+            _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
+            if _missing_before_sahi > 0:
+                ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
+            _tag_ball_sources(ball_tracks, ball_source, "sahi")
+            _protected = {i for i, s in enumerate(ball_source) if s == "sam2"}
+
         ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks, protected=_protected)
-        _tag_ball_sources(ball_tracks, ball_source, "")        # clear removed frames
+        _tag_ball_sources(ball_tracks, ball_source, "")
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
         _tag_ball_sources(ball_tracks, ball_source, "kalman")
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
@@ -721,9 +729,9 @@ def run_pipeline(
         from collections import Counter as _Counter
         _bsrc = _Counter(s for s in ball_source if s)
         logger.info(
-            "Ball sources: YOLO=%d, SAM2=%d, SAHI=%d, Kalman=%d, interp=%d (none=%d/%d)",
+            "Ball sources: YOLO=%d, SAM2=%d, SAHI=%d, curated=%d, Kalman=%d, interp=%d (none=%d/%d)",
             _bsrc.get("yolo", 0), _bsrc.get("sam2", 0), _bsrc.get("sahi", 0),
-            _bsrc.get("kalman", 0), _bsrc.get("interp", 0),
+            _bsrc.get("curated", 0), _bsrc.get("kalman", 0), _bsrc.get("interp", 0),
             sum(1 for s in ball_source if not s), len(ball_source),
         )
         ball_flagged_segments = _flag_ball_segments(ball_tracks, ball_source, actual_fps)
@@ -811,12 +819,24 @@ def run_pipeline(
         logger.info("Player tracks done")
 
         _progress("ball_tracking", 30)
-        ball_tracks = ball_tracker.get_object_tracks(
-            video_frames,
-            read_from_stub=use_stubs,
-            stub_path=_ball_stub,
-        )
-        logger.info("Ball tracks done")
+        if precomputed_ball_track is not None:
+            _n_pre = len(video_frames)
+            ball_tracks = [
+                {1: {"bbox": precomputed_ball_track[i]}} if i in precomputed_ball_track else {}
+                for i in range(_n_pre)
+            ]
+            ball_source = ["curated" if i in precomputed_ball_track else "" for i in range(_n_pre)]
+            _legacy_protected: set = set(precomputed_ball_track.keys())
+            logger.info("Using curated ball track: %d/%d frames", len(_legacy_protected), _n_pre)
+        else:
+            ball_tracks = ball_tracker.get_object_tracks(
+                video_frames,
+                read_from_stub=use_stubs,
+                stub_path=_ball_stub,
+            )
+            logger.info("Ball tracks done")
+            ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
+            _legacy_protected = set()
 
         _progress("keypoint_detection", 45)
         court_keypoints_per_frame = court_keypoint_detector.get_court_keypoints(
@@ -826,10 +846,7 @@ def run_pipeline(
         )
         logger.info("Court keypoints done")
 
-        # Source attribution mirrors the streaming branch (yolo → kalman/interp); the
-        # legacy path has no SAM2/SAHI stages.
-        ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
-        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks, protected=_legacy_protected)
         _tag_ball_sources(ball_tracks, ball_source, "")
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
         _tag_ball_sources(ball_tracks, ball_source, "kalman")

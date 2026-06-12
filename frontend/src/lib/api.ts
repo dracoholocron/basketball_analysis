@@ -68,6 +68,7 @@ export async function uploadVideo(gameId: string, file: File) {
 
 export interface AnalysisOptions {
   pose_player_filter?: number[];
+  use_curated_ball?: boolean;
 }
 
 /** Start analysis of the already-uploaded video for a game. Returns a Job. */
@@ -222,6 +223,52 @@ export async function putBallAnnotation(
 /** Trigger a background fine-tune of the ball detector on accumulated SAM2 auto-labels. */
 export async function triggerBallFinetune(epochs = 60): Promise<{ task_id: string; status: string; epochs: number }> {
   const { data } = await api.post(`/admin/finetune-ball`, null, { params: { epochs } });
+  return data;
+}
+
+// ── Interactive ball-tracking session ─────────────────────────────────────────
+
+export interface BallSession {
+  id: string;
+  game_id: string;
+  status: "queued" | "running" | "waiting_user" | "done" | "cancelled" | "error";
+  current_frame: number;
+  total_frames: number;
+  fps: number;
+  coverage_pct: number;
+  pause_reason: "lost" | "drift" | "user" | null;
+  pause_frame: number | null;
+  pause_requested: boolean;
+  preview_url: string | null;
+  error_message: string | null;
+}
+
+export async function getBallSession(gameId: string): Promise<BallSession | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/ball-session`);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function startBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session`);
+  return data;
+}
+
+export async function pauseBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session/pause`);
+  return data;
+}
+
+export async function resumeBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session/resume`);
+  return data;
+}
+
+export async function cancelBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session/cancel`);
   return data;
 }
 
