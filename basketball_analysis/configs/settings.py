@@ -209,6 +209,14 @@ class EngineSettings(BaseSettings):
     ball_plausible_aspect: float = Field(
         default=0.4, description="Min min/max side ratio for a YOLO ball box (squareness).",
     )
+    ball_max_jump_px: float = Field(
+        default=80.0,
+        description=(
+            "Max plausible ball movement per frame (px @720p) in remove_wrong_detections. "
+            "Bigger jumps are dropped as wrong. Old value 25 was too strict for a fast "
+            "ball and discarded true detections (then reconstructed by Kalman)."
+        ),
+    )
     ball_visual_track: bool = Field(
         default=False,
         description=(

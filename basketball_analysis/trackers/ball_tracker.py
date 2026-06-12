@@ -366,34 +366,38 @@ class BallTracker:
                 best_conf = bc
         return (best_bbox, best_conf) if return_conf else best_bbox
 
-    def remove_wrong_detections(self,ball_positions):
+    def remove_wrong_detections(self, ball_positions, max_jump_px: float | None = None,
+                                protected: set | None = None):
         """
-        Filter out incorrect ball detections based on maximum allowed movement distance.
+        Drop detections that jump implausibly far from the last good one.
 
         Args:
-            ball_positions (list): List of detected ball positions across frames.
-
-        Returns:
-            list: Filtered ball positions with incorrect detections removed.
+            ball_positions: per-frame ball dicts.
+            max_jump_px: max plausible ball movement per frame (px @720p). None →
+                settings.ball_max_jump_px (default 80). The old hard-coded 25 was too
+                strict for a fast ball (pass/shot) and discarded many TRUE detections,
+                which Kalman then had to reconstruct.
+            protected: frame indices never removed (e.g. SAM2-sourced frames, trusted).
         """
-        
-        maximum_allowed_distance = 25
+        if max_jump_px is None:
+            max_jump_px = float(getattr(settings, "ball_max_jump_px", 80.0))
+        protected = protected or set()
         last_good_frame_index = -1
 
         for i in range(len(ball_positions)):
             current_box = ball_positions[i].get(1, {}).get('bbox', [])
-
             if len(current_box) == 0:
                 continue
-
+            if i in protected:
+                last_good_frame_index = i      # trust SAM2: anchor, never drop
+                continue
             if last_good_frame_index == -1:
-                # First valid detection
                 last_good_frame_index = i
                 continue
 
             last_good_box = ball_positions[last_good_frame_index].get(1, {}).get('bbox', [])
             frame_gap = i - last_good_frame_index
-            adjusted_max_distance = maximum_allowed_distance * frame_gap
+            adjusted_max_distance = max_jump_px * frame_gap
 
             if np.linalg.norm(np.array(last_good_box[:2]) - np.array(current_box[:2])) > adjusted_max_distance:
                 ball_positions[i] = {}

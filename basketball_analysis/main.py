@@ -647,7 +647,8 @@ def run_pipeline(
         if _missing_before_sahi > 0:
             ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
         _tag_ball_sources(ball_tracks, ball_source, "sahi")
-        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        _protected = {i for i, s in enumerate(ball_source) if s == "sam2"}  # trust SAM2
+        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks, protected=_protected)
         _tag_ball_sources(ball_tracks, ball_source, "")        # clear removed frames
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
         _tag_ball_sources(ball_tracks, ball_source, "kalman")

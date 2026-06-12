@@ -323,6 +323,10 @@ def run_analysis(
             host_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(output_video, host_dir / f"{job_id}.mp4")
             logger.info("Saved local copy: %s", host_dir / f"{job_id}.mp4")
+            # Also persist the ball-source debug dump (when BA_BALL_DEBUG) for the audit tool.
+            _dbg = output_video + ".ball_debug.json"
+            if os.path.exists(_dbg):
+                shutil.copy2(_dbg, host_dir / f"{job_id}.ball_debug.json")
 
         with Session(engine) as db:
             _update_job(
