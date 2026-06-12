@@ -384,6 +384,15 @@ class EngineSettings(BaseSettings):
         default=30,
         description="Rolling window (frames) for majority-vote team assignment per track_id",
     )
+    team_cosine_margin: float = Field(
+        default=0.05,
+        description=(
+            "Exemplar team matching: if |cos(team1) - cos(team2)| < this, the crop is "
+            "ambiguous → unknown (not forced to a team). Higher = stricter (more unknowns); "
+            "0 disables (always pick the closer team). Curbs team-1 inflation from blurry/"
+            "partial fragmented crops."
+        ),
+    )
 
     # ── Speed / distance ───────────────────────────────────────────────────────
     speed_window_frames: int = Field(

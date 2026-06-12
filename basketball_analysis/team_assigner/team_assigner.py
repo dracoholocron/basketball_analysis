@@ -159,14 +159,21 @@ class TeamAssigner:
             e1 = self._team_embeddings.get(1)
             e2 = self._team_embeddings.get(2)
             embs = self._image_embedding_batch(crops)
+            # Confidence margin: when both teams are similarly close (ambiguous crop —
+            # occlusion, blur, distance) emit 0 = unknown instead of forcing team 1.
+            # This stops fragmented partial crops from inflating one team. Tunable.
+            margin = float(getattr(settings, "team_cosine_margin", 0.05))
             out: list[int] = []
             for emb in embs:
                 if emb is None or e1 is None or e2 is None:
-                    out.append(1)
+                    out.append(0)
                     continue
                 s1 = float(np.dot(emb, e1))
                 s2 = float(np.dot(emb, e2))
-                out.append(1 if s1 >= s2 else 2)
+                if abs(s1 - s2) < margin:
+                    out.append(0)              # ambiguous → unknown
+                else:
+                    out.append(1 if s1 > s2 else 2)
             return out
 
         # Text-prompt fallback (original behavior)
@@ -280,10 +287,14 @@ class TeamAssigner:
         self._vote_history[player_id].append(observation)
         history = self._vote_history[player_id]
 
-        # Majority vote
+        # Majority of CONFIDENT votes only; 0 = unknown when the track never had a
+        # confident team observation (e.g. all-ambiguous fragmented crops). Downstream
+        # (majority_team in the worker) maps a 0-only track to team_id NULL.
         votes = list(history)
         team_1_count = votes.count(1)
         team_2_count = votes.count(2)
+        if team_1_count == 0 and team_2_count == 0:
+            return 0
         return 1 if team_1_count >= team_2_count else 2
 
     # ── Public API ─────────────────────────────────────────────────────────────
