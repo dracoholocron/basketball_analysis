@@ -1266,16 +1266,25 @@ def ball_track_session_run(self: Task, session_id: str,
         return _fail(f"video probe failed: {exc}")
     src_scale = (720.0 / height) if height > 720 else 1.0
 
-    # Resume point: explicit > smart default (earliest click within 15s before the
-    # pause — covers "the user corrected a bit earlier than where we stopped").
+    # Resume point: find the best seed frame so SAM2 has a real ball annotation.
+    # Priority: 1) explicit arg, 2) earliest positive annotation AT OR AFTER pause
+    # (user scrubbed forward to where ball is visible and clicked it), 3) latest
+    # annotation before pause (user corrected just before stop), 4) pause frame itself.
     start_frame = 0
     if resume_from_frame is not None:
         start_frame = max(0, int(resume_from_frame))
     elif pause_frame_prev is not None:
-        w0 = max(0, int(pause_frame_prev - 15 * fps))
-        cand = [int(round(float(p.get("frame_t", 0)) * fps)) for p in ball_points
-                if w0 <= float(p.get("frame_t", 0)) * fps <= pause_frame_prev + 1]
-        start_frame = min(cand) if cand else int(pause_frame_prev)
+        _pos = [int(round(float(p.get("frame_t", 0)) * fps))
+                for p in ball_points
+                if p.get("visible", True) and not p.get("negative")]
+        _after  = sorted(f for f in _pos if f >= pause_frame_prev)
+        _before = sorted(f for f in _pos if f < pause_frame_prev)
+        if _after:
+            start_frame = _after[0]     # user's forward correction
+        elif _before:
+            start_frame = _before[-1]   # latest annotation before pause
+        else:
+            start_frame = int(pause_frame_prev)
 
     # Partial track from the previous leg (truncate from the resume point).
     results: list[dict] = [{} for _ in range(total_frames)]

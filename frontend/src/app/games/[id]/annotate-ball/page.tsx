@@ -141,6 +141,8 @@ export default function AnnotateBallPage() {
     setSessionError(null);
     setSessionLoading(true);
     try {
+      // Auto-save current annotations so the task picks up the user's corrections.
+      if (points.length > 0) await putBallAnnotation(id, points);
       const s = await resumeBallSession(id);
       setSession(s);
       startPoll(id);
@@ -525,7 +527,7 @@ export default function AnnotateBallPage() {
                   {session.preview_url && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={session.preview_url}
+                      src={`${session.preview_url}&_t=${session.pause_frame ?? 0}`}
                       alt="preview en pausa"
                       className="w-full rounded-lg object-contain bg-black"
                     />
@@ -537,8 +539,10 @@ export default function AnnotateBallPage() {
                     </p>
                   )}
                   <p className="text-[11px] text-slate-300">
-                    Corrige con los modos <strong>Balón</strong> /&nbsp;
-                    <strong>Objeto incorrecto</strong> en este frame, luego:
+                    Si el balón <strong>no está visible aquí</strong>: avanza el video hasta
+                    encontrarlo, haz clic en él, y presiona Continuar — SAM2 arrancará
+                    desde esa posición. Si rastreó un objeto incorrecto, márcalo con
+                    <strong> Objeto incorrecto</strong>.
                   </p>
                   <button
                     onClick={handleResumeSession}
