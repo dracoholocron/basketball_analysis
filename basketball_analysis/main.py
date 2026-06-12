@@ -358,20 +358,35 @@ def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[
     import math
     n = len(yolo_tracks)
     out: list[dict] = []
+    src: list[str] = []   # per-frame ball source: yolo | sam2 | "" (none)
     for i in range(n):
         y = yolo_tracks[i] if i < len(yolo_tracks) else {}
         s = sam2_tracks[i] if i < len(sam2_tracks) else {}
         yc, sc = _ball_center(y), _ball_center(s)
         if yc and sc:
             d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
-            out.append(y if d <= 50 else s)
+            if d <= 50:
+                out.append(y); src.append("yolo")      # agree → YOLO (precise)
+            else:
+                out.append(s); src.append("sam2")      # disagree → SAM2 (anchored)
         elif yc:
-            out.append(y)
+            out.append(y); src.append("yolo")
         elif sc:
-            out.append(s)
+            out.append(s); src.append("sam2")
         else:
-            out.append({})
-    return out
+            out.append({}); src.append("")
+    return out, src
+
+
+def _tag_ball_sources(tracks: list[dict], source: list[str], label: str) -> None:
+    """After a ball stage, attribute frames newly given a ball to ``label`` (yolo/sam2/
+    sahi/kalman/interp) and clear frames that lost the ball. In-place on ``source``."""
+    for i in range(min(len(tracks), len(source))):
+        if 1 in tracks[i]:
+            if not source[i] and label:
+                source[i] = label
+        else:
+            source[i] = ""
 
 
 def run_pipeline(
@@ -515,6 +530,9 @@ def run_pipeline(
             del sv_ball
             save_stub(_ball_stub, ball_tracks)
         logger.info("Ball tracks done (%d frames)", len(ball_tracks))
+        # Per-frame ball SOURCE attribution (so YOLO vs SAM2 vs SAHI vs interpolation is
+        # measurable + visible). Starts as YOLO where the detector fired this frame.
+        ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
 
         _progress("keypoint_detection", 45)
         court_keypoints_per_frame = read_stub(use_stubs, _court_stub)
@@ -574,7 +592,7 @@ def run_pipeline(
                             logger.info("Ball dataset export: %d labeled frames", _written)
                         except Exception as exc:
                             logger.warning("Ball dataset export failed: %s", exc)
-                    ball_tracks = _fuse_ball_tracks(ball_tracks, sam2_tracks)
+                    ball_tracks, ball_source = _fuse_ball_tracks(ball_tracks, sam2_tracks)
                     _m = sum(1 for bt in ball_tracks if 1 not in bt)
                     logger.info(
                         "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
@@ -587,9 +605,22 @@ def run_pipeline(
         _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
         if _missing_before_sahi > 0:
             ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "sahi")
         ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "")        # clear removed frames
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "kalman")
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "interp")
+
+        from collections import Counter as _Counter
+        _bsrc = _Counter(s for s in ball_source if s)
+        logger.info(
+            "Ball sources: YOLO=%d, SAM2=%d, SAHI=%d, Kalman=%d, interp=%d (none=%d/%d)",
+            _bsrc.get("yolo", 0), _bsrc.get("sam2", 0), _bsrc.get("sahi", 0),
+            _bsrc.get("kalman", 0), _bsrc.get("interp", 0),
+            sum(1 for s in ball_source if not s), len(ball_source),
+        )
 
         _progress("team_assignment", 55)
         team_assigner = TeamAssigner(
@@ -1059,7 +1090,7 @@ def run_pipeline(
         )
         if show_poses:
             _frame = pose_drawer.draw_frame(_frame, _frame_idx, pose_sequence)
-        _frame = ball_tracks_drawer.draw_frame(_frame, _frame_idx, ball_tracks)
+        _frame = ball_tracks_drawer.draw_frame(_frame, _frame_idx, ball_tracks, ball_source)
         _frame = court_keypoint_drawer.draw_frame(_frame, _frame_idx, court_keypoints_per_frame)
         _frame = frame_number_drawer.draw_frame(_frame, _frame_idx)
         _frame = team_ball_control_drawer.draw_frame(_frame, _frame_idx, team_ball_control)
@@ -1194,6 +1225,8 @@ def run_pipeline(
         # Per-frame hoop bbox (or None when not detected)
         "hoop_tracks": hoop_tracks,
         "hoop_auto_present": _hoop_auto_present,   # YOLO auto-detection coverage (pre manual override)
+        "ball_source_counts": dict(_Counter(s for s in ball_source if s)),  # yolo/sam2/sahi/kalman/interp
+        "ball_total_frames": len(ball_source),
         # Per-frame referee bboxes (negative track IDs to avoid collision)
         "referee_tracks": referee_tracks,
         # High-action frame windows from ball movement analysis [(start, end), ...]
