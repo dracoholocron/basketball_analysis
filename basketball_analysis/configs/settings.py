@@ -268,6 +268,29 @@ class EngineSettings(BaseSettings):
             "chunk is double-buffered against GPU processing of the current one."
         ),
     )
+    sam2_offload_video: bool = Field(
+        default=True,
+        description=(
+            "Keep the SAM2 per-chunk video tensor on CPU RAM (~12.6MB/frame fp32; a "
+            "500-frame chunk ≈ 6GB → doesn't fit 12GB VRAM alongside the model). "
+            "False = video on GPU (faster) — only for big-VRAM GPUs/small chunks."
+        ),
+    )
+    sam2_offload_state: bool = Field(
+        default=False,
+        description=(
+            "Offload the SAM2 inference state to CPU (trades speed for memory, per the "
+            "official docs). We track ONE object so the state is small → keep on GPU "
+            "(False) for speed; was True before."
+        ),
+    )
+    sam2_chunk_in_ram: bool = Field(
+        default=True,
+        description=(
+            "Write SAM2 chunk JPEGs to /dev/shm (RAM) instead of disk — removes per-chunk "
+            "write+read I/O on WSL. Needs shm_size in compose (one chunk ≈ 50-120MB)."
+        ),
+    )
     sam2_vos_optimized: bool = Field(
         default=False,
         description=(

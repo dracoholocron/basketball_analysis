@@ -107,6 +107,20 @@ activo, eventos correctos. Cualquier optimización debe **mantener** esto.
 4. Re-perfilar con `(.git/gpu_prof.sh → .git/gpu_profile.csv)` y comparar contra el baseline de arriba.
 5. Mantener SIEMPRE el criterio: **misma cobertura de balón (91%), coseno de equipos y eventos**.
 
+## SAM2 — palancas de velocidad (investigado 2026-06-12)
+- **Config (calidad idéntica, implementado)**: `BA_SAM2_OFFLOAD_STATE=false` (1 objeto → estado
+  pequeño; el offload "trades speed for memory" según doc oficial), chunks JPEG en **/dev/shm**
+  (`BA_SAM2_CHUNK_IN_RAM`, requiere `shm_size: 2gb`), chunk 600 (limitado por RAM WSL=23GB: el tensor
+  de video es ~12.6MB/frame fp32 en RAM). `BA_SAM2_OFFLOAD_VIDEO=false` solo con mucha VRAM.
+- **EfficientTAM (piloto, implementado)**: opción "efficienttam" en la calidad de tracking del juego —
+  Meta ICCV 2025, ~1.6–2× más rápido que SAM2 con calidad comparable, misma API. Validar A/B vs
+  base_plus antes de adoptar. (EdgeTAM es para móvil; SAMURAI mejora tracking, no velocidad.)
+- **Hardware — respuesta directa**: más RAM solo permite chunks mayores (ganancia menor). La palanca
+  real es la GPU: una **RTX 4090 (Ada, sm_89)** hoy rendiría más que la 5070 porque su toolchain
+  maduro **desbloquea vos_optimized/torch.compile, TensorRT y NVENC** (los 3 bloqueados en sm_120);
+  una 5090 (Blackwell) hereda los mismos bloqueos. Alternativa: esperar toolchain sm_120 y encender
+  `BA_SAM2_VOS_OPTIMIZED=true`.
+
 ## Qué NO perseguir
 - **SAM 3 para el balón**: ~3.4× más lento que SAM 2.1 en 1 objeto (~2921 vs ~857 ms/frame), 3.45 GB.
   Útil solo para prompts de texto/concepto y multi-objeto. Mantener SAM 2.1; SAM 3 queda en el lab.

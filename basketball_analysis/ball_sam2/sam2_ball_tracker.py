@@ -26,12 +26,14 @@ except Exception:  # pragma: no cover - settings always available in pipeline
 
 logger = logging.getLogger(__name__)
 
-# Public Meta checkpoint URLs (092824 release)
+# Public Meta checkpoint URLs (092824 release) + EfficientTAM (Meta, ICCV 2025 — ~1.6-2x
+# faster than SAM2 on GPU with comparable quality; same video-predictor API).
 _CKPT_URLS = {
     "sam2.1_hiera_small.pt": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt",
     "sam2.1_hiera_tiny.pt": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt",
     "sam2.1_hiera_base_plus.pt": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt",
     "sam2.1_hiera_large.pt": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt",
+    "efficienttam_s.pt": "https://huggingface.co/yunyangx/efficient-track-anything/resolve/main/efficienttam_s.pt",
 }
 
 
@@ -91,11 +93,23 @@ class Sam2BallTracker:
         """Return per-frame ball tracks in 720p space, or None on failure."""
         if not ball_points:
             return None
+        # Backend: SAM2 (default) or EfficientTAM (pilot — same video-predictor API,
+        # ~1.6-2x faster). Selected when the checkpoint/config name says "efficienttam".
+        _is_etam = "efficienttam" in (self.checkpoint or "").lower() or \
+                   "efficienttam" in (self.config or "").lower()
         try:
             import torch
-            from sam2.build_sam import build_sam2_video_predictor
+            if _is_etam:
+                from efficient_track_anything.build_efficienttam import (
+                    build_efficienttam_video_predictor as _build_predictor,
+                )
+            else:
+                from sam2.build_sam import build_sam2_video_predictor as _build_predictor
         except Exception as exc:
-            logger.warning("sam2 not available (%s) — falling back to YOLO ball path", exc)
+            logger.warning(
+                "%s not available (%s) — falling back to YOLO ball path",
+                "efficient_track_anything" if _is_etam else "sam2", exc,
+            )
             return None
 
         ckpt = self._ensure_checkpoint()
@@ -134,11 +148,12 @@ class Sam2BallTracker:
         # encoder, memory attention) → major VOS speedup with the SAME weights (quality
         # identical; the first chunk pays the compile cost). Falls back to the normal
         # predictor if compile is unsupported on this GPU/driver. Toggle: BA_SAM2_VOS_OPTIMIZED.
-        _want_vos = bool(getattr(settings, "sam2_vos_optimized", True)) and device == "cuda"
+        _want_vos = (bool(getattr(settings, "sam2_vos_optimized", True))
+                     and device == "cuda" and not _is_etam)
         predictor = None
         if _want_vos:
             try:
-                predictor = build_sam2_video_predictor(
+                predictor = _build_predictor(
                     self.config, ckpt, device=device, vos_optimized=True,
                 )
                 logger.info("SAM2: vos_optimized (torch.compile) enabled")
@@ -146,7 +161,9 @@ class Sam2BallTracker:
                 logger.warning("SAM2 vos_optimized unavailable (%s) — using standard predictor", exc)
                 predictor = None
         if predictor is None:
-            predictor = build_sam2_video_predictor(self.config, ckpt, device=device)
+            predictor = _build_predictor(self.config, ckpt, device=device)
+            if _is_etam:
+                logger.info("Ball tracker backend: EfficientTAM (%s)", os.path.basename(ckpt))
 
         def _process_chunk(chunk_dir: str, src_idx: list[int]) -> None:
             """Run SAM2 over one on-disk chunk; src_idx[local] = source frame index."""
@@ -168,9 +185,16 @@ class Sam2BallTracker:
                 return
             autocast = (torch.autocast(device, dtype=torch.bfloat16)
                         if device == "cuda" else _nullctx())
+            # Offloads trade SPEED for memory (official SAM2 docs). We track ONE object,
+            # so the inference state is small → keep it on GPU by default. The video
+            # tensor (~12.6MB/frame fp32) stays on CPU unless explicitly enabled.
+            _off_video = bool(getattr(settings, "sam2_offload_video", True))
+            _off_state = bool(getattr(settings, "sam2_offload_state", False))
             with torch.inference_mode(), autocast:
                 state = predictor.init_state(
-                    video_path=chunk_dir, offload_video_to_cpu=True, offload_state_to_cpu=True,
+                    video_path=chunk_dir,
+                    offload_video_to_cpu=_off_video,
+                    offload_state_to_cpu=_off_state,
                 )
                 hb = self.box_half
                 first_local = min(chunk_seeds)
@@ -210,6 +234,21 @@ class Sam2BallTracker:
         _SENTINEL = object()
         _prod_err: list[BaseException] = []
 
+        # Chunk JPEGs in RAM (/dev/shm) instead of WSL-backed disk when available —
+        # eliminates per-chunk write+read I/O. Requires shm_size big enough in compose
+        # (one chunk of 720p JPEGs ≈ 50–120 MB). Falls back to the default tmp dir.
+        _shm_dir = None
+        if bool(getattr(settings, "sam2_chunk_in_ram", True)) and os.path.isdir("/dev/shm"):
+            _shm_dir = "/dev/shm"
+
+        def _mkchunkdir() -> str:
+            if _shm_dir:
+                try:
+                    return tempfile.mkdtemp(prefix="sam2_chunk_", dir=_shm_dir)
+                except OSError:
+                    pass
+            return tempfile.mkdtemp(prefix="sam2_chunk_")
+
         def _producer() -> None:
             cd: str | None = None
             sidx: list[int] = []
@@ -221,7 +260,7 @@ class Sam2BallTracker:
                     if gi % stride != 0:
                         continue
                     if cd is None:
-                        cd = tempfile.mkdtemp(prefix="sam2_chunk_")
+                        cd = _mkchunkdir()
                         sidx = []
                         loc = 0
                     cv2.imwrite(os.path.join(cd, f"{loc}.jpg"), frame)

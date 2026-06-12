@@ -20,6 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir "git+https://github.com/facebookresearch/sam2.git" || \
     echo "WARNING: sam2 install failed — ball SAM2 tracking will be disabled at runtime"
 
+# EfficientTAM (Meta, ICCV 2025) — pilot alternative ball tracker (~1.6-2x faster than
+# SAM2, same video-predictor API). Best-effort: only used when a game selects the
+# "efficienttam" ball-tracking quality; falls back to SAM2/YOLO if missing.
+RUN pip install --no-cache-dir "git+https://github.com/yformer/EfficientTAM.git" || \
+    echo "WARNING: EfficientTAM install failed — the efficienttam ball option will fall back"
+
 # EasyOCR for jersey-number recognition (player identity). Best-effort: jersey OCR
 # is skipped at runtime if the import fails. Model weights download on first use and
 # are cached under /app/engine/models/easyocr (mount a volume to persist).

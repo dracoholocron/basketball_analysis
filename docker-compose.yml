@@ -117,6 +117,7 @@ services:
     profiles: ["dev", "prod"]
     restart: unless-stopped
     runtime: nvidia           # requires nvidia-container-toolkit on host
+    shm_size: "2gb"           # SAM2 chunk JPEGs live in /dev/shm (RAM) — default 64MB is too small
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video   # 'video' exposes libnvidia-encode → h264_nvenc
@@ -139,7 +140,9 @@ services:
       BA_SAM2_STRIDE: "1"             # raise (2-3) on very long videos to cut SAM2 time
       BA_SAM2_LONG_FRAMES: "40000"    # only bump to stride 2 above this (≈26 min); keep stride 1 (full ball fidelity) for normal games
       BA_BALL_MAX_JUMP_PX: "80"       # remove_wrong threshold (px/frame @720p); 25 was too strict for a fast ball
-      BA_SAM2_CHUNK: "500"            # frames per SAM2 chunk (next chunk decoded/written while GPU runs current)
+      BA_SAM2_CHUNK: "600"            # frames/chunk; video tensor ≈12.6MB/frame in CPU RAM (600≈7.5GB; WSL has 23GB — raise only with more RAM)
+      BA_SAM2_OFFLOAD_STATE: "false"  # 1 object → small state; keep on GPU for speed (offload trades speed for memory)
+      BA_SAM2_CHUNK_IN_RAM: "true"    # chunk JPEGs in /dev/shm (see shm_size)
       BA_SAM2_VOS_OPTIMIZED: "false"  # torch.compile/Triton fails to link on this RTX 5070+WSL (disables SAM2); enable only where Triton compiles
       BA_BALL_DEBUG: "true"           # dump <output>.ball_debug.json (frame,bbox,source) for the TP/FP audit tool
       BA_VIDEO_ENCODER: "libx264"     # NVENC blocked by driver/SDK mismatch on this RTX 5070 (lib exposed but nvEncodeAPI unsupported); flip to "nvenc" after a driver update

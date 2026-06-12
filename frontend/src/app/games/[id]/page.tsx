@@ -118,7 +118,7 @@ export default function GameDetailPage() {
   const [teamName2, setTeamName2] = useState("");
   const [gameStartS, setGameStartS] = useState("");
   const [gameEndS, setGameEndS] = useState("");
-  const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large">("base_plus");
+  const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large" | "efficienttam">("base_plus");
   const fileRef = useRef<HTMLInputElement>(null);
   const annotatedVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -134,7 +134,7 @@ export default function GameDetailPage() {
       setTeamName2((g?.away_team_name as string) ?? "");
       setGameStartS(g?.analysis_start_s != null ? String(g.analysis_start_s) : "");
       setGameEndS(g?.analysis_end_s != null ? String(g.analysis_end_s) : "");
-      setBallQuality(((g?.ball_tracking_quality as "small"|"base_plus"|"large") ?? "base_plus"));
+      setBallQuality(((g?.ball_tracking_quality as "small"|"base_plus"|"large"|"efficienttam") ?? "base_plus"));
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
@@ -698,11 +698,12 @@ export default function GameDetailPage() {
                 <p className="text-xs text-slate-400">
                   Checkpoint mayor = mejor seguimiento del balón, pero más VRAM y tiempo.
                 </p>
-                <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 w-fit">
+                <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 w-fit flex-wrap">
                   {([
                     ["small", "Rápido"],
                     ["base_plus", "Equilibrado"],
                     ["large", "Máxima"],
+                    ["efficienttam", "ETAM piloto"],
                   ] as const).map(([q, label]) => (
                     <button key={q} onClick={() => setBallQuality(q)}
                       className={clsx(

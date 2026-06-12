@@ -211,10 +211,13 @@ def run_analysis(
                 _ball_quality = getattr(_g, "ball_tracking_quality", None) or "base_plus"
 
         # Map SAM 2.1 quality → (checkpoint, config). None → pipeline uses settings default.
+        # "efficienttam" = EfficientTAM pilot (Meta, ~1.6-2x faster, comparable quality);
+        # the tracker switches backend by the checkpoint/config name.
         _SAM2_BY_QUALITY = {
-            "small":     ("models/sam2.1_hiera_small.pt",     "configs/sam2.1/sam2.1_hiera_s.yaml"),
-            "base_plus": ("models/sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
-            "large":     ("models/sam2.1_hiera_large.pt",     "configs/sam2.1/sam2.1_hiera_l.yaml"),
+            "small":        ("models/sam2.1_hiera_small.pt",     "configs/sam2.1/sam2.1_hiera_s.yaml"),
+            "base_plus":    ("models/sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+            "large":        ("models/sam2.1_hiera_large.pt",     "configs/sam2.1/sam2.1_hiera_l.yaml"),
+            "efficienttam": ("models/efficienttam_s.pt",         "configs/efficienttam/efficienttam_s.yaml"),
         }
         sam2_checkpoint, sam2_config = _SAM2_BY_QUALITY.get(
             locals().get("_ball_quality", "base_plus"), (None, None)
