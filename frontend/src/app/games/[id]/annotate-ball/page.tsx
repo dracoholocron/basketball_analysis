@@ -120,6 +120,8 @@ export default function AnnotateBallPage() {
     setSessionError(null);
     setSessionLoading(true);
     try {
+      // Auto-save annotations so the task can read them from DB.
+      if (points.length > 0) await putBallAnnotation(id, points);
       const s = await startBallSession(id);
       setSession(s);
       startPoll(id);
