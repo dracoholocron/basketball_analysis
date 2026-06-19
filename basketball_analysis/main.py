@@ -392,10 +392,12 @@ def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[
     return out, src
 
 
-def _gate_yolo_ball(ball_tracks: list[dict]) -> tuple[list[dict], int]:
+def _gate_yolo_ball(ball_tracks: list[dict], skip: bool = False) -> tuple[list[dict], int]:
     """Drop implausible YOLO ball boxes (false positives): too large/small or non-square
     for a ball at 720p. Returns (filtered_tracks, dropped_count). Thresholds via settings.
-    Mirrors the size/aspect checks SAM2 applies to its masks."""
+    Pass skip=True when detections come from TrackNet (fixed-radius bbox, different geometry)."""
+    if skip:
+        return ball_tracks, 0
     from configs.settings import settings as _settings
     max_px = float(getattr(_settings, "ball_plausible_max_px", 70.0))
     min_px = float(getattr(_settings, "ball_plausible_min_px", 4.0))
@@ -635,18 +637,48 @@ def run_pipeline(
                 "Using curated ball track: %d/%d frames detected (%.1f%%)",
                 len(_protected), _n_pre, 100.0 * len(_protected) / max(1, _n_pre),
             )
+            # Export curated track as YOLO labels (same as SAM2 path) so the
+            # fine-tune corpus benefits from interactively-verified ground truth.
+            if getattr(_settings, "ball_export_dataset", False):
+                try:
+                    import uuid as _uuid
+                    from ball_sam2.export_dataset import export_yolo_dataset
+                    _written = export_yolo_dataset(
+                        input_video, ball_tracks, "/app/ball_dataset",
+                        game_id=_uuid.uuid4().hex[:8],
+                    )
+                    logger.info("Ball dataset export (curated): %d labeled frames", _written)
+                except Exception as _exc:
+                    logger.warning("Ball dataset export (curated) failed: %s", _exc)
         else:
+            _tn_path = getattr(_settings, "ball_tracknet_path", "")
+            _det_src = "tracknet" if (_tn_path and os.path.exists(_tn_path)) else "yolo"
             ball_tracks = read_stub(use_stubs, _ball_stub)
             if ball_tracks is None:
-                sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
-                ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
-                del sv_ball
+                _tn_conf = float(getattr(_settings, "ball_tracknet_conf", 0.5))
+                _tracknet_ok = False
+                if _tn_path and os.path.exists(_tn_path):
+                    try:
+                        from ball_tracknet import TrackNetDetector
+                        logger.info("TrackNetDetector primary detector: %s (conf=%.2f)", _tn_path, _tn_conf)
+                        _tn_det = TrackNetDetector(_tn_path, conf=_tn_conf)
+                        ball_tracks = _tn_det.detect_frames_streaming(input_video)
+                        logger.info("TrackNet ball detection done (%d frames)", len(ball_tracks))
+                        _tracknet_ok = True
+                    except Exception as _tn_exc:
+                        logger.warning("TrackNetDetector failed (%s), falling back to YOLO", _tn_exc)
+                        _det_src = "yolo"
+                if not _tracknet_ok:
+                    sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
+                    ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
+                    del sv_ball
+                # Gate runs on fresh detections only; stub already stores gated data.
+                ball_tracks, _gated = _gate_yolo_ball(ball_tracks, skip=(_det_src == "tracknet"))
+                if _gated:
+                    logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
                 save_stub(_ball_stub, ball_tracks)
             logger.info("Ball tracks done (%d frames)", len(ball_tracks))
-            ball_tracks, _gated = _gate_yolo_ball(ball_tracks)
-            if _gated:
-                logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
-            ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
+            ball_source = [_det_src if (1 in bt) else "" for bt in ball_tracks]
 
         _progress("keypoint_detection", 45)
         court_keypoints_per_frame = read_stub(use_stubs, _court_stub)

@@ -1,6 +1,22 @@
-# Set DOMAIN (e.g. basketai.dracoteck.com). Caddy auto-provisions TLS for it and the
-# s3.<DOMAIN> subdomain. Point both A records at this host.
-{$DOMAIN:localhost} {
+# Behind a Cloudflare Tunnel, Cloudflare terminates TLS at its edge and forwards plain
+# HTTP to this origin. So Caddy must serve HTTP only — `http://` prefixes make Caddy
+# listen on :80 and skip ACME/Let's Encrypt (which would fail/serve no purpose here).
+# The tunnel maps basketai.dracoteck.com and s3.basketai.dracoteck.com → http://localhost:80.
+http://{$DOMAIN:localhost} {
+
+    # ── MinIO (S3) under the SAME domain, by bucket path ─────────────────────
+    # Presigned URLs (path-style) are signed for THIS host, so video/outputs play
+    # over the domain's existing cert. A separate s3.<DOMAIN> subdomain would be a
+    # 2nd-level name that Cloudflare Universal SSL does NOT cover (TLS would fail).
+    handle /videos/* {
+        reverse_proxy minio:9000
+    }
+    handle /outputs/* {
+        reverse_proxy minio:9000
+    }
+    handle /stubs/* {
+        reverse_proxy minio:9000
+    }
 
     # ── API (match these prefixes FIRST) ─────────────────────────────────────
     handle /api/* {
@@ -29,6 +45,6 @@
 # ── MinIO (S3) — public endpoint for browser-facing presigned URLs ───────────
 # Videos/outputs are served via presigned URLs signed for this host. Set
 # BA_MINIO_PUBLIC_ENDPOINT=s3.<DOMAIN> and BA_MINIO_PUBLIC_SECURE=true on the API.
-s3.{$DOMAIN:localhost} {
+http://s3.{$DOMAIN:localhost} {
     reverse_proxy minio:9000
 }

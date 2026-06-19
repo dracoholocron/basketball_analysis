@@ -119,6 +119,87 @@ class StorageService:
     def delete_object(self, bucket: str, key: str) -> None:
         self._client.delete_object(Bucket=bucket, Key=key)
 
+    # ── Multipart upload (browser-direct, bypasses the 100MB tunnel request cap) ──
+    # The browser uploads each part with a presigned PUT straight to the PUBLIC
+    # endpoint (one request < part_size < 100MB). On completion the API gathers the
+    # part ETags itself via list_parts (server-side state keyed by UploadId), so the
+    # browser never needs to read the cross-origin ETag header (avoids a CORS
+    # expose-headers dependency).
+    def create_multipart_upload(
+        self,
+        bucket: str,
+        key: str,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        resp = self._client.create_multipart_upload(
+            Bucket=bucket, Key=key, ContentType=content_type
+        )
+        return resp["UploadId"]
+
+    def presign_upload_part(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        expiry: int = 3600,
+    ) -> str:
+        """Presigned PUT URL for one part, signed for the PUBLIC endpoint/host."""
+        return self._public_client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=expiry,
+        )
+
+    def list_parts(self, bucket: str, key: str, upload_id: str) -> list[dict]:
+        """Return uploaded parts as [{'PartNumber': n, 'ETag': '...'}], sorted."""
+        parts: list[dict] = []
+        marker = 0
+        while True:
+            resp = self._client.list_parts(
+                Bucket=bucket, Key=key, UploadId=upload_id, PartNumberMarker=marker
+            )
+            for p in resp.get("Parts", []):
+                parts.append({"PartNumber": p["PartNumber"], "ETag": p["ETag"]})
+            if resp.get("IsTruncated"):
+                marker = resp["NextPartNumberMarker"]
+            else:
+                break
+        parts.sort(key=lambda x: x["PartNumber"])
+        return parts
+
+    def complete_multipart_upload(
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        parts: list[dict] | None = None,
+    ) -> None:
+        """Complete the upload. When *parts* is None the ETags are fetched server-side."""
+        if parts is None:
+            parts = self.list_parts(bucket, key, upload_id)
+        if not parts:
+            raise ValueError("No uploaded parts found for this multipart upload")
+        self._client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+
+    def abort_multipart_upload(self, bucket: str, key: str, upload_id: str) -> None:
+        try:
+            self._client.abort_multipart_upload(
+                Bucket=bucket, Key=key, UploadId=upload_id
+            )
+        except ClientError as exc:
+            logger.warning("abort_multipart_upload failed for %s: %s", key, exc)
+
 
 # Module-level singleton
 _storage: StorageService | None = None

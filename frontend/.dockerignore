@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+# Dev-only env (LAN IP). Excluded so the Docker build honors only the
+# NEXT_PUBLIC_API_URL build-arg from docker-compose / root .env.
+.env.local
+.env.*.local
+npm-debug.log*

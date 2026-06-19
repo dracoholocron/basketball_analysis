@@ -62,6 +62,9 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      # Allow the browser to PUT multipart parts directly (cross-origin from the app
+      # domain to s3.<DOMAIN>). MinIO's default is already "*"; set for clarity.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
     volumes:
       - minio_data:/data
     ports:
@@ -148,6 +151,8 @@ services:
       BA_VIDEO_ENCODER: "libx264"     # NVENC blocked by driver/SDK mismatch on this RTX 5070 (lib exposed but nvEncodeAPI unsupported); flip to "nvenc" after a driver update
       BA_POSE_TOPDOWN: "true"         # per-player crop pose → distant players keep skeletons
       BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
+      BA_BALL_TRACKNET_PATH: "/app/engine/models/tracknet_ball__20260619-0555.pt"  # trained 2026-06-19 (val_loss 0.0029); TrackNet primary, YOLO fallback
+      BA_BALL_TRACKNET_CONF: "0.5"    # heatmap confidence threshold for TrackNet detector
       BA_PLAYER_MAX_H: "1080"         # player detection at native res → recover distant players
       BA_PLAYER_IMGSZ: "1280"         # YOLO imgsz for players (with MAX_H) to keep distant detail
       BA_BALL_IMGSZ: "960"            # YOLO imgsz for the small/distant ball (more GPU, better recall)
@@ -256,9 +261,16 @@ services:
     image: caddy:2-alpine
     profiles: ["prod"]
     restart: unless-stopped
+    # Caddy reads {$DOMAIN} from its OWN container env (not compose substitution),
+    # so it must be passed explicitly. Without it the site blocks bind to "localhost"
+    # and real requests (Host: <DOMAIN>) fall through to an empty 200.
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
     ports:
-      - "80:80"
-      - "443:443"
+      # Host 80/443 are taken by another project; Caddy serves HTTP only behind the
+      # Cloudflare Tunnel (TLS terminates at Cloudflare). Point the tunnel public
+      # hostnames at http://localhost:8080.
+      - "8080:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

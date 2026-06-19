@@ -103,6 +103,7 @@ export default function GameDetailPage() {
     error_message?: string | null;
   } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
   const [hasActiveJob, setHasActiveJob] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
@@ -198,8 +199,9 @@ export default function GameDetailPage() {
     const file = fileRef.current?.files?.[0];
     if (!file || !id) return;
     setUploading(true);
+    setUploadPct(0);
     try {
-      await uploadVideo(id, file);
+      await uploadVideo(id, file, (frac) => setUploadPct(Math.round(frac * 100)));
       setVideoReady(true);
       // Clear the file input so user can pick a different file later
       if (fileRef.current) fileRef.current.value = "";
@@ -407,7 +409,7 @@ export default function GameDetailPage() {
                 >
                   <Upload size={14} />
                   {uploading ? <Loader2 size={14} className="animate-spin" /> : null}
-                  {uploading ? "Cargando…" : videoReady ? "Cambiar video" : "Cargar video"}
+                  {uploading ? `Subiendo… ${uploadPct}%` : videoReady ? "Cambiar video" : "Cargar video"}
                 </label>
                 <button
                   className="flex items-center gap-1 px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-lg text-sm disabled:opacity-40"
@@ -416,7 +418,7 @@ export default function GameDetailPage() {
                   title="Guardar el video seleccionado (sin analizar)"
                 >
                   {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-                  {uploading ? "…" : "↑ Subir"}
+                  {uploading ? `${uploadPct}%` : "↑ Subir"}
                 </button>
                 {/* Step 2: Analyze */}
                 <button
@@ -429,6 +431,17 @@ export default function GameDetailPage() {
                   {analyzing ? "Analizando…" : jobStatus?.status === "done" ? "Re-analizar" : "Analizar"}
                 </button>
               </div>
+              {uploading && (
+                <div className="w-full max-w-xs">
+                  <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all duration-200"
+                      style={{ width: `${uploadPct}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">Subiendo video… {uploadPct}%</p>
+                </div>
+              )}
               {hasActiveJob && !analyzing && (
                 <p className="text-xs text-amber-400">Análisis en progreso…</p>
               )}

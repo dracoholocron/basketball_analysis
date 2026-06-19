@@ -203,6 +203,145 @@ async def upload_video(
     return video_asset
 
 
+# ── Multipart upload (videos >100MB; bypasses Cloudflare's per-request cap) ──────
+# Flow: initiate → (per part) part-url + browser PUT direct to s3.<DOMAIN> → complete.
+# Each part is < PART_SIZE (<100MB) so it crosses the tunnel fine.
+_MULTIPART_PART_SIZE = 50 * 1024 * 1024  # 50 MB (MinIO min part size is 5MB; max ~10k parts)
+
+
+class MultipartInitiateIn(BaseModel):
+    filename: str
+    file_size: int
+    content_type: Optional[str] = None
+
+
+class MultipartInitiateOut(BaseModel):
+    upload_id: str
+    key: str
+    bucket: str
+    part_size: int
+    total_parts: int
+
+
+class PartUrlIn(BaseModel):
+    upload_id: str
+    key: str
+    part_number: int
+
+
+class PartUrlOut(BaseModel):
+    url: str
+    part_number: int
+
+
+class MultipartCompleteIn(BaseModel):
+    upload_id: str
+    key: str
+    filename: str
+    file_size: int
+
+
+class MultipartAbortIn(BaseModel):
+    upload_id: str
+    key: str
+
+
+@router.post("/{game_id}/video/multipart/initiate", response_model=MultipartInitiateOut)
+async def initiate_multipart_upload(
+    game_id: uuid.UUID,
+    body: MultipartInitiateIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "coach")),
+):
+    """Begin a chunked upload. Returns the upload_id, S3 key and part layout."""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if body.file_size <= 0:
+        raise HTTPException(status_code=400, detail="file_size must be > 0")
+
+    storage = get_storage()
+    s3_key = f"raw/{game_id}/{body.filename}"
+    upload_id = storage.create_multipart_upload(
+        api_settings.minio_bucket_videos,
+        s3_key,
+        content_type=body.content_type or "video/mp4",
+    )
+    total_parts = (body.file_size + _MULTIPART_PART_SIZE - 1) // _MULTIPART_PART_SIZE
+    return MultipartInitiateOut(
+        upload_id=upload_id,
+        key=s3_key,
+        bucket=api_settings.minio_bucket_videos,
+        part_size=_MULTIPART_PART_SIZE,
+        total_parts=total_parts,
+    )
+
+
+@router.post("/{game_id}/video/multipart/part-url", response_model=PartUrlOut)
+async def get_multipart_part_url(
+    game_id: uuid.UUID,
+    body: PartUrlIn,
+    current_user: User = Depends(require_role("admin", "coach")),
+):
+    """Presigned PUT URL for one part (signed for the public s3.<DOMAIN> host)."""
+    if body.part_number < 1:
+        raise HTTPException(status_code=400, detail="part_number must be >= 1")
+    storage = get_storage()
+    url = storage.presign_upload_part(
+        api_settings.minio_bucket_videos,
+        body.key,
+        body.upload_id,
+        body.part_number,
+    )
+    return PartUrlOut(url=url, part_number=body.part_number)
+
+
+@router.post("/{game_id}/video/multipart/complete", response_model=VideoAssetRead, status_code=status.HTTP_201_CREATED)
+async def complete_multipart_upload(
+    game_id: uuid.UUID,
+    body: MultipartCompleteIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "coach")),
+):
+    """Finalize the upload (ETags fetched server-side) and register the VideoAsset."""
+    game = await db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    storage = get_storage()
+    try:
+        storage.complete_multipart_upload(
+            api_settings.minio_bucket_videos, body.key, body.upload_id
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not complete upload: {exc}")
+
+    video_asset = VideoAsset(
+        game_id=game_id,
+        s3_key=body.key,
+        filename=body.filename or "video.mp4",
+        file_size_bytes=body.file_size,
+    )
+    db.add(video_asset)
+    await db.commit()
+    await db.refresh(video_asset)
+    return video_asset
+
+
+@router.post("/{game_id}/video/multipart/abort", status_code=status.HTTP_204_NO_CONTENT)
+async def abort_multipart_upload(
+    game_id: uuid.UUID,
+    body: MultipartAbortIn,
+    current_user: User = Depends(require_role("admin", "coach")),
+):
+    """Cancel an in-progress multipart upload and free its parts."""
+    storage = get_storage()
+    storage.abort_multipart_upload(
+        api_settings.minio_bucket_videos, body.key, body.upload_id
+    )
+    return None
+
+
 @router.post("/{game_id}/analyze", response_model=JobRead, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_game(
     game_id: uuid.UUID,

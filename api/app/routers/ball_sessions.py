@@ -54,9 +54,9 @@ class BallSessionRead(BaseModel):
 
 def _enqueue(session_id: str, resume_from_frame: int | None = None) -> str:
     from ..worker.tasks import ball_track_session_run
-    t = ball_track_session_run.delay(
-        session_id=session_id,
-        resume_from_frame=resume_from_frame,
+    t = ball_track_session_run.apply_async(
+        kwargs={"session_id": session_id, "resume_from_frame": resume_from_frame},
+        queue="gpu",
     )
     return t.id
 
@@ -197,7 +197,7 @@ async def resume_ball_session(
     await db.refresh(sess)
 
     try:
-        _enqueue(str(sess.id), resume_from_frame=sess.pause_frame)
+        _enqueue(str(sess.id), resume_from_frame=sess.pause_frame or 0)
     except Exception as exc:
         sess.status = "error"
         sess.error_message = f"Could not enqueue: {exc}"[:480]

@@ -1021,7 +1021,7 @@ def generate_highlights(
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.finetune_ball_detector",
-                 max_retries=0, acks_late=True)
+                 max_retries=0, acks_late=True, reject_on_worker_lost=False)
 def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
                            max_images: int = 4000, batch: int = 8) -> dict:
     """
@@ -1102,6 +1102,131 @@ def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
         return {"ok": True, "labeled_frames": n_labels, "version": ver_name, "metrics": metrics}
     except Exception as exc:
         logger.exception("finetune_ball_detector failed")
+        return {"error": str(exc)}
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.train_tracknet",
+                 max_retries=0, acks_late=True, reject_on_worker_lost=False)
+def train_tracknet(
+    self: Task,
+    epochs: int = 30,
+    batch: int = 8,
+    lr: float = 1e-4,
+    max_samples: int | None = None,
+    dataset: str = "/app/ball_dataset",
+) -> dict:
+    """Train (or fine-tune) the TrackNetV2 temporal ball detector.
+
+    Reads the accumulated YOLO/TrackNet export at `dataset`, trains a
+    TrackNetV2 for `epochs`, saves a versioned .pt under models/ and
+    registers it as INACTIVE in model_versions (user activates from /admin/models).
+    """
+    import glob
+    import time as _time
+
+    session_id_hex = uuid.uuid4().hex[:12]
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    if engine_path not in sys.path:
+        sys.path.insert(0, engine_path)
+
+    tn_lbl_train = os.path.join(dataset, "tn_labels", "train")
+    yolo_lbl_train = os.path.join(dataset, "labels", "train")
+    if not os.path.isdir(tn_lbl_train) and not os.path.isdir(yolo_lbl_train):
+        return {
+            "error": (
+                f"No labels at {tn_lbl_train} or {yolo_lbl_train}. "
+                "Run analyses with BA_BALL_EXPORT_DATASET=true first."
+            )
+        }
+
+    lbl_dir = tn_lbl_train if os.path.isdir(tn_lbl_train) else yolo_lbl_train
+    n_labels = len([f for f in glob.glob(os.path.join(lbl_dir, "*.txt"))
+                    if os.path.getsize(f) > 0])
+    if n_labels < 50:
+        return {"error": f"Too few labeled frames ({n_labels}); annotate more games first."}
+
+    try:
+        import torch
+        from torch.utils.data import DataLoader
+        from ball_tracknet.dataset import TrackNetDataset
+        from ball_tracknet.model import TrackNetV2
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("train_tracknet: device=%s, epochs=%d, batch=%d, n_labels~=%d",
+                    device, epochs, batch, n_labels)
+
+        train_ds = TrackNetDataset(dataset, split="train", augment=True,
+                                   max_samples=max_samples)
+        val_ds   = TrackNetDataset(dataset, split="val",   augment=False,
+                                   max_samples=max_samples // 5 if max_samples else None)
+        train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True,
+                                  num_workers=0, pin_memory=(device.type == "cuda"))
+        val_loader   = DataLoader(val_ds,   batch_size=batch, shuffle=False,
+                                  num_workers=0, pin_memory=(device.type == "cuda"))
+
+        model = TrackNetV2().to(device)
+
+        # Resume from existing TrackNet weights if an active version exists
+        engine = _sync_engine()
+        active_paths = _active_model_paths(engine)
+        if "tracknet_ball" in active_paths and os.path.exists(active_paths["tracknet_ball"]):
+            state = torch.load(active_paths["tracknet_ball"], map_location=device,
+                               weights_only=True)
+            model.load_state_dict(state)
+            logger.info("train_tracknet: resuming from %s", active_paths["tracknet_ball"])
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+        loss_fn = torch.nn.BCELoss()
+
+        best_val_loss = float("inf")
+        import tempfile as _tempfile
+        best_path = os.path.join(_tempfile.gettempdir(), f"tracknet_best_{session_id_hex}.pt")
+
+        for epoch in range(1, epochs + 1):
+            model.train()
+            train_loss = 0.0
+            for inp, tgt in train_loader:
+                inp, tgt = inp.to(device), tgt.to(device)
+                optimizer.zero_grad()
+                pred = model(inp)
+                loss = loss_fn(pred, tgt)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            scheduler.step()
+
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for inp, tgt in val_loader:
+                    inp, tgt = inp.to(device), tgt.to(device)
+                    val_loss += loss_fn(model(inp), tgt).item()
+
+            avg_train = train_loss / max(1, len(train_loader))
+            avg_val   = val_loss   / max(1, len(val_loader))
+            logger.info("TrackNet epoch %d/%d  train=%.4f  val=%.4f",
+                        epoch, epochs, avg_train, avg_val)
+            if avg_val < best_val_loss:
+                best_val_loss = avg_val
+                torch.save(model.state_dict(), best_path)
+
+        # Register versioned copy
+        ts = _time.strftime("%Y%m%d-%H%M")
+        models_dir = os.path.join(engine_path, "models")
+        ver_name = f"tracknet_ball__{ts}.pt"
+        ver_path = os.path.join(models_dir, ver_name)
+        import shutil
+        shutil.copy(best_path, ver_path)
+        metrics = {"val_loss": round(best_val_loss, 6), "epochs": epochs,
+                   "n_train": len(train_ds), "n_val": len(val_ds)}
+        _register_model_version("tracknet_ball", f"models/{ver_name}",
+                                label=f"TrackNet {ts}", source="trained", metrics=metrics)
+        logger.info("train_tracknet done → INACTIVE version registered: %s", ver_path)
+        return {"ok": True, "version": ver_name, "metrics": metrics}
+
+    except Exception as exc:
+        logger.exception("train_tracknet failed")
         return {"error": str(exc)}
 
 
@@ -1316,7 +1441,9 @@ def ball_track_session_run(self: Task, session_id: str,
     preview_key = f"sessions/{session_id}/preview.jpg"
     track_key = f"sessions/{session_id}/track.json"
     _last_pause_check = [0.0]
+    _last_progress_write = [0.0]
     _pause_flag = [False]
+    _PROGRESS_INTERVAL_S = 2.0  # write progress to DB at most every 2 s
 
     def should_pause() -> bool:
         now = _time.time()
@@ -1328,15 +1455,18 @@ def ball_track_session_run(self: Task, session_id: str,
         return _pause_flag[0]
 
     def on_progress(frame_idx: int, covered: int, bbox, jpg_path: str) -> None:
-        with Session(engine) as db:
-            s = db.get(BallTrackSession, s_uuid)
-            if s:
-                s.current_frame = int(frame_idx)
-                s.total_frames = int(total_frames)
-                s.fps = fps
-                s.coverage_pct = round(100.0 * covered / max(1, total_frames), 1)
-                s.preview_key = preview_key
-                db.commit()
+        now = _time.time()
+        if now - _last_progress_write[0] >= _PROGRESS_INTERVAL_S:
+            _last_progress_write[0] = now
+            with Session(engine) as db:
+                s = db.get(BallTrackSession, s_uuid)
+                if s:
+                    s.current_frame = int(frame_idx)
+                    s.total_frames = int(total_frames)
+                    s.fps = fps
+                    s.coverage_pct = round(100.0 * covered / max(1, total_frames), 1)
+                    s.preview_key = preview_key
+                    db.commit()
         try:
             img = cv2.imread(jpg_path)
             if img is not None:
@@ -1368,9 +1498,11 @@ def ball_track_session_run(self: Task, session_id: str,
         return _fail(str(exc))
     if out is None:
         return _fail("tracker unavailable (sam2/efficienttam import or checkpoint failed)")
+    if "results" not in out:
+        return _fail(f"tracker returned unexpected output (keys: {list(out.keys())})")
 
     # Persist the (partial or full) track.
-    track = {str(i): r[1]["bbox"] for i, r in enumerate(out["results"]) if 1 in r}
+    track = {str(i): r[1]["bbox"] for i, r in enumerate(out.get("results", [])) if 1 in r}
     try:
         import io
         storage.upload_file(io.BytesIO(_json.dumps(track).encode()),
@@ -1410,6 +1542,7 @@ def ball_track_session_run(self: Task, session_id: str,
 # ── Model version registry helpers (worker side — has the models_data volume) ──────
 
 _MODELS_ROLE_PATTERNS = [
+    ("tracknet_ball", ("tracknet_ball",)),
     ("player", ("player_detector", "player")),
     ("ball",   ("ball_detector", "ball")),
     ("court",  ("court_keypoint", "court")),
@@ -1420,6 +1553,7 @@ _CANONICAL = {
     "ball": "ball_detector_model.pt",
     "court": "court_keypoint_detector.pt",
     "pose": "yolo11n-pose.pt",
+    # tracknet_ball has no canonical built-in; it's always trained
 }
 
 

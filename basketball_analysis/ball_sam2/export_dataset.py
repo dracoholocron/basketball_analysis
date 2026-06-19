@@ -90,3 +90,78 @@ def export_yolo_dataset(
             )
     logger.info("Exported %d positive ball frames to %s", written, out_dir)
     return written
+
+
+def export_tracknet_dataset(
+    video_path: str,
+    ball_tracks: list[dict],
+    out_dir: str,
+    game_id: str,
+    min_score: float = 0.3,
+    val_every: int = 5,
+    max_frames: int | None = None,
+) -> int:
+    """Write single-frame JPEG images + normalized (cx,cy) text labels for TrackNet.
+
+    Reuses the same images/{train,val}/<game>_<frame>.jpg and
+    labels/{train,val}/<game>_<frame>.txt layout as export_yolo_dataset so both
+    datasets share disk space.  Only the label format differs: TrackNet labels
+    contain a single line ``cx cy`` (both 0–1 normalised) instead of YOLO's
+    ``0 cx cy w h``.  Empty label = ball not visible.
+
+    A separate ``tracknet_data.yaml`` is written for the training script.
+    Returns the number of labeled (positive) frames written.
+    """
+    import cv2
+    from utils.video_utils import iter_video_frames
+
+    tn_lbl_train = os.path.join(out_dir, "tn_labels", "train")
+    tn_lbl_val   = os.path.join(out_dir, "tn_labels", "val")
+    img_train    = os.path.join(out_dir, "images", "train")
+    img_val      = os.path.join(out_dir, "images", "val")
+    for d in (tn_lbl_train, tn_lbl_val, img_train, img_val):
+        os.makedirs(d, exist_ok=True)
+
+    written = 0
+    for i, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+        if i >= len(ball_tracks):
+            break
+        if max_frames and i >= max_frames:
+            break
+        h, w = frame.shape[:2]
+        bt = ball_tracks[i]
+        is_val = (i % val_every == 0)
+        img_dir = img_val if is_val else img_train
+        lbl_dir = tn_lbl_val if is_val else tn_lbl_train
+        stem = f"{game_id}_{i:06d}"
+        img_path = os.path.join(img_dir, stem + ".jpg")
+
+        # Write image (shared with YOLO export if already there)
+        if not os.path.exists(img_path):
+            cv2.imwrite(img_path, frame)
+
+        bbox = bt.get(1, {}).get("bbox", [])
+        score = bt.get(1, {}).get("score", 1.0)
+        lbl_path = os.path.join(lbl_dir, stem + ".txt")
+        if len(bbox) >= 4 and score >= min_score:
+            x1, y1, x2, y2 = bbox[:4]
+            cx = ((x1 + x2) / 2.0) / w
+            cy = ((y1 + y2) / 2.0) / h
+            if 0 < cx < 1 and 0 < cy < 1:
+                with open(lbl_path, "w") as f:
+                    f.write(f"{cx:.6f} {cy:.6f}\n")
+                written += 1
+                continue
+        # Negative or no confident detection → empty label
+        open(lbl_path, "w").close()
+
+    yaml_path = os.path.join(out_dir, "tracknet_data.yaml")
+    if not os.path.exists(yaml_path):
+        with open(yaml_path, "w") as f:
+            f.write(
+                f"path: {out_dir}\n"
+                "images_train: images/train\nimages_val: images/val\n"
+                "labels_train: tn_labels/train\nlabels_val: tn_labels/val\n"
+            )
+    logger.info("Exported %d positive TrackNet frames to %s", written, out_dir)
+    return written

@@ -420,6 +420,18 @@ class EngineSettings(BaseSettings):
         default=False,
         description="Export SAM2-propagated ball boxes as a YOLO dataset during analysis (fine-tune corpus)",
     )
+    ball_tracknet_path: str = Field(
+        default="",
+        description=(
+            "Path to a trained TrackNetV2 .pt file. When set, TrackNet is used as the "
+            "primary per-frame ball detector instead of YOLO (with YOLO as fallback for "
+            "frames where TrackNet has no detection). Leave empty to disable."
+        ),
+    )
+    ball_tracknet_conf: float = Field(
+        default=0.5,
+        description="Heatmap peak confidence threshold for TrackNetDetector (0–1).",
+    )
 
     # ── Pose estimation ──────────────────────────────────────────────────────────
     pose_conf_threshold: float = Field(

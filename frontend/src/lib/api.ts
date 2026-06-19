@@ -56,14 +56,96 @@ export async function getGame(id: string) {
   return data;
 }
 
+export interface VideoAssetResult {
+  id: string;
+  game_id: string;
+  filename: string;
+  file_size_bytes: number | null;
+}
+
+/** onProgress receives a fraction in [0,1]. */
+export type UploadProgress = (fraction: number) => void;
+
+// Files larger than this use chunked multipart upload (direct to s3.<DOMAIN>),
+// which sidesteps Cloudflare's ~100MB per-request cap. Smaller files use the
+// single-request endpoint (one round trip through the API).
+const MULTIPART_THRESHOLD = 90 * 1024 * 1024; // 90 MB
+
 /** Upload a video file. Returns the VideoAsset — does NOT start analysis. */
-export async function uploadVideo(gameId: string, file: File) {
+export async function uploadVideo(
+  gameId: string,
+  file: File,
+  onProgress?: UploadProgress
+): Promise<VideoAssetResult> {
+  if (file.size > MULTIPART_THRESHOLD) {
+    return uploadVideoMultipart(gameId, file, onProgress);
+  }
   const form = new FormData();
   form.append("file", file);
   const { data } = await api.post(`/games/${gameId}/video`, form, {
     headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) onProgress(e.loaded / e.total);
+    },
   });
-  return data as { id: string; game_id: string; filename: string; file_size_bytes: number | null };
+  return data as VideoAssetResult;
+}
+
+/** Chunked upload: initiate → presigned PUT per part (direct to s3) → complete. */
+async function uploadVideoMultipart(
+  gameId: string,
+  file: File,
+  onProgress?: UploadProgress
+): Promise<VideoAssetResult> {
+  const { data: init } = await api.post(`/games/${gameId}/video/multipart/initiate`, {
+    filename: file.name,
+    file_size: file.size,
+    content_type: file.type || "video/mp4",
+  });
+  const { upload_id, key, part_size, total_parts } = init as {
+    upload_id: string;
+    key: string;
+    part_size: number;
+    total_parts: number;
+  };
+
+  try {
+    let uploadedBytes = 0;
+    for (let partNumber = 1; partNumber <= total_parts; partNumber++) {
+      const start = (partNumber - 1) * part_size;
+      const end = Math.min(start + part_size, file.size);
+      const blob = file.slice(start, end);
+
+      const { data: pu } = await api.post(`/games/${gameId}/video/multipart/part-url`, {
+        upload_id,
+        key,
+        part_number: partNumber,
+      });
+
+      // PUT goes DIRECT to the presigned s3.<DOMAIN> URL (not through /api/*).
+      const partStart = uploadedBytes;
+      await axios.put(pu.url, blob, {
+        headers: { "Content-Type": "application/octet-stream" },
+        onUploadProgress: (e) => {
+          if (onProgress) onProgress(Math.min(1, (partStart + (e.loaded || 0)) / file.size));
+        },
+      });
+      uploadedBytes = end;
+      if (onProgress) onProgress(Math.min(1, uploadedBytes / file.size));
+    }
+
+    const { data } = await api.post(`/games/${gameId}/video/multipart/complete`, {
+      upload_id,
+      key,
+      filename: file.name,
+      file_size: file.size,
+    });
+    return data as VideoAssetResult;
+  } catch (err) {
+    // Best-effort cleanup of the partial upload so it doesn't linger in MinIO.
+    api.post(`/games/${gameId}/video/multipart/abort`, { upload_id, key }).catch(() => {});
+    throw err;
+  }
 }
 
 export interface AnalysisOptions {
