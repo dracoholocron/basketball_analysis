@@ -18,3 +18,6 @@ class Player(Base):
 
     team: Mapped["Team"] = relationship(back_populates="players")
     metrics: Mapped[list["PlayerMetric"]] = relationship(back_populates="player")
+    divisions: Mapped[list["Division"]] = relationship(
+        secondary="player_divisions", back_populates="players"
+    )

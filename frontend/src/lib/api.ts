@@ -1,7 +1,12 @@
 import axios from "axios";
 import Cookies from "js-cookie";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// Default to SAME-ORIGIN ("" → relative "/api/v1") so a production build without an
+// explicit NEXT_PUBLIC_API_URL still works behind the reverse proxy (Caddy routes
+// /api/* to the API on the same domain). Avoids the bundle being pinned to
+// http://localhost:8000 (which triggers Chrome's Private Network Access prompt and
+// breaks login on other devices). Docker dev sets NEXT_PUBLIC_API_URL=http://localhost:8000.
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export const api = axios.create({
   baseURL: `${BASE_URL}/api/v1`,
@@ -51,18 +56,101 @@ export async function getGame(id: string) {
   return data;
 }
 
+export interface VideoAssetResult {
+  id: string;
+  game_id: string;
+  filename: string;
+  file_size_bytes: number | null;
+}
+
+/** onProgress receives a fraction in [0,1]. */
+export type UploadProgress = (fraction: number) => void;
+
+// Files larger than this use chunked multipart upload (direct to s3.<DOMAIN>),
+// which sidesteps Cloudflare's ~100MB per-request cap. Smaller files use the
+// single-request endpoint (one round trip through the API).
+const MULTIPART_THRESHOLD = 90 * 1024 * 1024; // 90 MB
+
 /** Upload a video file. Returns the VideoAsset — does NOT start analysis. */
-export async function uploadVideo(gameId: string, file: File) {
+export async function uploadVideo(
+  gameId: string,
+  file: File,
+  onProgress?: UploadProgress
+): Promise<VideoAssetResult> {
+  if (file.size > MULTIPART_THRESHOLD) {
+    return uploadVideoMultipart(gameId, file, onProgress);
+  }
   const form = new FormData();
   form.append("file", file);
   const { data } = await api.post(`/games/${gameId}/video`, form, {
     headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) onProgress(e.loaded / e.total);
+    },
   });
-  return data as { id: string; game_id: string; filename: string; file_size_bytes: number | null };
+  return data as VideoAssetResult;
+}
+
+/** Chunked upload: initiate → presigned PUT per part (direct to s3) → complete. */
+async function uploadVideoMultipart(
+  gameId: string,
+  file: File,
+  onProgress?: UploadProgress
+): Promise<VideoAssetResult> {
+  const { data: init } = await api.post(`/games/${gameId}/video/multipart/initiate`, {
+    filename: file.name,
+    file_size: file.size,
+    content_type: file.type || "video/mp4",
+  });
+  const { upload_id, key, part_size, total_parts } = init as {
+    upload_id: string;
+    key: string;
+    part_size: number;
+    total_parts: number;
+  };
+
+  try {
+    let uploadedBytes = 0;
+    for (let partNumber = 1; partNumber <= total_parts; partNumber++) {
+      const start = (partNumber - 1) * part_size;
+      const end = Math.min(start + part_size, file.size);
+      const blob = file.slice(start, end);
+
+      const { data: pu } = await api.post(`/games/${gameId}/video/multipart/part-url`, {
+        upload_id,
+        key,
+        part_number: partNumber,
+      });
+
+      // PUT goes DIRECT to the presigned s3.<DOMAIN> URL (not through /api/*).
+      const partStart = uploadedBytes;
+      await axios.put(pu.url, blob, {
+        headers: { "Content-Type": "application/octet-stream" },
+        onUploadProgress: (e) => {
+          if (onProgress) onProgress(Math.min(1, (partStart + (e.loaded || 0)) / file.size));
+        },
+      });
+      uploadedBytes = end;
+      if (onProgress) onProgress(Math.min(1, uploadedBytes / file.size));
+    }
+
+    const { data } = await api.post(`/games/${gameId}/video/multipart/complete`, {
+      upload_id,
+      key,
+      filename: file.name,
+      file_size: file.size,
+    });
+    return data as VideoAssetResult;
+  } catch (err) {
+    // Best-effort cleanup of the partial upload so it doesn't linger in MinIO.
+    api.post(`/games/${gameId}/video/multipart/abort`, { upload_id, key }).catch(() => {});
+    throw err;
+  }
 }
 
 export interface AnalysisOptions {
   pose_player_filter?: number[];
+  use_curated_ball?: boolean;
 }
 
 /** Start analysis of the already-uploaded video for a game. Returns a Job. */
@@ -82,6 +170,9 @@ export async function updateGameSettings(
     away_team2_jersey?: string;
     home_team_name?: string;
     away_team_name?: string;
+    analysis_start_s?: number | null;
+    analysis_end_s?: number | null;
+    ball_tracking_quality?: string;
   }
 ) {
   const { data } = await api.patch(`/games/${gameId}`, payload);
@@ -178,12 +269,20 @@ export interface BallPoint {
   frame_t: number;
   pixel: [number, number];   // intrinsic video resolution
   visible: boolean;          // false = ball NOT present in this frame
+  negative?: boolean;        // true = WRONG object (not the ball) — SAM2 rejection prompt
+}
+
+export interface BallFlaggedSegment {
+  start_s: number;
+  end_s: number;
+  reason: string;
 }
 
 export interface BallAnnotation {
   id: string;
   game_id: string;
   points: BallPoint[] | null;
+  flagged?: BallFlaggedSegment[] | null;  // SAM2 drift candidates from the last analysis
 }
 
 export async function getBallAnnotation(gameId: string): Promise<BallAnnotation | null> {
@@ -206,6 +305,52 @@ export async function putBallAnnotation(
 /** Trigger a background fine-tune of the ball detector on accumulated SAM2 auto-labels. */
 export async function triggerBallFinetune(epochs = 60): Promise<{ task_id: string; status: string; epochs: number }> {
   const { data } = await api.post(`/admin/finetune-ball`, null, { params: { epochs } });
+  return data;
+}
+
+// ── Interactive ball-tracking session ─────────────────────────────────────────
+
+export interface BallSession {
+  id: string;
+  game_id: string;
+  status: "queued" | "running" | "waiting_user" | "done" | "cancelled" | "error";
+  current_frame: number;
+  total_frames: number;
+  fps: number;
+  coverage_pct: number;
+  pause_reason: "lost" | "drift" | "user" | null;
+  pause_frame: number | null;
+  pause_requested: boolean;
+  preview_url: string | null;
+  error_message: string | null;
+}
+
+export async function getBallSession(gameId: string): Promise<BallSession | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/ball-session`);
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export async function startBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session`);
+  return data;
+}
+
+export async function pauseBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session/pause`);
+  return data;
+}
+
+export async function resumeBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session/resume`);
+  return data;
+}
+
+export async function cancelBallSession(gameId: string): Promise<BallSession> {
+  const { data } = await api.post(`/games/${gameId}/ball-session/cancel`);
   return data;
 }
 
@@ -241,6 +386,26 @@ export async function putHoopAnnotation(gameId: string, hoops: HoopBox[]): Promi
 export async function getLandmarkCatalog(): Promise<LandmarkCatalogItem[]> {
   const { data } = await api.get("/landmarks/catalog");
   return data;
+}
+
+// ── Team exemplars (FashionCLIP jersey matching) ────────────────────────────────
+export interface TeamExemplar {
+  frame_t: number;
+  bbox_norm: [number, number, number, number];  // x1,y1,x2,y2 normalized 0..1
+}
+export type TeamExemplars = Record<string, TeamExemplar[]>;  // "1" | "2" → exemplars
+
+export async function getTeamExemplars(gameId: string): Promise<TeamExemplars | null> {
+  try {
+    const { data } = await api.get(`/games/${gameId}/team-exemplars`);
+    return (data?.team_exemplars as TeamExemplars) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function putTeamExemplars(gameId: string, exemplars: TeamExemplars): Promise<void> {
+  await api.put(`/games/${gameId}/team-exemplars`, { team_exemplars: exemplars });
 }
 
 // ── Roster mapping (detected identities → real players) ─────────────────────────
@@ -295,6 +460,44 @@ export async function getTeamStats(teamId: string, seasonId?: string) {
   return data;
 }
 
+// ── Lab: SAM 3 pilot (experimental, isolated) ───────────────────────────────────
+export async function sam3Track(gameId: string, prompt: string, startS?: number, endS?: number | null) {
+  const { data } = await api.post(`/lab/sam3/track`, {
+    game_id: gameId, prompt, start_s: startS ?? 0, end_s: endS ?? null,
+  });
+  return data as { task_id: string; queued: boolean };
+}
+
+export async function sam3Result(taskId: string) {
+  const { data } = await api.get(`/lab/sam3/result/${taskId}`);
+  return data as {
+    state: string; error?: string; output_url?: string | null;
+    result?: { coverage_pct?: number; frames?: number; frames_with_object?: number; prompt?: string };
+  };
+}
+
+// ── Model version registry ──────────────────────────────────────────────────────
+export interface ModelVersion {
+  id: string; role: string; filename: string; label?: string | null;
+  source: string; metrics?: Record<string, number | null> | null; is_active: boolean;
+}
+export async function listModelVersions(): Promise<{ roles: Record<string, ModelVersion[]> }> {
+  const { data } = await api.get("/models");
+  return data;
+}
+export async function activateModelVersion(id: string) {
+  const { data } = await api.post(`/models/${id}/activate`);
+  return data;
+}
+export async function scanModels() {
+  const { data } = await api.post("/models/scan");
+  return data as { task_id: string; queued: boolean };
+}
+export async function exportTensorrtEngine(role: string) {
+  const { data } = await api.post(`/models/export-tensorrt/${role}`);
+  return data as { task_id: string; queued: boolean; role: string };
+}
+
 // ── Seasons ───────────────────────────────────────────────────────────────────
 export async function listSeasons(skip = 0, limit = 50) {
   const { data } = await api.get("/seasons", { params: { skip, limit } });
@@ -346,6 +549,53 @@ export async function updatePlayer(playerId: string, payload: Record<string, unk
 
 export async function deletePlayer(playerId: string) {
   await api.delete(`/players/${playerId}`);
+}
+
+// ── Divisions (team age groups, player M2M) ─────────────────────────────────────
+export interface Division {
+  id: string;
+  team_id: string;
+  name: string;
+  category?: string | null;
+  season_id?: string | null;
+  player_count: number;
+}
+
+export async function listTeamDivisions(teamId: string): Promise<Division[]> {
+  const { data } = await api.get(`/teams/${teamId}/divisions`);
+  return data;
+}
+
+export async function createDivision(teamId: string, payload: Record<string, unknown>) {
+  const { data } = await api.post(`/teams/${teamId}/divisions`, payload);
+  return data;
+}
+
+export async function updateDivision(divisionId: string, payload: Record<string, unknown>) {
+  const { data } = await api.put(`/divisions/${divisionId}`, payload);
+  return data;
+}
+
+export async function deleteDivision(divisionId: string) {
+  await api.delete(`/divisions/${divisionId}`);
+}
+
+export async function listDivisionPlayers(divisionId: string) {
+  const { data } = await api.get(`/divisions/${divisionId}/players`);
+  return data;
+}
+
+export async function listPlayerDivisions(playerId: string): Promise<Division[]> {
+  const { data } = await api.get(`/players/${playerId}/divisions`);
+  return data;
+}
+
+export async function assignPlayerToDivision(divisionId: string, playerId: string) {
+  await api.post(`/divisions/${divisionId}/players/${playerId}`);
+}
+
+export async function unassignPlayerFromDivision(divisionId: string, playerId: string) {
+  await api.delete(`/divisions/${divisionId}/players/${playerId}`);
 }
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────

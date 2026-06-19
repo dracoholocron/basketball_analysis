@@ -120,7 +120,7 @@ class HoopDetector:
         """Detect hoop in every frame using batched iter_video_frames at max_height."""
         if self._dummy:
             return []
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
         from configs.settings import settings as _s
 
         results: list[Optional[list[float]]] = []
@@ -131,7 +131,7 @@ class HoopDetector:
             for r in self._model.predict(frames, conf=self.conf, verbose=False, device=self._device):
                 results.append(self._hoop_from_result(r))
 
-        for frame in iter_video_frames(video_path, max_height=max_height):
+        for frame in iter_video_frames_prefetch(video_path, max_height=max_height):
             batch.append(frame)
             if len(batch) == batch_size:
                 _flush(batch)

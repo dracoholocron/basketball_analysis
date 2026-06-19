@@ -26,6 +26,11 @@ class BallAnnotation(Base):
 
     points: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
+    # Auto-flagged suspect segments from the LAST analysis (SAM2 drift candidates):
+    # [{"start_s": float, "end_s": float, "reason": str}] — shown in the annotate-ball
+    # UI so the user can review/correct (negative click or re-seed) and re-run.
+    flagged: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

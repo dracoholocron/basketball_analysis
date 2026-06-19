@@ -81,24 +81,25 @@ class BallTracker:
         pass.  Frames are batched for GPU throughput without loading the entire
         video into RAM.
         """
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         all_sv: list[sv.Detections] = []
         self._cls_names: dict | None = None
         batch: list = []
         batch_size = settings.yolo_batch_size
         _half = bool(getattr(settings, "yolo_half", False)) and str(self._device).startswith("cuda")
+        _imgsz = getattr(settings, "ball_imgsz", 640)
 
         def _flush(frames: list) -> None:
             for r in self.model.predict(
                 frames, conf=self.conf, iou=self.iou, verbose=False,
-                device=self._device, half=_half,
+                device=self._device, half=_half, imgsz=_imgsz,
             ):
                 if self._cls_names is None:
                     self._cls_names = r.names
                 all_sv.append(sv.Detections.from_ultralytics(r))
 
-        for frame in iter_video_frames(video_path, max_height=max_height):
+        for frame in iter_video_frames_prefetch(video_path, max_height=max_height):
             batch.append(frame)
             if len(batch) == batch_size:
                 _flush(batch)
@@ -212,7 +213,7 @@ class BallTracker:
         tile_size: int | None = None,
         overlap: float | None = None,
         sahi_conf: float | None = None,
-        min_gap_frames: int = 8,
+        min_gap_frames: int | None = None,
     ) -> list[dict]:
         """
         Selective SAHI: re-run tiled detection only on long gaps where no ball was found.
@@ -225,6 +226,11 @@ class BallTracker:
             tile_size = getattr(settings, "ball_sahi_tile", 640)
         if overlap is None:
             overlap = getattr(settings, "ball_sahi_overlap", 0.25)
+        if min_gap_frames is None:
+            # Higher → SAHI runs on fewer (longer) gaps; short gaps are filled by
+            # interpolation/Kalman. Tunable via BA_BALL_SAHI_MIN_GAP. Default 8 keeps
+            # the previous behavior.
+            min_gap_frames = getattr(settings, "ball_sahi_min_gap", 8)
 
         all_missing = sorted(i for i, bt in enumerate(ball_tracks) if 1 not in bt)
         if not all_missing:
@@ -261,11 +267,17 @@ class BallTracker:
         found = 0
         remaining = set(sahi_frames)
 
-        from utils.video_utils import iter_video_frames
-        for frame_idx, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+        # Decode ONLY the long-gap frames (grab()-skip the rest) — SAHI tiles/conf are
+        # unchanged, so recovered boxes are identical; we just avoid decoding frames we
+        # never feed to SAHI. Big speedup since gaps are a small fraction of the video.
+        from utils.video_utils import iter_video_frames_selective
+        _targets = set(sahi_frames)
+        for frame_idx, frame in iter_video_frames_selective(
+            video_path, lambda i: i in _targets, max_height=720
+        ):
             if frame_idx >= len(tracks):
                 break
-            if frame_idx not in remaining:
+            if frame is None or frame_idx not in remaining:
                 continue
             bbox = self._sahi_detect_frame(frame, tile_size, overlap, conf)
             if bbox is not None:
@@ -354,34 +366,38 @@ class BallTracker:
                 best_conf = bc
         return (best_bbox, best_conf) if return_conf else best_bbox
 
-    def remove_wrong_detections(self,ball_positions):
+    def remove_wrong_detections(self, ball_positions, max_jump_px: float | None = None,
+                                protected: set | None = None):
         """
-        Filter out incorrect ball detections based on maximum allowed movement distance.
+        Drop detections that jump implausibly far from the last good one.
 
         Args:
-            ball_positions (list): List of detected ball positions across frames.
-
-        Returns:
-            list: Filtered ball positions with incorrect detections removed.
+            ball_positions: per-frame ball dicts.
+            max_jump_px: max plausible ball movement per frame (px @720p). None →
+                settings.ball_max_jump_px (default 80). The old hard-coded 25 was too
+                strict for a fast ball (pass/shot) and discarded many TRUE detections,
+                which Kalman then had to reconstruct.
+            protected: frame indices never removed (e.g. SAM2-sourced frames, trusted).
         """
-        
-        maximum_allowed_distance = 25
+        if max_jump_px is None:
+            max_jump_px = float(getattr(settings, "ball_max_jump_px", 80.0))
+        protected = protected or set()
         last_good_frame_index = -1
 
         for i in range(len(ball_positions)):
             current_box = ball_positions[i].get(1, {}).get('bbox', [])
-
             if len(current_box) == 0:
                 continue
-
+            if i in protected:
+                last_good_frame_index = i      # trust SAM2: anchor, never drop
+                continue
             if last_good_frame_index == -1:
-                # First valid detection
                 last_good_frame_index = i
                 continue
 
             last_good_box = ball_positions[last_good_frame_index].get(1, {}).get('bbox', [])
             frame_gap = i - last_good_frame_index
-            adjusted_max_distance = maximum_allowed_distance * frame_gap
+            adjusted_max_distance = max_jump_px * frame_gap
 
             if np.linalg.norm(np.array(last_good_box[:2]) - np.array(current_box[:2])) > adjusted_max_distance:
                 ball_positions[i] = {}

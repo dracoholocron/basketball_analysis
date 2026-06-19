@@ -12,6 +12,7 @@ from ..core.deps import get_current_user, require_role
 from ..models.metrics import FrameMetric
 from ..models.job import Job, JobStatus
 from ..models.metrics import PlayerMetric
+from ..models.hoop_annotation import HoopAnnotation
 from ..models.game import Game
 from ..models.team import Team
 from ..models.player import Player
@@ -59,6 +60,22 @@ async def get_game_metrics(
     )
     total_frames = fm_result.scalar_one()
 
+    # Hoop detection coverage (frames where a rim was located) + manually configured hoops.
+    hoop_frames = (await db.execute(
+        select(func.count()).select_from(FrameMetric)
+        .where(FrameMetric.job_id == job.id, FrameMetric.hoop_present.is_(True))
+    )).scalar_one()
+    hoops_configured = 0
+    hoops_with_backboard = 0
+    ha = (await db.execute(
+        select(HoopAnnotation).where(HoopAnnotation.game_id == game_id)
+    )).scalar_one_or_none()
+    if ha is not None and ha.hoops:
+        rim_ids = {b.get("hoop_id", 0) for b in ha.hoops if b.get("kind", "rim") == "rim"}
+        bb_ids = {b.get("hoop_id", 0) for b in ha.hoops if b.get("kind") == "backboard"}
+        hoops_configured = len(rim_ids)
+        hoops_with_backboard = len(rim_ids & bb_ids)
+
     t1_poss = sum(p.possession_frames for p in player_metrics if p.team_id == 1)
     t2_poss = sum(p.possession_frames for p in player_metrics if p.team_id == 2)
     total_poss = t1_poss + t2_poss or 1
@@ -91,10 +108,15 @@ async def get_game_metrics(
         team2_interceptions=sum(p.interceptions_made for p in t2),
         team1_shots_attempted=sum(p.shots_attempted for p in t1),
         team2_shots_attempted=sum(p.shots_attempted for p in t2),
+        team1_shots_made=sum(p.shots_made for p in t1),
+        team2_shots_made=sum(p.shots_made for p in t2),
         team1_rebounds=sum(p.rebounds for p in t1),
         team2_rebounds=sum(p.rebounds for p in t2),
         team1_steals_cv=sum(p.steals_cv for p in t1),
         team2_steals_cv=sum(p.steals_cv for p in t2),
+        hoop_detected_frames=int(hoop_frames or 0),
+        hoops_configured=hoops_configured,
+        hoops_with_backboard=hoops_with_backboard,
         players=[PlayerMetricRead.model_validate(p) for p in player_metrics],
     )
 

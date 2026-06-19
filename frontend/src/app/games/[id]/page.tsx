@@ -3,6 +3,7 @@ import { useEffect, useState, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import {
   getGame,
   uploadVideo,
@@ -24,7 +25,7 @@ import {
 } from "recharts";
 import {
   Activity, AlertCircle, CheckCircle2, Crosshair, EyeOff, Film, Loader2,
-  Settings2, Target, Upload, X, Zap,
+  Settings2, Target, Upload, Users, X, Zap,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -41,6 +42,10 @@ interface PlayerMetric {
   possession_frames: number;
   passes_made: number;
   interceptions_made: number;
+  shots_attempted?: number;
+  shots_made?: number;
+  shots_missed?: number;
+  rebounds?: number;
 }
 
 interface Metrics {
@@ -53,6 +58,13 @@ interface Metrics {
   team2_passes: number;
   team1_interceptions: number;
   team2_interceptions: number;
+  team1_shots_attempted?: number;
+  team2_shots_attempted?: number;
+  team1_shots_made?: number;
+  team2_shots_made?: number;
+  hoop_detected_frames?: number;
+  hoops_configured?: number;
+  hoops_with_backboard?: number;
   players: PlayerMetric[];
 }
 
@@ -91,6 +103,7 @@ export default function GameDetailPage() {
     error_message?: string | null;
   } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
   const [hasActiveJob, setHasActiveJob] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
@@ -104,7 +117,11 @@ export default function GameDetailPage() {
   const [jerseyTeam2, setJerseyTeam2] = useState("");
   const [teamName1, setTeamName1] = useState("");
   const [teamName2, setTeamName2] = useState("");
+  const [gameStartS, setGameStartS] = useState("");
+  const [gameEndS, setGameEndS] = useState("");
+  const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large" | "efficienttam">("base_plus");
   const fileRef = useRef<HTMLInputElement>(null);
+  const annotatedVideoRef = useRef<HTMLVideoElement>(null);
 
   const showPoses = (game?.show_poses as boolean) ?? true;
 
@@ -116,6 +133,9 @@ export default function GameDetailPage() {
       setJerseyTeam2((g?.away_team2_jersey as string) ?? "dark blue shirt");
       setTeamName1((g?.home_team_name as string) ?? "");
       setTeamName2((g?.away_team_name as string) ?? "");
+      setGameStartS(g?.analysis_start_s != null ? String(g.analysis_start_s) : "");
+      setGameEndS(g?.analysis_end_s != null ? String(g.analysis_end_s) : "");
+      setBallQuality(((g?.ball_tracking_quality as "small"|"base_plus"|"large"|"efficienttam") ?? "base_plus"));
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
@@ -179,8 +199,9 @@ export default function GameDetailPage() {
     const file = fileRef.current?.files?.[0];
     if (!file || !id) return;
     setUploading(true);
+    setUploadPct(0);
     try {
-      await uploadVideo(id, file);
+      await uploadVideo(id, file, (frac) => setUploadPct(Math.round(frac * 100)));
       setVideoReady(true);
       // Clear the file input so user can pick a different file later
       if (fileRef.current) fileRef.current.value = "";
@@ -238,11 +259,14 @@ export default function GameDetailPage() {
     // Persist jersey + team-name changes before starting analysis
     const t1 = jerseyTeam1.trim() || "white shirt";
     const t2 = jerseyTeam2.trim() || "dark blue shirt";
-    const payload: Record<string, string> = {};
+    const payload: Record<string, string | number | null> = {};
     if (t1 !== (game?.home_team1_jersey as string)) payload.home_team1_jersey = t1;
     if (t2 !== (game?.away_team2_jersey as string)) payload.away_team2_jersey = t2;
     if (teamName1.trim() && teamName1.trim() !== (game?.home_team_name as string)) payload.home_team_name = teamName1.trim();
     if (teamName2.trim() && teamName2.trim() !== (game?.away_team_name as string)) payload.away_team_name = teamName2.trim();
+    payload.analysis_start_s = gameStartS.trim() ? Number(gameStartS) : 0;
+    payload.analysis_end_s = gameEndS.trim() ? Number(gameEndS) : null;
+    if (ballQuality !== (game?.ball_tracking_quality as string)) payload.ball_tracking_quality = ballQuality;
     if (Object.keys(payload).length > 0) {
       try {
         const updated = await updateGameSettings(id, payload);
@@ -276,18 +300,29 @@ export default function GameDetailPage() {
     }
   }
 
+  const chartTeam1 = metrics?.home_team_name || "Local";
+  const chartTeam2 = metrics?.away_team_name || "Visitante";
   const possessionData = metrics ? [
-    { name: "Team 1", value: metrics.team1_possession_pct },
-    { name: "Team 2", value: metrics.team2_possession_pct },
+    { name: chartTeam1, value: metrics.team1_possession_pct },
+    { name: chartTeam2, value: metrics.team2_possession_pct },
   ] : [];
 
   const passData = metrics ? [
-    { name: "Passes",       team1: metrics.team1_passes,       team2: metrics.team2_passes },
-    { name: "Interceptions",team1: metrics.team1_interceptions, team2: metrics.team2_interceptions },
+    { name: "Pases",          team1: metrics.team1_passes,        team2: metrics.team2_passes },
+    { name: "Intercepciones", team1: metrics.team1_interceptions, team2: metrics.team2_interceptions },
   ] : [];
 
   const shotCount    = cvEvents.filter(e => e.event_type === "shot_attempt").length;
   const reboundCount = cvEvents.filter(e => e.event_type === "rebound").length;
+
+  // Field-goal shooting from attributed per-player metrics (team-coherent).
+  const t1Att = metrics?.team1_shots_attempted ?? 0;
+  const t2Att = metrics?.team2_shots_attempted ?? 0;
+  const t1Made = metrics?.team1_shots_made ?? 0;
+  const t2Made = metrics?.team2_shots_made ?? 0;
+  const shotsAttempted = t1Att + t2Att;
+  const shotsMade = t1Made + t2Made;
+  const fgPct = (m: number, a: number) => (a > 0 ? Math.round((100 * m) / a) : 0);
   const stealCount   = cvEvents.filter(e => e.event_type === "steal").length;
 
   return (
@@ -352,6 +387,15 @@ export default function GameDetailPage() {
                 Anotar aro
               </Link>
             )}
+            {videoReady && (
+              <Link
+                href={`/games/${id}/annotate-teams`}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                <Users size={16} />
+                Anotar equipos
+              </Link>
+            )}
             <div className="flex flex-col gap-2">
               <input ref={fileRef} type="file" accept="video/*" className="hidden" id="video-input" onChange={() => {
                 // Show the upload button as active when a file is selected
@@ -365,7 +409,7 @@ export default function GameDetailPage() {
                 >
                   <Upload size={14} />
                   {uploading ? <Loader2 size={14} className="animate-spin" /> : null}
-                  {uploading ? "Cargando…" : videoReady ? "Cambiar video" : "Cargar video"}
+                  {uploading ? `Subiendo… ${uploadPct}%` : videoReady ? "Cambiar video" : "Cargar video"}
                 </label>
                 <button
                   className="flex items-center gap-1 px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-lg text-sm disabled:opacity-40"
@@ -374,7 +418,7 @@ export default function GameDetailPage() {
                   title="Guardar el video seleccionado (sin analizar)"
                 >
                   {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-                  {uploading ? "…" : "↑ Subir"}
+                  {uploading ? `${uploadPct}%` : "↑ Subir"}
                 </button>
                 {/* Step 2: Analyze */}
                 <button
@@ -387,6 +431,17 @@ export default function GameDetailPage() {
                   {analyzing ? "Analizando…" : jobStatus?.status === "done" ? "Re-analizar" : "Analizar"}
                 </button>
               </div>
+              {uploading && (
+                <div className="w-full max-w-xs">
+                  <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500 transition-all duration-200"
+                      style={{ width: `${uploadPct}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">Subiendo video… {uploadPct}%</p>
+                </div>
+              )}
               {hasActiveJob && !analyzing && (
                 <p className="text-xs text-amber-400">Análisis en progreso…</p>
               )}
@@ -486,12 +541,16 @@ export default function GameDetailPage() {
                 {annotatedVideoUrl ? (
                   <>
                     <video
+                      ref={annotatedVideoRef}
                       controls
                       className="w-full rounded-lg bg-black"
                       src={annotatedVideoUrl}
                     >
                       Tu navegador no soporta la reproducción de video.
                     </video>
+                    <div className="mt-2">
+                      <VideoControls videoRef={annotatedVideoRef} />
+                    </div>
                     <a
                       href={annotatedVideoUrl}
                       download
@@ -615,6 +674,61 @@ export default function GameDetailPage() {
                 </div>
               </div>
 
+              {/* Game window — exclude warm-up / pre-game from metrics */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Ventana del juego (opcional)</p>
+                <p className="text-xs text-slate-400">
+                  Las métricas (posesión, pases, control, tiros) cuentan solo dentro de esta ventana.
+                  Útil para excluir el calentamiento previo. Déjalo vacío para todo el video.
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Inicio (segundos)</label>
+                    <input
+                      type="number" min={0} step={1}
+                      value={gameStartS}
+                      onChange={e => setGameStartS(e.target.value)}
+                      placeholder="ej: 55"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Fin (segundos, vacío=fin)</label>
+                    <input
+                      type="number" min={0} step={1}
+                      value={gameEndS}
+                      onChange={e => setGameEndS(e.target.value)}
+                      placeholder="ej: 380"
+                      className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Ball tracking quality (SAM 2.1 checkpoint) */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Calidad de tracking de balón (SAM 2.1)</p>
+                <p className="text-xs text-slate-400">
+                  Checkpoint mayor = mejor seguimiento del balón, pero más VRAM y tiempo.
+                </p>
+                <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 w-fit flex-wrap">
+                  {([
+                    ["small", "Rápido"],
+                    ["base_plus", "Equilibrado"],
+                    ["large", "Máxima"],
+                    ["efficienttam", "ETAM piloto"],
+                  ] as const).map(([q, label]) => (
+                    <button key={q} onClick={() => setBallQuality(q)}
+                      className={clsx(
+                        "px-3 py-1.5 text-xs rounded-md transition-colors",
+                        ballQuality === q ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white",
+                      )}>
+                      {label} <span className="opacity-60">({q})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Pose skeleton toggle */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
@@ -722,6 +836,77 @@ export default function GameDetailPage() {
           </div>
         )}
 
+        {/* Field-goal shooting (attempts / makes / FG%, with team split) */}
+        {metrics && shotsAttempted > 0 && (
+          <div className="bg-slate-800 rounded-xl p-5">
+            <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
+              <Target size={16} className="text-orange-400" /> Tiros de campo
+            </h2>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              {[
+                { label: "Anotados", value: shotsMade },
+                { label: "Intentos", value: shotsAttempted },
+                { label: "FG%", value: `${fgPct(shotsMade, shotsAttempted)}%` },
+              ].map(({ label, value }) => (
+                <div key={label} className="text-center">
+                  <p className="text-3xl font-bold text-orange-400">{value}</p>
+                  <p className="text-xs text-slate-400 mt-1">{label}</p>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg bg-slate-700/40 px-3 py-2" style={{ borderLeft: `3px solid ${TEAM_COLORS[0]}` }}>
+                <p className="text-slate-300 font-medium truncate">{chartTeam1}</p>
+                <p className="text-slate-400">{t1Made}/{t1Att} · <span className="text-white">{fgPct(t1Made, t1Att)}% FG</span></p>
+              </div>
+              <div className="rounded-lg bg-slate-700/40 px-3 py-2" style={{ borderLeft: `3px solid ${TEAM_COLORS[1]}` }}>
+                <p className="text-slate-300 font-medium truncate">{chartTeam2}</p>
+                <p className="text-slate-400">{t2Made}/{t2Att} · <span className="text-white">{fgPct(t2Made, t2Att)}% FG</span></p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-3">
+              Intentos detectados por el aro; aciertos reforzados por el tablero anotado. Atribuidos al
+              tirador (posesión previa) y a su equipo.
+            </p>
+          </div>
+        )}
+
+        {/* Hoops detected / configured */}
+        {metrics && (() => {
+          const tf = metrics.total_frames || 0;
+          const hf = metrics.hoop_detected_frames ?? 0;
+          const cov = tf > 0 ? Math.round((100 * hf) / tf) : 0;
+          const cfg = metrics.hoops_configured ?? 0;
+          const bb = metrics.hoops_with_backboard ?? 0;
+          if (hf === 0 && cfg === 0) return null;
+          return (
+            <div className="bg-slate-800 rounded-xl p-5">
+              <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
+                <Crosshair size={16} className="text-emerald-400" /> Aros
+              </h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-emerald-400">{cov}%</p>
+                  <p className="text-xs text-slate-400 mt-1">Detección automática</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-emerald-400">{hf.toLocaleString()}</p>
+                  <p className="text-xs text-slate-400 mt-1">Frames auto-detectados</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-3xl font-bold text-emerald-400">{cfg}</p>
+                  <p className="text-xs text-slate-400 mt-1">Canastas anotadas{bb > 0 ? ` (${bb} c/ tablero)` : ""}</p>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mt-3">
+                El % es la <strong>detección automática</strong> del aro (suele ser baja).{cfg > 0
+                  ? " Tienes canastas anotadas a mano: se propagan a todo el video y son las que usan el conteo de tiros (no dependen de este %)."
+                  : " Anota el aro para fijar la canasta en todo el video y mejorar el conteo de tiros (no depende de este %)."}
+              </p>
+            </div>
+          );
+        })()}
+
         {/* Tabs */}
         <div className="flex gap-1 bg-slate-800 p-1 rounded-lg w-fit">
           {(["stats", "events", "players"] as const).map(tab => (
@@ -744,8 +929,8 @@ export default function GameDetailPage() {
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 { label: "Total Frames", value: metrics.total_frames.toLocaleString() },
-                { label: "Posesión Equipo 1", value: `${metrics.team1_possession_pct}%` },
-                { label: "Posesión Equipo 2", value: `${metrics.team2_possession_pct}%` },
+                { label: `Posesión ${chartTeam1}`, value: `${metrics.team1_possession_pct}%` },
+                { label: `Posesión ${chartTeam2}`, value: `${metrics.team2_possession_pct}%` },
                 { label: "Jugadores", value: metrics.players.length },
               ].map(kpi => (
                 <div key={kpi.label} className="bg-slate-800 rounded-xl p-5 text-center">
@@ -776,8 +961,8 @@ export default function GameDetailPage() {
                     <XAxis dataKey="name" stroke="#94a3b8" /><YAxis allowDecimals={false} stroke="#94a3b8" />
                     <Tooltip contentStyle={{ background: "#1e293b", border: "none" }} />
                     <Legend />
-                    <Bar dataKey="team1" name="Equipo 1" fill={TEAM_COLORS[0]} />
-                    <Bar dataKey="team2" name="Equipo 2" fill={TEAM_COLORS[1]} />
+                    <Bar dataKey="team1" name={chartTeam1} fill={TEAM_COLORS[0]} />
+                    <Bar dataKey="team2" name={chartTeam2} fill={TEAM_COLORS[1]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -869,7 +1054,7 @@ export default function GameDetailPage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-700 text-left text-xs text-slate-400">
-                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep."].map(h => (
+                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep.", "Tiros (FG)"].map(h => (
                     <th key={h} className="px-4 py-3 font-medium">{h}</th>
                   ))}
                 </tr>
@@ -906,6 +1091,11 @@ export default function GameDetailPage() {
                       <td className="px-4 py-3 text-slate-200">{p.possession_frames}</td>
                       <td className="px-4 py-3 text-slate-200">{p.passes_made}</td>
                       <td className="px-4 py-3 text-slate-200">{p.interceptions_made}</td>
+                      <td className="px-4 py-3 text-slate-200">
+                        {(p.shots_attempted ?? 0) > 0
+                          ? `${p.shots_made ?? 0}/${p.shots_attempted} (${fgPct(p.shots_made ?? 0, p.shots_attempted ?? 0)}%)`
+                          : "—"}
+                      </td>
                     </tr>
                   );
                 })}

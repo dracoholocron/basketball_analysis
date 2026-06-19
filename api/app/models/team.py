@@ -17,3 +17,6 @@ class Team(Base):
 
     organization: Mapped["Organization"] = relationship(back_populates="teams")
     players: Mapped[list["Player"]] = relationship(back_populates="team")
+    divisions: Mapped[list["Division"]] = relationship(
+        back_populates="team", cascade="all, delete-orphan"
+    )

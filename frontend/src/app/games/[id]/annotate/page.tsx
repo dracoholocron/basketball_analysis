@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import {
   detectCameraMotion,
   getGameAnnotation,
@@ -577,6 +578,7 @@ export default function AnnotatePage() {
                     {fmtTime(currentTime)} / {fmtTime(duration)}
                   </span>
                 </div>
+                <VideoControls videoRef={videoRef} />
                 <p className="text-xs text-slate-500">
                   {selectedLandmarkId
                     ? <>Modo anotación activo — <strong className="text-slate-300">haz clic en el video</strong> para colocar el punto seleccionado</>

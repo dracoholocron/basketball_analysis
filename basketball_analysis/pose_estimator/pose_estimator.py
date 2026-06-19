@@ -428,12 +428,15 @@ class PoseEstimator:
         Reads frames at max_height=720 so player bbox crops align with the same
         720p coordinate space used by detection and the draw pass.
         """
-        from utils.video_utils import iter_video_frames
+        from utils.video_utils import iter_video_frames_prefetch
 
         pose_sequence: list[dict[int, np.ndarray]] = []
         total = len(player_tracks)
 
-        for frame_num, frame in enumerate(iter_video_frames(video_path, max_height=max_height)):
+        # Per-frame top-down (crops batched per frame inside estimate_frame). Cross-frame
+        # batching was tried and reverted: it raised VRAM (2.9→8.3 GB) without speeding
+        # up — pose isn't bound by the number of predict() calls. Prefetch overlaps decode.
+        for frame_num, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=max_height)):
             if frame_num >= total:
                 break
             pose_sequence.append(
@@ -500,19 +503,21 @@ class PoseEstimator:
                 results[track_id] = kps_all[best_idx]
         return results
 
-    def _yolo_frame_topdown(
+    def _topdown_crops(
         self,
         frame: np.ndarray,
         player_tracks: dict[int, dict],
-    ) -> dict[int, np.ndarray]:
-        """Run YOLO-pose on each tracked player's (padded, upscaled) crop so small
-        distant players still produce a skeleton. Keypoints are mapped back to
-        full-frame coordinates."""
+    ) -> tuple[list[np.ndarray], list[tuple]]:
+        """Extract padded/upscaled per-player crops + their mapping metadata.
+
+        Returns ``(crops, metas)`` where ``meta = (track_id, ox, oy, scale)`` to map
+        keypoints back to full-frame coords. Split out so crops from several frames
+        can be batched into one predict() call."""
         import cv2
 
-        results: dict[int, np.ndarray] = {}
         H, W = frame.shape[:2]
-        crops, metas = [], []
+        crops: list[np.ndarray] = []
+        metas: list[tuple] = []
         for track_id, info in player_tracks.items():
             bbox = info.get("bbox", [])
             if len(bbox) < 4:
@@ -537,25 +542,42 @@ class PoseEstimator:
                                   interpolation=cv2.INTER_LINEAR)
             crops.append(crop)
             metas.append((track_id, cx1, cy1, scale))
+        return crops, metas
 
+    @staticmethod
+    def _scatter_topdown_pred(r, meta: tuple) -> tuple[int, np.ndarray] | None:
+        """Map one crop's YOLO-pose result back to full-frame keypoints."""
+        track_id, ox, oy, scale = meta
+        if r.keypoints is None or len(r.keypoints) == 0:
+            return None
+        kdata = r.keypoints.data.cpu().numpy()  # (N,17,3)
+        if r.boxes is not None and len(r.boxes) > 1:
+            confs = r.boxes.conf.cpu().numpy()  # most confident person in the crop
+            kp = kdata[int(confs.argmax())]
+        else:
+            kp = kdata[0]
+        kp = kp.copy()
+        kp[:, 0] = kp[:, 0] / scale + ox
+        kp[:, 1] = kp[:, 1] / scale + oy
+        return track_id, kp
+
+    def _yolo_frame_topdown(
+        self,
+        frame: np.ndarray,
+        player_tracks: dict[int, dict],
+    ) -> dict[int, np.ndarray]:
+        """Run YOLO-pose on each tracked player's (padded, upscaled) crop so small
+        distant players still produce a skeleton. Keypoints are mapped back to
+        full-frame coordinates."""
+        results: dict[int, np.ndarray] = {}
+        crops, metas = self._topdown_crops(frame, player_tracks)
         if not crops:
             return results
-
         preds = self._yolo_model.predict(crops, verbose=False, device=self._device)
-        for (track_id, ox, oy, scale), r in zip(metas, preds):
-            if r.keypoints is None or len(r.keypoints) == 0:
-                continue
-            kdata = r.keypoints.data.cpu().numpy()  # (N,17,3)
-            if r.boxes is not None and len(r.boxes) > 1:
-                # pick the most confident person in the crop
-                confs = r.boxes.conf.cpu().numpy()
-                kp = kdata[int(confs.argmax())]
-            else:
-                kp = kdata[0]
-            kp = kp.copy()
-            kp[:, 0] = kp[:, 0] / scale + ox
-            kp[:, 1] = kp[:, 1] / scale + oy
-            results[track_id] = kp
+        for meta, r in zip(metas, preds):
+            mapped = self._scatter_topdown_pred(r, meta)
+            if mapped is not None:
+                results[mapped[0]] = mapped[1]
         return results
 
     def _dummy_frame(

@@ -69,6 +69,7 @@ def run_analysis(
     team2_jersey: str = "dark blue shirt",
     show_poses: bool = True,
     pose_player_filter: list[int] | None = None,
+    use_curated_ball: bool = False,
 ):
     """Run the full analysis pipeline for one game video."""
     engine = _sync_engine()
@@ -136,8 +137,34 @@ def run_analysis(
         )
 
         # ── 4. Fetch manual annotation (if any) ───────────────────────────
+        # ── 4a-bis. Curated ball track (from a completed interactive session) ──
+        precomputed_ball_track = None
+        if use_curated_ball:
+            try:
+                import json as _json
+                from ..models.ball_track_session import BallTrackSession
+                with Session(engine) as db:
+                    sess = db.query(BallTrackSession).filter(
+                        BallTrackSession.game_id == uuid.UUID(game_id),
+                        BallTrackSession.status == "done",
+                        BallTrackSession.track_key.isnot(None),
+                    ).order_by(BallTrackSession.updated_at.desc()).first()
+                    _track_key = sess.track_key if sess else None
+                if _track_key:
+                    _tj = os.path.join(tmp, "curated_track.json")
+                    storage.download_file(api_settings.minio_bucket_outputs, _track_key, _tj)
+                    with open(_tj) as _f:
+                        precomputed_ball_track = {int(k): v for k, v in _json.load(_f).items()}
+                    logger.info("Using curated ball track: %d frames (session %s)",
+                                len(precomputed_ball_track), sess.id)
+                else:
+                    logger.warning("use_curated_ball requested but no completed session found")
+            except Exception as exc:
+                logger.warning("Curated ball track unavailable (%s) — running normal ball stage", exc)
+
         manual_landmarks = None
         camera_motion = "static"
+        team_exemplars = None
         with Session(engine) as db:
             ann = db.get(GameAnnotation, None)  # query by game_id below
             from sqlalchemy import select as sa_select
@@ -147,10 +174,16 @@ def run_analysis(
             if ann is not None:
                 manual_landmarks = ann.landmarks  # list[dict] or None
                 camera_motion = ann.camera_motion or "static"
+                team_exemplars = ann.team_exemplars  # dict or None
                 if manual_landmarks:
                     logger.info(
                         "Using %d manual landmarks for game %s (motion=%s)",
                         len(manual_landmarks), game_id, camera_motion,
+                    )
+                if team_exemplars:
+                    logger.info(
+                        "Using team exemplars for game %s (teams=%s)",
+                        game_id, list(team_exemplars.keys()),
                     )
 
         # ── 4b. Fetch manual ball annotation (for SAM2 tracking) ───────────
@@ -178,6 +211,43 @@ def run_analysis(
                 logger.info(
                     "Using %d manual hoop boxes for game %s", len(hoop_boxes), game_id,
                 )
+
+        # ── 4d. Team names (overlay) + game window (exclude warm-up/pre-game) ──
+        team1_name = team2_name = None
+        analysis_start_s = 0.0
+        analysis_end_s = None
+        with Session(engine) as db:
+            from ..models.game import Game as _Game
+            from ..models.team import Team as _Team
+            _g = db.get(_Game, uuid.UUID(game_id))
+            if _g is not None:
+                if _g.home_team_id:
+                    _ht = db.get(_Team, _g.home_team_id)
+                    team1_name = _ht.name if _ht else None
+                if _g.away_team_id:
+                    _at = db.get(_Team, _g.away_team_id)
+                    team2_name = _at.name if _at else None
+                analysis_start_s = float(getattr(_g, "analysis_start_s", 0.0) or 0.0)
+                analysis_end_s = getattr(_g, "analysis_end_s", None)
+                if analysis_start_s or analysis_end_s:
+                    logger.info(
+                        "Game window: %.0fs – %s", analysis_start_s,
+                        f"{analysis_end_s:.0f}s" if analysis_end_s else "end",
+                    )
+                _ball_quality = getattr(_g, "ball_tracking_quality", None) or "base_plus"
+
+        # Map SAM 2.1 quality → (checkpoint, config). None → pipeline uses settings default.
+        # "efficienttam" = EfficientTAM pilot (Meta, ~1.6-2x faster, comparable quality);
+        # the tracker switches backend by the checkpoint/config name.
+        _SAM2_BY_QUALITY = {
+            "small":        ("models/sam2.1_hiera_small.pt",     "configs/sam2.1/sam2.1_hiera_s.yaml"),
+            "base_plus":    ("models/sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+            "large":        ("models/sam2.1_hiera_large.pt",     "configs/sam2.1/sam2.1_hiera_l.yaml"),
+            "efficienttam": ("models/efficienttam_s.pt",         "configs/efficienttam/efficienttam_s.yaml"),
+        }
+        sam2_checkpoint, sam2_config = _SAM2_BY_QUALITY.get(
+            locals().get("_ball_quality", "base_plus"), (None, None)
+        )
 
         # ── 5. Run pipeline ────────────────────────────────────────────────
         stub_dir = os.path.join(tmp, "stubs")
@@ -217,22 +287,40 @@ def run_analysis(
             except Exception:
                 pass
 
+        # Resolve the ACTIVE model version per role (registry). Falls back to settings
+        # defaults for any role without an active version.
+        _active = _active_model_paths(engine)
+        if _active:
+            logger.info("Active model versions: %s", _active)
+
         try:
             metrics = run_pipeline(
                 input_video=local_video,
                 output_video=output_video,
                 stub_path=stub_dir,
                 use_stubs=False,
+                player_detector_path=_active.get("player"),
+                ball_detector_path=_active.get("ball"),
+                court_kp_detector_path=_active.get("court"),
+                pose_model_path=_active.get("pose"),
                 team1_jersey=team1_jersey,
                 team2_jersey=team2_jersey,
                 court_profile=profile,
                 manual_landmarks=manual_landmarks,
+                team_exemplars=team_exemplars,
+                precomputed_ball_track=precomputed_ball_track,
                 camera_motion=camera_motion,
                 on_progress=_pipeline_progress,
                 show_poses=show_poses,
                 pose_player_filter=pose_player_filter,
                 ball_points=ball_points,
                 hoop_boxes=hoop_boxes,
+                team1_name=team1_name,
+                team2_name=team2_name,
+                analysis_start_s=analysis_start_s,
+                analysis_end_s=analysis_end_s,
+                sam2_checkpoint=sam2_checkpoint,
+                sam2_config=sam2_config,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -265,6 +353,10 @@ def run_analysis(
             host_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(output_video, host_dir / f"{job_id}.mp4")
             logger.info("Saved local copy: %s", host_dir / f"{job_id}.mp4")
+            # Also persist the ball-source debug dump (when BA_BALL_DEBUG) for the audit tool.
+            _dbg = output_video + ".ball_debug.json"
+            if os.path.exists(_dbg):
+                shutil.copy2(_dbg, host_dir / f"{job_id}.ball_debug.json")
 
         with Session(engine) as db:
             _update_job(
@@ -364,7 +456,12 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         votes = team_votes.get(tid)
         if not votes:
             return None
-        return votes.most_common(1)[0][0]
+        # Ignore 0 = "unknown" votes; only fall back to None when a track never got a
+        # real (team 1/2) classification. Prevents unclassified tracks → team 1.
+        real = {t: c for t, c in votes.items() if t in (1, 2)}
+        if not real:
+            return None
+        return max(real, key=real.get)
 
     # Per-player: possession frames (frames where this track_id held the ball)
     possession_frames: dict[int, int] = defaultdict(int)
@@ -471,7 +568,7 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
     # Optional roster map: (team_id 1/2, dorsal) -> players.id
     roster_map = _build_roster_map(engine, j_uuid)
 
-    min_track_frames = int(float(os.getenv("BA_MIN_TRACK_SECONDS", "0.5")) * fps)
+    min_track_frames = int(float(os.getenv("BA_MIN_TRACK_SECONDS", "1.0")) * fps)
     dropped_short = 0
     player_rows: list[PlayerMetric] = []
     ordinal = 0
@@ -506,10 +603,14 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         present = sum(int(frames_present.get(t, 0)) for t in members)
         minutes = (present / fps) / 60.0 if fps else 0.0
 
-        # Drop provisional (no-dorsal) identities seen too briefly — these are
-        # detection blips / partial occlusions, not real players. Identities with a
-        # confident dorsal are always kept.
-        if dorsal is None and present < min_track_frames:
+        # Drop provisional (no-dorsal) identities that are noise: seen too briefly, OR
+        # never classified into a team (team is None → never on a decoded frame, i.e. a
+        # blip) AND with zero activity. Identities with a confident dorsal are always
+        # kept. This curbs the identity inflation seen on long videos.
+        no_activity = (poss + pmade + imade + shots + rebs + steals) == 0
+        if dorsal is None and (
+            present < min_track_frames or (team is None and no_activity)
+        ):
             dropped_short += 1
             continue
 
@@ -546,6 +647,9 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
 
     # Build FrameMetric rows with ball_holder_team resolved per frame
     # Force all values to native Python int — numpy.int64 breaks psycopg2
+    # hoop_present = AUTOMATIC detector coverage (pre manual override) → honest "aros
+    # detectados"; manual annotation coverage is shown via the configured-hoops count.
+    hoop_auto: list = metrics.get("hoop_auto_present") or metrics.get("hoop_tracks", []) or []
     frame_rows: list[FrameMetric] = []
     for frame_idx in range(int(total_frames)):
         raw_holder = ball_acquisition[frame_idx] if frame_idx < len(ball_acquisition) else -1
@@ -567,11 +671,13 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
                 frame_number=int(frame_idx),
                 ball_holder_track_id=int(holder_id) if holder_id != -1 else None,
                 ball_holder_team=int(holder_team) if holder_team is not None else None,
+                hoop_present=bool(frame_idx < len(hoop_auto) and hoop_auto[frame_idx]),
             )
         )
 
     with Session(engine) as db:
-        if db.get(Job, j_uuid) is None:
+        job_row = db.get(Job, j_uuid)
+        if job_row is None:
             logger.warning(
                 "Job %s vanished before metrics persist — skipping %d player rows",
                 job_id, len(player_rows),
@@ -581,6 +687,17 @@ def _persist_metrics(engine, job_id: str, metrics: dict) -> None:
         batch_size = 1000
         for i in range(0, len(frame_rows), batch_size):
             db.bulk_save_objects(frame_rows[i : i + batch_size])
+
+        # Persist SAM2 drift review-flags to the game's ball annotation (shown in the
+        # annotate-ball UI as "segmentos a revisar"). Overwrites previous run's flags.
+        flagged = metrics.get("ball_flagged_segments")
+        if flagged is not None and job_row.game_id is not None:
+            ball_ann = db.query(BallAnnotation).filter(
+                BallAnnotation.game_id == job_row.game_id
+            ).one_or_none()
+            if ball_ann is not None:
+                ball_ann.flagged = flagged
+                logger.info("Ball review flags persisted: %d segment(s)", len(flagged))
         db.commit()
     logger.info(
         "Persisted %d player metrics, %d frame metrics", len(player_rows), total_frames
@@ -904,8 +1021,9 @@ def generate_highlights(
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.finetune_ball_detector",
-                 max_retries=0, acks_late=True)
-def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> dict:
+                 max_retries=0, acks_late=True, reject_on_worker_lost=False)
+def finetune_ball_detector(self: Task, epochs: int = 40, imgsz: int = 960,
+                           max_images: int = 4000, batch: int = 8) -> dict:
     """
     Fine-tune the ball detector on the accumulated SAM2 auto-label dataset
     (/app/ball_dataset, produced when BA_BALL_EXPORT_DATASET=true during analysis).
@@ -914,6 +1032,7 @@ def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> d
     then backs up and swaps the model in the models volume. Long-running.
     """
     import glob
+    import random
     import shutil
 
     dataset = "/app/ball_dataset"
@@ -925,6 +1044,27 @@ def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> d
     if n_labels < 20:
         return {"error": f"too few labeled frames ({n_labels}); annotate more games first"}
 
+    # ── Subsample near-duplicate frames to a diverse subset ──────────────────
+    # The export is ~every frame → tons of consecutive near-dupes. Stride-sample
+    # (keeps spread across games/time) to cap at max_images, then 90/10 train/val.
+    imgs = sorted(glob.glob(os.path.join(dataset, "images", "train", "*.jpg")))
+    if len(imgs) > max_images:
+        stride = len(imgs) // max_images
+        imgs = imgs[::stride][:max_images]
+    random.seed(0)
+    random.shuffle(imgs)
+    n_val = max(1, int(len(imgs) * 0.1))
+    val_list, train_list = imgs[:n_val], imgs[n_val:]
+    train_txt = os.path.join(dataset, "train_subset.txt")
+    val_txt = os.path.join(dataset, "val_subset.txt")
+    with open(train_txt, "w") as f:
+        f.write("\n".join(train_list))
+    with open(val_txt, "w") as f:
+        f.write("\n".join(val_list))
+    sub_yaml = os.path.join(dataset, "data_subset.yaml")
+    with open(sub_yaml, "w") as f:
+        f.write(f"path: {dataset}\ntrain: train_subset.txt\nval: val_subset.txt\nnc: 1\nnames: ['Ball']\n")
+
     engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
     base = os.path.join(engine_path, "models", "ball_detector_model.pt")
     if base not in sys.path:
@@ -932,22 +1072,601 @@ def finetune_ball_detector(self: Task, epochs: int = 60, imgsz: int = 1280) -> d
 
     try:
         from ultralytics import YOLO
-        logger.info("Fine-tuning ball detector on %d labeled frames (epochs=%d)…", n_labels, epochs)
+        logger.info(
+            "Fine-tuning ball detector: %d total labels → %d subset (%d train / %d val), epochs=%d, imgsz=%d",
+            n_labels, len(imgs), len(train_list), len(val_list), epochs, imgsz,
+        )
         model = YOLO(base)
         model.train(
-            data=data_yaml, epochs=epochs, imgsz=imgsz,
+            data=sub_yaml, epochs=epochs, imgsz=imgsz, batch=batch,
             mosaic=1.0, close_mosaic=10, degrees=0.0,
             translate=0.1, scale=0.5, fliplr=0.5,
+            workers=0,  # Celery prefork is daemonic → DataLoader cannot fork children
             project="/app/ball_dataset/runs", name="finetune", exist_ok=True,
         )
         best = getattr(model.trainer, "best", None)
         if not best or not os.path.exists(best):
             return {"error": "training produced no best.pt"}
-        # backup + swap
-        shutil.copy(base, base + ".bak")
-        shutil.copy(best, base)
-        logger.info("Ball detector fine-tuned and swapped in: %s ← %s", base, best)
-        return {"ok": True, "labeled_frames": n_labels, "best": str(best)}
+        # Versioned save (do NOT overwrite the active model). Register INACTIVE so the
+        # user reviews metrics and activates from /admin/models when ready.
+        import time as _time
+        ts = _time.strftime("%Y%m%d-%H%M")
+        models_dir = os.path.join(engine_path, "models")
+        ver_name = f"ball_detector__ft_{ts}.pt"
+        ver_path = os.path.join(models_dir, ver_name)
+        shutil.copy(best, ver_path)
+        metrics = _read_finetune_metrics("/app/ball_dataset/runs/finetune/results.csv")
+        _register_model_version("ball", f"models/{ver_name}",
+                                label=f"fine-tune {ts}", source="finetune", metrics=metrics)
+        logger.info("Ball detector fine-tuned → registered INACTIVE version: %s", ver_path)
+        return {"ok": True, "labeled_frames": n_labels, "version": ver_name, "metrics": metrics}
     except Exception as exc:
         logger.exception("finetune_ball_detector failed")
         return {"error": str(exc)}
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.train_tracknet",
+                 max_retries=0, acks_late=True, reject_on_worker_lost=False)
+def train_tracknet(
+    self: Task,
+    epochs: int = 30,
+    batch: int = 8,
+    lr: float = 1e-4,
+    max_samples: int | None = None,
+    dataset: str = "/app/ball_dataset",
+) -> dict:
+    """Train (or fine-tune) the TrackNetV2 temporal ball detector.
+
+    Reads the accumulated YOLO/TrackNet export at `dataset`, trains a
+    TrackNetV2 for `epochs`, saves a versioned .pt under models/ and
+    registers it as INACTIVE in model_versions (user activates from /admin/models).
+    """
+    import glob
+    import time as _time
+
+    session_id_hex = uuid.uuid4().hex[:12]
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    if engine_path not in sys.path:
+        sys.path.insert(0, engine_path)
+
+    tn_lbl_train = os.path.join(dataset, "tn_labels", "train")
+    yolo_lbl_train = os.path.join(dataset, "labels", "train")
+    if not os.path.isdir(tn_lbl_train) and not os.path.isdir(yolo_lbl_train):
+        return {
+            "error": (
+                f"No labels at {tn_lbl_train} or {yolo_lbl_train}. "
+                "Run analyses with BA_BALL_EXPORT_DATASET=true first."
+            )
+        }
+
+    lbl_dir = tn_lbl_train if os.path.isdir(tn_lbl_train) else yolo_lbl_train
+    n_labels = len([f for f in glob.glob(os.path.join(lbl_dir, "*.txt"))
+                    if os.path.getsize(f) > 0])
+    if n_labels < 50:
+        return {"error": f"Too few labeled frames ({n_labels}); annotate more games first."}
+
+    try:
+        import torch
+        from torch.utils.data import DataLoader
+        from ball_tracknet.dataset import TrackNetDataset
+        from ball_tracknet.model import TrackNetV2
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("train_tracknet: device=%s, epochs=%d, batch=%d, n_labels~=%d",
+                    device, epochs, batch, n_labels)
+
+        train_ds = TrackNetDataset(dataset, split="train", augment=True,
+                                   max_samples=max_samples)
+        val_ds   = TrackNetDataset(dataset, split="val",   augment=False,
+                                   max_samples=max_samples // 5 if max_samples else None)
+        train_loader = DataLoader(train_ds, batch_size=batch, shuffle=True,
+                                  num_workers=0, pin_memory=(device.type == "cuda"))
+        val_loader   = DataLoader(val_ds,   batch_size=batch, shuffle=False,
+                                  num_workers=0, pin_memory=(device.type == "cuda"))
+
+        model = TrackNetV2().to(device)
+
+        # Resume from existing TrackNet weights if an active version exists
+        engine = _sync_engine()
+        active_paths = _active_model_paths(engine)
+        if "tracknet_ball" in active_paths and os.path.exists(active_paths["tracknet_ball"]):
+            state = torch.load(active_paths["tracknet_ball"], map_location=device,
+                               weights_only=True)
+            model.load_state_dict(state)
+            logger.info("train_tracknet: resuming from %s", active_paths["tracknet_ball"])
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+        loss_fn = torch.nn.BCELoss()
+
+        best_val_loss = float("inf")
+        import tempfile as _tempfile
+        best_path = os.path.join(_tempfile.gettempdir(), f"tracknet_best_{session_id_hex}.pt")
+
+        for epoch in range(1, epochs + 1):
+            model.train()
+            train_loss = 0.0
+            for inp, tgt in train_loader:
+                inp, tgt = inp.to(device), tgt.to(device)
+                optimizer.zero_grad()
+                pred = model(inp)
+                loss = loss_fn(pred, tgt)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            scheduler.step()
+
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for inp, tgt in val_loader:
+                    inp, tgt = inp.to(device), tgt.to(device)
+                    val_loss += loss_fn(model(inp), tgt).item()
+
+            avg_train = train_loss / max(1, len(train_loader))
+            avg_val   = val_loss   / max(1, len(val_loader))
+            logger.info("TrackNet epoch %d/%d  train=%.4f  val=%.4f",
+                        epoch, epochs, avg_train, avg_val)
+            if avg_val < best_val_loss:
+                best_val_loss = avg_val
+                torch.save(model.state_dict(), best_path)
+
+        # Register versioned copy
+        ts = _time.strftime("%Y%m%d-%H%M")
+        models_dir = os.path.join(engine_path, "models")
+        ver_name = f"tracknet_ball__{ts}.pt"
+        ver_path = os.path.join(models_dir, ver_name)
+        import shutil
+        shutil.copy(best_path, ver_path)
+        metrics = {"val_loss": round(best_val_loss, 6), "epochs": epochs,
+                   "n_train": len(train_ds), "n_val": len(val_ds)}
+        _register_model_version("tracknet_ball", f"models/{ver_name}",
+                                label=f"TrackNet {ts}", source="trained", metrics=metrics)
+        logger.info("train_tracknet done → INACTIVE version registered: %s", ver_path)
+        return {"ok": True, "version": ver_name, "metrics": metrics}
+
+    except Exception as exc:
+        logger.exception("train_tracknet failed")
+        return {"error": str(exc)}
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.export_tensorrt_engine",
+                 max_retries=0, acks_late=True)
+def export_tensorrt_engine(self: Task, role: str, dynamic: bool = True) -> dict:
+    """Export the ACTIVE .pt detector of a role to a TensorRT FP16 .engine and register
+    it INACTIVE. Engines are GPU/driver-specific so this MUST run on the GPU worker.
+
+    Loading is transparent: the trackers use ultralytics ``YOLO(path)`` which also loads
+    ``.engine``. FP16 keeps mAP ~unchanged; the user validates and activates per role
+    from /admin/models (revert = 1 click). See FINE_TUNING.md / MODEL_VERSIONS.md.
+    """
+    import shutil
+    import time as _time
+    from ..models.model_version import ModelVersion
+
+    role = (role or "").strip().lower()
+    if role not in ("player", "ball", "court", "pose"):
+        return {"error": f"unknown role '{role}' (expected player|ball|court|pose)"}
+
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    if engine_path not in sys.path:
+        sys.path.insert(0, engine_path)
+    models_dir = os.path.join(engine_path, "models")
+
+    # Resolve the active .pt for the role (fall back to the canonical file).
+    sync = _sync_engine()
+    rel = None
+    with Session(sync) as db:
+        active = db.query(ModelVersion).filter(
+            ModelVersion.role == role, ModelVersion.is_active.is_(True)
+        ).one_or_none()
+        if active and active.filename.endswith(".pt"):
+            rel = active.filename
+    if rel is None:
+        rel = f"models/{_CANONICAL[role]}"
+    src_pt = os.path.join(engine_path, rel) if not os.path.isabs(rel) else rel
+    if not os.path.exists(src_pt):
+        return {"error": f"active .pt not found for role '{role}': {src_pt}"}
+
+    # imgsz/batch per role match what the pipeline uses (engines bake input size; dynamic
+    # allows batch ≤ max and variable HxW so pose top-down crops still work).
+    _imgsz = {
+        "player": int(os.environ.get("BA_PLAYER_IMGSZ", "1280")),
+        "ball":   int(os.environ.get("BA_BALL_IMGSZ", "960")),
+        "court":  int(os.environ.get("BA_COURT_KP_IMGSZ", "1536")),
+        "pose":   640,
+    }[role]
+    _batch = int(os.environ.get(
+        "BA_COURT_KP_BATCH_SIZE" if role == "court" else "BA_YOLO_BATCH_SIZE",
+        "24" if role == "court" else "32",
+    ))
+
+    try:
+        from ultralytics import YOLO
+        logger.info("TensorRT export: role=%s src=%s imgsz=%d batch=%d (FP16)",
+                    role, os.path.basename(src_pt), _imgsz, _batch)
+        model = YOLO(src_pt)
+        exported = model.export(
+            format="engine", half=True, imgsz=_imgsz, batch=_batch,
+            dynamic=bool(dynamic), workers=0, device=0, verbose=False,
+        )  # writes <stem>.engine next to the .pt
+        if not exported or not os.path.exists(str(exported)):
+            return {"error": "export produced no .engine (is the 'tensorrt' package installed in the image?)"}
+        ts = _time.strftime("%Y%m%d-%H%M")
+        ver_name = f"{role}__trt_fp16_{ts}.engine"
+        ver_path = os.path.join(models_dir, ver_name)
+        shutil.move(str(exported), ver_path)
+        _register_model_version(
+            role, f"models/{ver_name}",
+            label=f"TensorRT FP16 imgsz{_imgsz} {ts}", source="tensorrt",
+            metrics={"imgsz": _imgsz, "batch": _batch, "precision": "fp16"},
+        )
+        logger.info("TensorRT export done → registered INACTIVE: %s", ver_path)
+        return {"ok": True, "role": role, "version": ver_name, "imgsz": _imgsz}
+    except Exception as exc:
+        logger.exception("export_tensorrt_engine failed")
+        return {"error": str(exc)}
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.ball_track_session_run",
+                 max_retries=0, acks_late=True)
+def ball_track_session_run(self: Task, session_id: str,
+                           resume_from_frame: int | None = None) -> dict:
+    """Interactive ball-tracking session runner (pause → correct → resume).
+
+    Runs SAM2 ball propagation incrementally from `resume_from_frame` (or a smart
+    default), checkpointing the partial track to MinIO and ending the task whenever it
+    pauses (user request / ball lost / drift) so the GPU worker is free while the user
+    corrects. Resume = a new invocation of this task.
+    """
+    import json as _json
+
+    from ..models.ball_track_session import BallTrackSession
+    from ..models.video_asset import VideoAsset
+    from ..models.game import Game
+
+    _engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    if _engine_path not in sys.path:
+        sys.path.insert(0, _engine_path)
+
+    engine = _sync_engine()
+    storage = StorageService()
+    s_uuid = uuid.UUID(session_id)
+
+    with Session(engine) as db:
+        sess = db.get(BallTrackSession, s_uuid)
+        if sess is None or sess.status == "cancelled":
+            return {"skipped": True}
+        game_id = sess.game_id
+        pause_frame_prev = sess.pause_frame
+        track_key_prev = sess.track_key
+        sess.status = "running"
+        sess.pause_requested = False
+        sess.error_message = None
+        db.commit()
+        # Latest source video + ball clicks + SAM2 quality for this game.
+        va = db.query(VideoAsset).filter(VideoAsset.game_id == game_id).order_by(
+            VideoAsset.uploaded_at.desc()).first()
+        video_key = va.s3_key if va else None
+        ball_ann = db.query(BallAnnotation).filter(
+            BallAnnotation.game_id == game_id).one_or_none()
+        ball_points = list(ball_ann.points or []) if ball_ann else []
+        _g = db.get(Game, game_id)
+        _quality = (getattr(_g, "ball_tracking_quality", None) or "base_plus") if _g else "base_plus"
+
+    def _fail(msg: str) -> dict:
+        with Session(engine) as db:
+            s = db.get(BallTrackSession, s_uuid)
+            if s:
+                s.status = "error"
+                s.error_message = msg[:480]
+                db.commit()
+        logger.error("ball session %s: %s", session_id, msg)
+        return {"error": msg}
+
+    if not video_key:
+        return _fail("no video uploaded for this game")
+    if not ball_points or not any(p.get("visible", True) and not p.get("negative")
+                                  for p in ball_points):
+        return _fail("no ball clicks — annotate at least one ball position first")
+
+    # Source video cached on the stubs volume (resumes don't re-download).
+    cache_dir = os.path.join(os.environ.get("ENGINE_PATH", "/app/engine"),
+                             "stubs", "session_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    local_video = os.path.join(cache_dir, f"{game_id}.mp4")
+    if not os.path.exists(local_video):
+        try:
+            storage.download_file(api_settings.minio_bucket_videos, video_key, local_video)
+        except Exception as exc:
+            return _fail(f"video download failed: {exc}")
+
+    try:
+        from utils.video_utils import get_video_properties
+        props = get_video_properties(local_video)
+        fps = float(props.get("fps") or 25.0)
+        total_frames = int(props.get("total_frames") or 0)
+        height = int(props.get("height") or 720)
+    except Exception as exc:
+        return _fail(f"video probe failed: {exc}")
+    src_scale = (720.0 / height) if height > 720 else 1.0
+
+    # Resume point: find the best seed frame so SAM2 has a real ball annotation.
+    # Priority: 1) explicit arg, 2) earliest positive annotation AT OR AFTER pause
+    # (user scrubbed forward to where ball is visible and clicked it), 3) latest
+    # annotation before pause (user corrected just before stop), 4) pause frame itself.
+    start_frame = 0
+    if resume_from_frame is not None:
+        start_frame = max(0, int(resume_from_frame))
+    elif pause_frame_prev is not None:
+        _pos = [int(round(float(p.get("frame_t", 0)) * fps))
+                for p in ball_points
+                if p.get("visible", True) and not p.get("negative")]
+        _after  = sorted(f for f in _pos if f >= pause_frame_prev)
+        _before = sorted(f for f in _pos if f < pause_frame_prev)
+        if _after:
+            start_frame = _after[0]     # user's forward correction
+        elif _before:
+            start_frame = _before[-1]   # latest annotation before pause
+        else:
+            start_frame = int(pause_frame_prev)
+
+    # Partial track from the previous leg (truncate from the resume point).
+    results: list[dict] = [{} for _ in range(total_frames)]
+    if track_key_prev and start_frame > 0:
+        try:
+            tj = os.path.join(cache_dir, f"{session_id}_track.json")
+            storage.download_file(api_settings.minio_bucket_outputs, track_key_prev, tj)
+            with open(tj) as f:
+                prev = {int(k): v for k, v in _json.load(f).items()}
+            for fi, bbox in prev.items():
+                if 0 <= fi < start_frame:
+                    results[fi] = {1: {"bbox": bbox}}
+        except Exception as exc:
+            logger.warning("session %s: prior track load failed (%s) — restarting", session_id, exc)
+            start_frame = 0
+
+    # SAM2 checkpoint per the game's quality selector (same map as run_analysis).
+    _BY_QUALITY = {
+        "small":        ("models/sam2.1_hiera_small.pt",     "configs/sam2.1/sam2.1_hiera_s.yaml"),
+        "base_plus":    ("models/sam2.1_hiera_base_plus.pt", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+        "large":        ("models/sam2.1_hiera_large.pt",     "configs/sam2.1/sam2.1_hiera_l.yaml"),
+        "efficienttam": ("models/efficienttam_s.pt",         "configs/efficienttam/efficienttam_s.yaml"),
+    }
+    ckpt, cfg = _BY_QUALITY.get(_quality, _BY_QUALITY["base_plus"])
+
+    import time as _time
+    import cv2
+
+    preview_key = f"sessions/{session_id}/preview.jpg"
+    track_key = f"sessions/{session_id}/track.json"
+    _last_pause_check = [0.0]
+    _last_progress_write = [0.0]
+    _pause_flag = [False]
+    _PROGRESS_INTERVAL_S = 2.0  # write progress to DB at most every 2 s
+
+    def should_pause() -> bool:
+        now = _time.time()
+        if now - _last_pause_check[0] >= 2.0:        # throttle DB polls
+            _last_pause_check[0] = now
+            with Session(engine) as db:
+                s = db.get(BallTrackSession, s_uuid)
+                _pause_flag[0] = bool(s and (s.pause_requested or s.status == "cancelled"))
+        return _pause_flag[0]
+
+    def on_progress(frame_idx: int, covered: int, bbox, jpg_path: str) -> None:
+        now = _time.time()
+        if now - _last_progress_write[0] >= _PROGRESS_INTERVAL_S:
+            _last_progress_write[0] = now
+            with Session(engine) as db:
+                s = db.get(BallTrackSession, s_uuid)
+                if s:
+                    s.current_frame = int(frame_idx)
+                    s.total_frames = int(total_frames)
+                    s.fps = fps
+                    s.coverage_pct = round(100.0 * covered / max(1, total_frames), 1)
+                    s.preview_key = preview_key
+                    db.commit()
+        try:
+            img = cv2.imread(jpg_path)
+            if img is not None:
+                if bbox:
+                    x1, y1, x2, y2 = (int(v) for v in bbox)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 165, 255), 3)
+                if img.shape[1] > 640:
+                    sc = 640 / img.shape[1]
+                    img = cv2.resize(img, (640, int(img.shape[0] * sc)))
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                if ok:
+                    import io
+                    storage.upload_file(io.BytesIO(buf.tobytes()),
+                                        api_settings.minio_bucket_outputs,
+                                        preview_key, content_type="image/jpeg")
+        except Exception:
+            pass
+
+    try:
+        from ball_sam2 import Sam2BallTracker
+        tracker = Sam2BallTracker(ckpt, cfg)
+        out = tracker.track_interactive(
+            local_video, ball_points, total_frames, fps, src_scale=src_scale,
+            start_frame=start_frame, results=results,
+            should_pause=should_pause, on_progress=on_progress,
+        )
+    except Exception as exc:
+        logger.exception("ball session %s crashed", session_id)
+        return _fail(str(exc))
+    if out is None:
+        return _fail("tracker unavailable (sam2/efficienttam import or checkpoint failed)")
+    if "results" not in out:
+        return _fail(f"tracker returned unexpected output (keys: {list(out.keys())})")
+
+    # Persist the (partial or full) track.
+    track = {str(i): r[1]["bbox"] for i, r in enumerate(out.get("results", [])) if 1 in r}
+    try:
+        import io
+        storage.upload_file(io.BytesIO(_json.dumps(track).encode()),
+                            api_settings.minio_bucket_outputs, track_key,
+                            content_type="application/json")
+    except Exception as exc:
+        return _fail(f"track upload failed: {exc}")
+
+    with Session(engine) as db:
+        s = db.get(BallTrackSession, s_uuid)
+        if s is None:
+            return {"ok": True}
+        s.track_key = track_key
+        s.coverage_pct = round(100.0 * out["covered"] / max(1, total_frames), 1)
+        s.total_frames = total_frames
+        s.fps = fps
+        if s.status == "cancelled":
+            pass
+        elif out["status"] == "done":
+            s.status = "done"
+            s.pause_reason = None
+            s.pause_frame = None
+            s.current_frame = total_frames
+        else:
+            s.status = "waiting_user"
+            s.pause_reason = out["pause_reason"]
+            s.pause_frame = int(out["pause_frame"] or 0)
+            s.current_frame = int(out["pause_frame"] or 0)
+        s.pause_requested = False
+        db.commit()
+        final_status = s.status
+    logger.info("ball session %s leg finished: %s (covered %d/%d)",
+                session_id, final_status, out["covered"], total_frames)
+    return {"ok": True, "status": final_status, "covered": out["covered"]}
+
+
+# ── Model version registry helpers (worker side — has the models_data volume) ──────
+
+_MODELS_ROLE_PATTERNS = [
+    ("tracknet_ball", ("tracknet_ball",)),
+    ("player", ("player_detector", "player")),
+    ("ball",   ("ball_detector", "ball")),
+    ("court",  ("court_keypoint", "court")),
+    ("pose",   ("pose",)),
+]
+_CANONICAL = {
+    "player": "player_detector.pt",
+    "ball": "ball_detector_model.pt",
+    "court": "court_keypoint_detector.pt",
+    "pose": "yolo11n-pose.pt",
+    # tracknet_ball has no canonical built-in; it's always trained
+}
+
+
+def _role_for_file(name: str) -> str | None:
+    low = name.lower()
+    if low.startswith("sam2") or low.startswith("sam3") or "multiclass" in low:
+        return None
+    for role, pats in _MODELS_ROLE_PATTERNS:
+        if any(p in low for p in pats):
+            return role
+    return None
+
+
+def _read_finetune_metrics(results_csv: str) -> dict | None:
+    try:
+        import csv as _csv
+        with open(results_csv) as f:
+            rows = list(_csv.DictReader(f))
+        if not rows:
+            return None
+        last = rows[-1]
+        def g(k):
+            for kk in last:
+                if kk.strip() == k:
+                    try:
+                        return round(float(last[kk]), 4)
+                    except ValueError:
+                        return None
+            return None
+        return {"epochs": len(rows), "mAP50": g("metrics/mAP50(B)"),
+                "mAP50-95": g("metrics/mAP50-95(B)"), "precision": g("metrics/precision(B)"),
+                "recall": g("metrics/recall(B)")}
+    except Exception:
+        return None
+
+
+def _register_model_version(role: str, filename: str, label: str | None,
+                            source: str, metrics: dict | None,
+                            activate_if_none: bool = False) -> None:
+    """Upsert a ModelVersion row (by role+filename). Optionally activate when the role
+    has no active version yet."""
+    from ..models.model_version import ModelVersion
+    engine = _sync_engine()
+    with Session(engine) as db:
+        existing = db.query(ModelVersion).filter(
+            ModelVersion.role == role, ModelVersion.filename == filename
+        ).one_or_none()
+        if existing is None:
+            has_active = db.query(ModelVersion).filter(
+                ModelVersion.role == role, ModelVersion.is_active.is_(True)
+            ).first() is not None
+            mv = ModelVersion(
+                role=role, filename=filename, label=label, source=source, metrics=metrics,
+                is_active=(activate_if_none and not has_active),
+            )
+            db.add(mv)
+        else:
+            if metrics is not None:
+                existing.metrics = metrics
+        db.commit()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.scan_models", max_retries=0)
+def scan_models(self: Task) -> dict:
+    """Register model files in the models_data volume into the registry (idempotent).
+    Activates the canonical file for any role that has no active version yet."""
+    import glob
+    from ..models.model_version import ModelVersion
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    models_dir = os.path.join(engine_path, "models")
+    found = 0
+    for path in glob.glob(os.path.join(models_dir, "*.pt")):
+        name = os.path.basename(path)
+        role = _role_for_file(name)
+        if role is None:
+            continue
+        _register_model_version(role, f"models/{name}", label=name, source="builtin",
+                                metrics=None, activate_if_none=False)
+        found += 1
+    # Ensure each role has an active version (prefer canonical).
+    engine = _sync_engine()
+    activated = {}
+    with Session(engine) as db:
+        for role in ("player", "ball", "court", "pose"):
+            has_active = db.query(ModelVersion).filter(
+                ModelVersion.role == role, ModelVersion.is_active.is_(True)
+            ).first()
+            if has_active:
+                continue
+            canonical = f"models/{_CANONICAL[role]}"
+            pick = db.query(ModelVersion).filter(
+                ModelVersion.role == role, ModelVersion.filename == canonical
+            ).one_or_none() or db.query(ModelVersion).filter(
+                ModelVersion.role == role
+            ).order_by(ModelVersion.created_at.asc()).first()
+            if pick:
+                pick.is_active = True
+                activated[role] = pick.filename
+        db.commit()
+    logger.info("scan_models: registered %d files; activated defaults: %s", found, activated)
+    return {"ok": True, "registered": found, "activated": activated}
+
+
+def _active_model_paths(engine) -> dict:
+    """role -> absolute model path for the ACTIVE version (only roles with an active row)."""
+    from ..models.model_version import ModelVersion
+    engine_path = os.environ.get("ENGINE_PATH", "/app/engine")
+    out: dict[str, str] = {}
+    try:
+        with Session(engine) as db:
+            for mv in db.query(ModelVersion).filter(ModelVersion.is_active.is_(True)).all():
+                rel = mv.filename
+                out[mv.role] = rel if os.path.isabs(rel) else os.path.join(engine_path, rel)
+    except Exception as exc:
+        logger.warning("active model paths unavailable: %s", exc)
+    return out

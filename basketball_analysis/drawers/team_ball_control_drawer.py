@@ -5,8 +5,9 @@ class TeamBallControlDrawer:
     """
     A class responsible for calculating and drawing team ball control statistics on video frames.
     """
-    def __init__(self):
-        pass
+    def __init__(self, team1_name: str | None = None, team2_name: str | None = None):
+        self.team1_name = team1_name or "Team 1"
+        self.team2_name = team2_name or "Team 2"
 
     def get_team_ball_control(self,player_assignment,ball_aquisition):
         """
@@ -101,7 +102,7 @@ class TeamBallControlDrawer:
         team_1 = team_1_num_frames/(team_ball_control_till_frame.shape[0])
         team_2 = team_2_num_frames/(team_ball_control_till_frame.shape[0])
 
-        cv2.putText(frame, f"Team 1 Ball Control: {team_1*100:.2f}%",(text_x, text_y1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,0,0), font_thickness)
-        cv2.putText(frame, f"Team 2 Ball Control: {team_2*100:.2f}%",(text_x, text_y2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,0,0), font_thickness)
+        cv2.putText(frame, f"{self.team1_name} Ball Control: {team_1*100:.2f}%",(text_x, text_y1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,0,0), font_thickness)
+        cv2.putText(frame, f"{self.team2_name} Ball Control: {team_2*100:.2f}%",(text_x, text_y2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0,0,0), font_thickness)
 
         return frame

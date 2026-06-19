@@ -36,6 +36,9 @@ class GameRead(BaseModel):
     away_team2_jersey: str
     home_score: Optional[int]
     away_score: Optional[int]
+    analysis_start_s: Optional[float] = None
+    analysis_end_s: Optional[float] = None
+    ball_tracking_quality: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -50,4 +53,11 @@ class AnalysisOptions(BaseModel):
     pose_player_filter: Optional[list[int]] = Field(
         default=None,
         description="Track IDs to limit pose drawing to. None = draw all players.",
+    )
+    use_curated_ball: bool = Field(
+        default=False,
+        description=(
+            "Use the curated ball track from the game's completed interactive "
+            "ball-tracking session (skips the SAM2 propagation stage)."
+        ),
     )

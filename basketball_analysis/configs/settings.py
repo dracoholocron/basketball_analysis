@@ -183,6 +183,40 @@ class EngineSettings(BaseSettings):
         default=True,
         description="Apply a constant-velocity Kalman filter to smooth/predict the ball",
     )
+    ball_draw_predicted: bool = Field(
+        default=False,
+        description=(
+            "Draw the ball on frames filled only by Kalman/interp prediction (no real "
+            "detection). Default False → the ball is shown ONLY where YOLO/SAM2/SAHI "
+            "actually saw it (no phantom balls). Tracks still keep predicted positions "
+            "for metrics; this only controls the drawn video."
+        ),
+    )
+    ball_sam2_primary: bool = Field(
+        default=True,
+        description=(
+            "Fusion mode: trust SAM2 wherever it has the ball; YOLO only fills SAM2 gaps. "
+            "Curbs YOLO false positives over/near the real ball. False = legacy fusion "
+            "(agree→YOLO, disagree→SAM2)."
+        ),
+    )
+    ball_plausible_max_px: float = Field(
+        default=70.0, description="Max ball box side (px @720p); larger YOLO boxes are dropped as FP.",
+    )
+    ball_plausible_min_px: float = Field(
+        default=4.0, description="Min ball box side (px @720p); smaller YOLO boxes are dropped.",
+    )
+    ball_plausible_aspect: float = Field(
+        default=0.4, description="Min min/max side ratio for a YOLO ball box (squareness).",
+    )
+    ball_max_jump_px: float = Field(
+        default=80.0,
+        description=(
+            "Max plausible ball movement per frame (px @720p) in remove_wrong_detections. "
+            "Bigger jumps are dropped as wrong. Old value 25 was too strict for a fast "
+            "ball and discarded true detections (then reconstructed by Kalman)."
+        ),
+    )
     ball_visual_track: bool = Field(
         default=False,
         description=(
@@ -214,6 +248,86 @@ class EngineSettings(BaseSettings):
             "Raise (2-3) on very long videos to cut SAM2 time."
         ),
     )
+    sam2_long_frames: int = Field(
+        default=18000,
+        description=(
+            "Videos with more frames than this use sam2_stride_long instead of sam2_stride "
+            "(SAM2 cost dominates long videos; ball coverage stays high via interpolation). "
+            "0 disables the adaptive bump."
+        ),
+    )
+    sam2_stride_long: int = Field(
+        default=2,
+        description="SAM2 stride applied when total_frames > sam2_long_frames.",
+    )
+    sam2_chunk: int = Field(
+        default=500,
+        description=(
+            "Frames per SAM2 propagation chunk (state offloaded to CPU). Larger = "
+            "fewer chunk-boundary stalls but more CPU RAM. Decode/write of the next "
+            "chunk is double-buffered against GPU processing of the current one."
+        ),
+    )
+    sam2_offload_video: bool = Field(
+        default=True,
+        description=(
+            "Keep the SAM2 per-chunk video tensor on CPU RAM (~12.6MB/frame fp32; a "
+            "500-frame chunk ≈ 6GB → doesn't fit 12GB VRAM alongside the model). "
+            "False = video on GPU (faster) — only for big-VRAM GPUs/small chunks."
+        ),
+    )
+    sam2_offload_state: bool = Field(
+        default=False,
+        description=(
+            "Offload the SAM2 inference state to CPU (trades speed for memory, per the "
+            "official docs). We track ONE object so the state is small → keep on GPU "
+            "(False) for speed; was True before."
+        ),
+    )
+    sam2_chunk_in_ram: bool = Field(
+        default=True,
+        description=(
+            "Write SAM2 chunk JPEGs to /dev/shm (RAM) instead of disk — removes per-chunk "
+            "write+read I/O on WSL. Needs shm_size in compose (one chunk ≈ 50-120MB)."
+        ),
+    )
+    ball_session_lost_s: float = Field(
+        default=2.0,
+        description=(
+            "Interactive ball session: auto-pause when SAM2 has no accepted ball mask "
+            "for this many seconds (the model 'lost' the ball → ask the user)."
+        ),
+    )
+    ball_session_drift_frames: int = Field(
+        default=3,
+        description=(
+            "Interactive ball session: auto-pause after this many consecutive drift-y "
+            "frames (center snap >130px or size >2.2x the running median)."
+        ),
+    )
+    ball_session_preview_every: int = Field(
+        default=100,
+        description="Interactive ball session: emit a preview JPEG every N processed frames.",
+    )
+    sam2_vos_optimized: bool = Field(
+        default=False,
+        description=(
+            "Build the SAM2 video predictor with vos_optimized=True (torch.compile of "
+            "the heavy components) for faster propagation — same weights → same masks. "
+            "OFF by default: torch.compile/Triton fails to LINK on this RTX 5070 + WSL "
+            "(collect2 ld error) and the compile is lazy (during propagation), which "
+            "disables SAM2 for the whole run → ball-coverage regression. Enable "
+            "(BA_SAM2_VOS_OPTIMIZED=true) only where Triton compiles cleanly."
+        ),
+    )
+    video_encoder: str = Field(
+        default="nvenc",
+        description=(
+            "Annotated-video H.264 encoder: 'nvenc' (GPU, falls back to libx264 if "
+            "unavailable) or 'libx264' (CPU only). NVENC frees the otherwise-idle GPU "
+            "during the encode stage."
+        ),
+    )
 
     # ── Player detection resolution ──────────────────────────────────────────────
     player_max_h: int = Field(
@@ -229,6 +343,13 @@ class EngineSettings(BaseSettings):
             "YOLO inference imgsz for player detection. Raise (e.g. 1280) together "
             "with player_max_h so small/distant players aren't lost to the default "
             "640 internal resize."
+        ),
+    )
+    ball_imgsz: int = Field(
+        default=960,
+        description=(
+            "YOLO inference imgsz for the BALL detector. The ball is small/distant; "
+            "higher (960/1280) improves detection at more GPU cost. Env: BA_BALL_IMGSZ"
         ),
     )
     tracker: str = Field(
@@ -269,6 +390,18 @@ class EngineSettings(BaseSettings):
         default=0.5,
         description="Drop provisional (no-dorsal) identities seen less than this (noise/false tracks)",
     )
+    steal_min_hold_frames: int = Field(
+        default=9,
+        description="Steal detector: consecutive contact frames to confirm a possessor (higher = fewer false steals)",
+    )
+    steal_cooldown_frames: int = Field(
+        default=150,
+        description="Steal detector: min frames between steal events (~5s at 30fps)",
+    )
+    steal_rim_factor: float = Field(
+        default=3.0,
+        description="Steal detector: possession changes within N·rim-width of a rim are NOT steals (shots/rebounds)",
+    )
 
     # ── Jersey number OCR (player identity) ──────────────────────────────────────
     jersey_ocr: bool = Field(
@@ -286,6 +419,18 @@ class EngineSettings(BaseSettings):
     ball_export_dataset: bool = Field(
         default=False,
         description="Export SAM2-propagated ball boxes as a YOLO dataset during analysis (fine-tune corpus)",
+    )
+    ball_tracknet_path: str = Field(
+        default="",
+        description=(
+            "Path to a trained TrackNetV2 .pt file. When set, TrackNet is used as the "
+            "primary per-frame ball detector instead of YOLO (with YOLO as fallback for "
+            "frames where TrackNet has no detection). Leave empty to disable."
+        ),
+    )
+    ball_tracknet_conf: float = Field(
+        default=0.5,
+        description="Heatmap peak confidence threshold for TrackNetDetector (0–1).",
     )
 
     # ── Pose estimation ──────────────────────────────────────────────────────────
@@ -325,6 +470,15 @@ class EngineSettings(BaseSettings):
     team_assigner_vote_window: int = Field(
         default=30,
         description="Rolling window (frames) for majority-vote team assignment per track_id",
+    )
+    team_cosine_margin: float = Field(
+        default=0.05,
+        description=(
+            "Exemplar team matching: if |cos(team1) - cos(team2)| < this, the crop is "
+            "ambiguous → unknown (not forced to a team). Higher = stricter (more unknowns); "
+            "0 disables (always pick the closer team). Curbs team-1 inflation from blurry/"
+            "partial fragmented crops."
+        ),
     )
 
     # ── Speed / distance ───────────────────────────────────────────────────────

@@ -6,8 +6,9 @@ class PassInterceptionDrawer:
     A class responsible for calculating and drawing pass and interception statistics
     on a sequence of video frames.
     """
-    def __init__(self):
-        pass
+    def __init__(self, team1_name: str | None = None, team2_name: str | None = None):
+        self.team1_name = team1_name or "Team 1"
+        self.team2_name = team2_name or "Team 2"
 
     def get_stats(self, passes, interceptions):
         """
@@ -106,7 +107,7 @@ class PassInterceptionDrawer:
 
         cv2.putText(
             frame, 
-            f"Team 1 - Passes: {team1_passes} Interceptions: {team1_interceptions}",
+            f"{self.team1_name} - Passes: {team1_passes} Interceptions: {team1_interceptions}",
             (text_x, text_y1), 
             cv2.FONT_HERSHEY_SIMPLEX, 
             font_scale, 
@@ -116,7 +117,7 @@ class PassInterceptionDrawer:
         
         cv2.putText(
             frame, 
-            f"Team 2 - Passes: {team2_passes} Interceptions: {team2_interceptions}",
+            f"{self.team2_name} - Passes: {team2_passes} Interceptions: {team2_interceptions}",
             (text_x, text_y2), 
             cv2.FONT_HERSHEY_SIMPLEX, 
             font_scale, 

@@ -1,0 +1,31 @@
+# SAM 3 PILOT lab worker (isolated, profile 'lab') — separate from production.
+# Installs a recent ultralytics (with SAM 3 support); the gated sam3.pt weights are
+# provided at runtime via the sam3_models volume (request access on Hugging Face).
+FROM pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libgomp1 libpq-dev gcc git libgl1-mesa-glx ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# API deps (Celery/DB/Storage) + engine deps (excluding torch — already in base).
+COPY api/requirements.txt /tmp/api_requirements.txt
+RUN pip install --no-cache-dir -r /tmp/api_requirements.txt
+COPY basketball_analysis/requirements.txt /tmp/engine_requirements.txt
+RUN grep -v "^torch" /tmp/engine_requirements.txt | pip install --no-cache-dir -r /dev/stdin || true
+
+# Recent ultralytics for SAM 3 (SAM3SemanticPredictor). Best-effort.
+RUN pip install --no-cache-dir -U ultralytics || \
+    echo "WARNING: ultralytics upgrade failed — SAM 3 pilot may be unavailable"
+
+COPY basketball_analysis/ /app/engine/
+COPY api/ /app/api/
+
+ENV PYTHONPATH=/app/engine:/app/api
+ENV ENGINE_PATH=/app/engine
+ENV BA_SAM3_WEIGHTS=/app/sam3_models/sam3.pt
+
+# Celery worker — sam3lab queue only, 1 task at a time.
+CMD ["celery", "-A", "app.worker.celery_app", "worker", \
+     "--loglevel=info", "--queues=sam3lab", "--concurrency=1"]

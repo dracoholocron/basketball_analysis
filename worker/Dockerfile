@@ -20,6 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir "git+https://github.com/facebookresearch/sam2.git" || \
     echo "WARNING: sam2 install failed — ball SAM2 tracking will be disabled at runtime"
 
+# EfficientTAM (Meta, ICCV 2025) — pilot alternative ball tracker (~1.6-2x faster than
+# SAM2, same video-predictor API). Best-effort: only used when a game selects the
+# "efficienttam" ball-tracking quality; falls back to SAM2/YOLO if missing.
+RUN pip install --no-cache-dir "git+https://github.com/yformer/EfficientTAM.git" || \
+    echo "WARNING: EfficientTAM install failed — the efficienttam ball option will fall back"
+
 # EasyOCR for jersey-number recognition (player identity). Best-effort: jersey OCR
 # is skipped at runtime if the import fails. Model weights download on first use and
 # are cached under /app/engine/models/easyocr (mount a volume to persist).
@@ -29,6 +35,13 @@ RUN pip install --no-cache-dir easyocr || \
 # lap: linear-assignment solver required by ultralytics BoT-SORT/ByteTrack trackers.
 # Baked in so the first model.track() call doesn't trigger a runtime auto-install.
 RUN pip install --no-cache-dir lap
+
+# NOTE: TensorRT FP16 export (export_tensorrt_engine task) is currently NON-FUNCTIONAL on
+# this RTX 5070 (Blackwell sm_120) + WSL: tensorrt-cu12/onnxruntime-gpu builds lack sm_120
+# kernels ("CUDA error: no kernel image is available for execution on the device"), same as
+# NVENC and Triton/torch.compile. So we do NOT bake the ~4.3GB export deps into the image.
+# The export task/endpoint/UI remain (dormant); if attempted, ultralytics auto-installs the
+# deps at runtime. Re-enable a baked install here once sm_120-capable TensorRT ships.
 
 # API service deps (for Celery + DB + Storage)
 COPY api/requirements.txt /tmp/api_requirements.txt

@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..core.database import Base
 
@@ -50,5 +50,6 @@ class FrameMetric(Base):
     frame_number: Mapped[int] = mapped_column(Integer, nullable=False)
     ball_holder_track_id: Mapped[int | None] = mapped_column(Integer)
     ball_holder_team: Mapped[int | None] = mapped_column(Integer)
+    hoop_present: Mapped[bool | None] = mapped_column(Boolean)  # a hoop/rim was located this frame
 
     job: Mapped["Job"] = relationship(back_populates="frame_metrics")

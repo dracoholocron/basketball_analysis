@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
+import VideoControls from "@/components/video/VideoControls";
 import {
   getHoopAnnotation,
   getGameVideoUrl,
@@ -243,6 +244,7 @@ export default function AnnotateHoopPage() {
                     onChange={handleSeek} className="flex-1 h-1.5 accent-orange-500 cursor-pointer" />
                   <span className="text-xs text-slate-400 font-mono shrink-0">{fmtTime(currentTime)} / {fmtTime(duration)}</span>
                 </div>
+                <VideoControls videoRef={videoRef} />
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs text-slate-400">Tipo:</span>
                   {(["rim", "backboard"] as const).map((k) => (

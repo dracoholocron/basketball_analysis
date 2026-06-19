@@ -4,10 +4,14 @@ import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
-import { listPlayers, createPlayer, updatePlayer, deletePlayer, listTeams } from "@/lib/api";
+import {
+  listPlayers, createPlayer, updatePlayer, deletePlayer, listTeams,
+  listTeamDivisions, listPlayerDivisions, assignPlayerToDivision,
+  unassignPlayerFromDivision, type Division,
+} from "@/lib/api";
 import {
   UserCircle2, PlusCircle, Loader2, Pencil, Trash2, X, Check,
-  ChevronLeft,
+  ChevronLeft, Layers,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -43,6 +47,7 @@ function AdminPlayersContent() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [divPlayer, setDivPlayer] = useState<Player | null>(null);
 
   const emptyForm = { name: "", jersey_number: "", position: "", team_id: filterTeam, height_cm: "", weight_kg: "" };
   const [form, setForm] = useState<Record<string, string>>(emptyForm);
@@ -246,6 +251,11 @@ function AdminPlayersContent() {
                     <td className="px-4 py-3 text-slate-400">{p.weight_kg ? `${p.weight_kg} kg` : "—"}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 justify-end">
+                        <button onClick={() => setDivPlayer(p)} disabled={!p.team_id}
+                          title={p.team_id ? "Divisiones" : "Asigna un equipo primero"}
+                          className="text-slate-400 hover:text-purple-400 transition-colors disabled:opacity-30">
+                          <Layers size={15} />
+                        </button>
                         <button onClick={() => startEdit(p)} className="text-slate-400 hover:text-white transition-colors">
                           <Pencil size={15} />
                         </button>
@@ -265,6 +275,81 @@ function AdminPlayersContent() {
           </div>
         )}
       </div>
+
+      {divPlayer && (
+        <DivisionAssignModal player={divPlayer} onClose={() => setDivPlayer(null)} />
+      )}
     </AppShell>
+  );
+}
+
+function DivisionAssignModal({ player, onClose }: { player: Player; onClose: () => void }) {
+  const [teamDivs, setTeamDivs] = useState<Division[]>([]);
+  const [assigned, setAssigned] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!player.team_id) { setLoading(false); return; }
+    Promise.all([
+      listTeamDivisions(player.team_id),
+      listPlayerDivisions(player.id),
+    ]).then(([td, pd]) => {
+      setTeamDivs(td);
+      setAssigned(new Set(pd.map((d) => d.id)));
+    }).catch(() => null).finally(() => setLoading(false));
+  }, [player]);
+
+  async function toggle(divId: string) {
+    setBusy(divId);
+    try {
+      if (assigned.has(divId)) {
+        await unassignPlayerFromDivision(divId, player.id);
+        setAssigned((s) => { const n = new Set(s); n.delete(divId); return n; });
+      } else {
+        await assignPlayerToDivision(divId, player.id);
+        setAssigned((s) => new Set(s).add(divId));
+      }
+    } catch { /* ignore */ } finally { setBusy(null); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-md p-5 space-y-4"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="font-semibold text-white flex items-center gap-2">
+            <Layers size={18} className="text-purple-400" /> Divisiones de {player.name}
+          </h3>
+          <button onClick={onClose}><X size={18} className="text-slate-400 hover:text-white" /></button>
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center py-8"><Loader2 className="animate-spin text-blue-500" size={24} /></div>
+        ) : teamDivs.length === 0 ? (
+          <p className="text-sm text-slate-400 py-4 text-center">
+            El equipo de este jugador no tiene divisiones. Créalas en <strong>Equipos</strong>.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {teamDivs.map((d) => (
+              <li key={d.id}>
+                <label className="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-700/50 hover:bg-slate-700 cursor-pointer">
+                  <input type="checkbox" checked={assigned.has(d.id)} disabled={busy === d.id}
+                    onChange={() => toggle(d.id)} className="accent-purple-500 w-4 h-4" />
+                  <span className="text-sm text-white">{d.name}</span>
+                  {d.category && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300">
+                      {d.category.replace("_", " ")}
+                    </span>
+                  )}
+                  {busy === d.id && <Loader2 size={14} className="animate-spin text-slate-400 ml-auto" />}
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }

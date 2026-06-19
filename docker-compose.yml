@@ -62,6 +62,9 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      # Allow the browser to PUT multipart parts directly (cross-origin from the app
+      # domain to s3.<DOMAIN>). MinIO's default is already "*"; set for clarity.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
     volumes:
       - minio_data:/data
     ports:
@@ -87,6 +90,10 @@ services:
       BA_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-basketball}:${POSTGRES_PASSWORD:-basketball}@db:5432/${POSTGRES_DB:-basketball}
       BA_REDIS_URL: redis://redis:6379/0
       BA_MINIO_ENDPOINT: minio:9000
+      # Public endpoint for browser-facing presigned URLs. Dev: localhost:9000.
+      # Prod: set MINIO_PUBLIC_ENDPOINT=s3.<DOMAIN> and MINIO_PUBLIC_SECURE=true.
+      BA_MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      BA_MINIO_PUBLIC_SECURE: ${MINIO_PUBLIC_SECURE:-false}
       BA_MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       BA_MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       BA_SECRET_KEY: ${JWT_SECRET:-CHANGE_ME}
@@ -113,9 +120,10 @@ services:
     profiles: ["dev", "prod"]
     restart: unless-stopped
     runtime: nvidia           # requires nvidia-container-toolkit on host
+    shm_size: "2gb"           # SAM2 chunk JPEGs live in /dev/shm (RAM) — default 64MB is too small
     environment:
       NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video   # 'video' exposes libnvidia-encode → h264_nvenc
       BA_DUMMY_MODELS: ${BA_DUMMY_MODELS:-false}
       BA_DEVICE: ${BA_DEVICE:-auto}
       BA_CHUNK_SIZE: "3000"
@@ -133,10 +141,21 @@ services:
       BA_BALL_VISUAL_TRACK: "false"   # CSRT needs opencv-contrib (not installed); fine-tune is the real gray-ball fix
       BA_BALL_SAM2: "true"            # propagate manual ball clicks with SAM2 (color-agnostic)
       BA_SAM2_STRIDE: "1"             # raise (2-3) on very long videos to cut SAM2 time
+      BA_SAM2_LONG_FRAMES: "40000"    # only bump to stride 2 above this (≈26 min); keep stride 1 (full ball fidelity) for normal games
+      BA_BALL_MAX_JUMP_PX: "80"       # remove_wrong threshold (px/frame @720p); 25 was too strict for a fast ball
+      BA_SAM2_CHUNK: "600"            # frames/chunk; video tensor ≈12.6MB/frame in CPU RAM (600≈7.5GB; WSL has 23GB — raise only with more RAM)
+      BA_SAM2_OFFLOAD_STATE: "false"  # 1 object → small state; keep on GPU for speed (offload trades speed for memory)
+      BA_SAM2_CHUNK_IN_RAM: "true"    # chunk JPEGs in /dev/shm (see shm_size)
+      BA_SAM2_VOS_OPTIMIZED: "false"  # torch.compile/Triton fails to link on this RTX 5070+WSL (disables SAM2); enable only where Triton compiles
+      BA_BALL_DEBUG: "true"           # dump <output>.ball_debug.json (frame,bbox,source) for the TP/FP audit tool
+      BA_VIDEO_ENCODER: "libx264"     # NVENC blocked by driver/SDK mismatch on this RTX 5070 (lib exposed but nvEncodeAPI unsupported); flip to "nvenc" after a driver update
       BA_POSE_TOPDOWN: "true"         # per-player crop pose → distant players keep skeletons
       BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
+      BA_BALL_TRACKNET_PATH: "/app/engine/models/tracknet_ball__20260619-0555.pt"  # trained 2026-06-19 (val_loss 0.0029); TrackNet primary, YOLO fallback
+      BA_BALL_TRACKNET_CONF: "0.5"    # heatmap confidence threshold for TrackNet detector
       BA_PLAYER_MAX_H: "1080"         # player detection at native res → recover distant players
       BA_PLAYER_IMGSZ: "1280"         # YOLO imgsz for players (with MAX_H) to keep distant detail
+      BA_BALL_IMGSZ: "960"            # YOLO imgsz for the small/distant ball (more GPU, better recall)
       BA_POSE_BACKEND: "yolo"
       BA_POSE_CONF_THRESHOLD: "0.3"
       BA_EVENT_POSE_CONF_THRESHOLD: "0.3"
@@ -147,7 +166,7 @@ services:
       BA_TRACK_STITCH: "true"         # link track fragments by spatio-temporal continuity
       BA_TRACK_STITCH_MAX_GAP_S: "2.5" # aggressive: bridge longer occlusions/missed stretches
       BA_TRACK_STITCH_MAX_DIST_FRAC: "0.12"  # px/s tolerance (scales with gap length)
-      BA_MIN_TRACK_SECONDS: "0.5"     # drop provisional (no-dorsal) identities seen < this
+      BA_MIN_TRACK_SECONDS: "1.5"     # drop provisional (no-dorsal) identities seen < this (curbs identity inflation on long videos)
       BA_JERSEY_OCR: "true"           # OCR jersey numbers → consolidate tracks into real athletes
       BA_JERSEY_OCR_SAMPLE_EVERY: "5"
       BA_JERSEY_OCR_MIN_VOTES: "2"
@@ -182,6 +201,37 @@ services:
       retries: 3
     logging: *default-logging
 
+  # ── SAM 3 PILOT lab worker (isolated, opt-in) ────────────────────────────────
+  # Start only when piloting SAM 3:  docker compose --profile lab up -d worker-sam3lab
+  # Requires sam3.pt (gated) placed in the sam3_models volume.
+  worker-sam3lab:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile.sam3lab
+    profiles: ["lab"]
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      BA_SAM3_WEIGHTS: /app/sam3_models/sam3.pt
+      ENGINE_PATH: /app/engine
+      BA_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-basketball}:${POSTGRES_PASSWORD:-basketball}@db:5432/${POSTGRES_DB:-basketball}
+      BA_REDIS_URL: redis://redis:6379/0
+      BA_MINIO_ENDPOINT: minio:9000
+      BA_MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      BA_MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      LD_LIBRARY_PATH: "/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cufft/lib:/opt/conda/lib/python3.11/site-packages/nvidia/curand/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusolver/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cusparse/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+    volumes:
+      - sam3_models:/app/sam3_models       # place gated sam3.pt here
+      - models_data:/app/engine/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    logging: *default-logging
+
   # ── Next.js Frontend ─────────────────────────────────────────────────────────
   frontend:
     build:
@@ -211,9 +261,16 @@ services:
     image: caddy:2-alpine
     profiles: ["prod"]
     restart: unless-stopped
+    # Caddy reads {$DOMAIN} from its OWN container env (not compose substitution),
+    # so it must be passed explicitly. Without it the site blocks bind to "localhost"
+    # and real requests (Host: <DOMAIN>) fall through to an empty 200.
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
     ports:
-      - "80:80"
-      - "443:443"
+      # Host 80/443 are taken by another project; Caddy serves HTTP only behind the
+      # Cloudflare Tunnel (TLS terminates at Cloudflare). Point the tunnel public
+      # hostnames at http://localhost:8080.
+      - "8080:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -231,5 +288,6 @@ volumes:
   stubs_data:
   hf_cache:
   ball_dataset:
+  sam3_models:       # gated SAM 3 weights (sam3.pt) for the lab pilot
   caddy_data:
   caddy_config:

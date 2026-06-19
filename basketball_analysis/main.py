@@ -203,12 +203,12 @@ def _global_motion_sequence(video_path: str, total_frames: int) -> list:
     propagation. Used to propagate manual hoop/backboard boxes across the whole
     video so a couple of marks follow the panning camera everywhere."""
     import cv2
-    from utils.video_utils import iter_video_frames
+    from utils.video_utils import iter_video_frames_prefetch
     from tactical_view_converter.tactical_view_converter import TacticalViewConverter
 
     H: list = [None] * total_frames
     prev_gray = None
-    for i, frame in enumerate(iter_video_frames(video_path, max_height=720)):
+    for i, frame in enumerate(iter_video_frames_prefetch(video_path, max_height=720)):
         if i >= total_frames:
             break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -355,23 +355,138 @@ def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[
     - both present & disagree → use SAM2 (anchored to user clicks, trustworthy
       for off-domain balls).
     """
-    import math
+    from configs.settings import settings as _settings
     n = len(yolo_tracks)
+    sam2_primary = bool(getattr(_settings, "ball_sam2_primary", True))
     out: list[dict] = []
+    src: list[str] = []   # per-frame ball source: yolo | sam2 | "" (none)
     for i in range(n):
         y = yolo_tracks[i] if i < len(yolo_tracks) else {}
         s = sam2_tracks[i] if i < len(sam2_tracks) else {}
         yc, sc = _ball_center(y), _ball_center(s)
-        if yc and sc:
-            d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
-            out.append(y if d <= 50 else s)
-        elif yc:
-            out.append(y)
-        elif sc:
-            out.append(s)
+        if sam2_primary:
+            # SAM2 is the trusted (temporal, prompt-anchored) signal: wherever it has the
+            # ball, use it. YOLO only FILLS gaps SAM2 didn't reach (and only if its box is
+            # plausible — already gated upstream). Kills YOLO false positives near/over the
+            # real ball that the old "agree→YOLO / disagree→SAM2" let through.
+            if sc:
+                out.append(s); src.append("sam2")
+            elif yc:
+                out.append(y); src.append("yolo")
+            else:
+                out.append({}); src.append("")
         else:
-            out.append({})
-    return out
+            import math
+            if yc and sc:
+                d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
+                if d <= 50:
+                    out.append(y); src.append("yolo")
+                else:
+                    out.append(s); src.append("sam2")
+            elif yc:
+                out.append(y); src.append("yolo")
+            elif sc:
+                out.append(s); src.append("sam2")
+            else:
+                out.append({}); src.append("")
+    return out, src
+
+
+def _gate_yolo_ball(ball_tracks: list[dict], skip: bool = False) -> tuple[list[dict], int]:
+    """Drop implausible YOLO ball boxes (false positives): too large/small or non-square
+    for a ball at 720p. Returns (filtered_tracks, dropped_count). Thresholds via settings.
+    Pass skip=True when detections come from TrackNet (fixed-radius bbox, different geometry)."""
+    if skip:
+        return ball_tracks, 0
+    from configs.settings import settings as _settings
+    max_px = float(getattr(_settings, "ball_plausible_max_px", 70.0))
+    min_px = float(getattr(_settings, "ball_plausible_min_px", 4.0))
+    min_aspect = float(getattr(_settings, "ball_plausible_aspect", 0.4))
+    dropped = 0
+    for bt in ball_tracks:
+        box = bt.get(1, {}).get("bbox", [])
+        if len(box) < 4:
+            continue
+        w = abs(box[2] - box[0]); h = abs(box[3] - box[1])
+        big = max(w, h); small = min(w, h)
+        if big > max_px or big < min_px or (big > 6 and small / max(big, 1e-6) < min_aspect):
+            bt.pop(1, None)   # implausible → drop this YOLO detection
+            dropped += 1
+    return ball_tracks, dropped
+
+
+def _flag_ball_segments(ball_tracks: list[dict], ball_source: list[str],
+                        fps: float) -> list[dict]:
+    """Auto-flag suspect SAM2 segments (drift candidates: shoe/chair latch-on) for
+    human review in the annotate-ball UI. Heuristics over sam2-sourced frames only:
+      - jump:   center snaps > ~120px between consecutive sam2 frames (drift onset)
+      - size:   box side deviates >2.2x from the median sam2 ball size
+      - static: box stays within ~12px for > ~6s (a chair/shoe parks; review it)
+    Flags are SUGGESTIONS (nothing is deleted); merged into [{start_s,end_s,reason}].
+    """
+    pts = []   # (frame, cx, cy, side)
+    for i, (bt, src) in enumerate(zip(ball_tracks, ball_source)):
+        if src != "sam2":
+            continue
+        box = bt.get(1, {}).get("bbox", [])
+        if len(box) < 4:
+            continue
+        pts.append((i, (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0,
+                    max(abs(box[2] - box[0]), abs(box[3] - box[1]))))
+    if len(pts) < 10:
+        return []
+
+    sides = sorted(p[3] for p in pts)
+    med_side = sides[len(sides) // 2] or 1.0
+    sus: set[int] = set()
+
+    for k in range(1, len(pts)):
+        f0, x0, y0, _ = pts[k - 1]
+        f1, x1, y1, s1 = pts[k]
+        gap = max(1, f1 - f0)
+        if gap <= 5 and ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5 > 130:
+            sus.add(f1)                                    # drift-onset snap
+        if s1 > 2.2 * med_side or s1 < med_side / 2.2:
+            sus.add(f1)                                    # implausible size
+
+    # static: sliding check — same spot for > 6s
+    win = int(6 * fps)
+    j = 0
+    for k in range(len(pts)):
+        while pts[k][0] - pts[j][0] > win:
+            j += 1
+        if pts[k][0] - pts[j][0] >= win:
+            xs = [p[1] for p in pts[j:k + 1]]
+            ys = [p[2] for p in pts[j:k + 1]]
+            if (max(xs) - min(xs)) < 12 and (max(ys) - min(ys)) < 12:
+                sus.update(p[0] for p in pts[j:k + 1])
+
+    if not sus:
+        return []
+    # Merge suspect frames into segments (≤1s apart), cap the list for the UI.
+    ordered = sorted(sus)
+    segs: list[dict] = []
+    start = prev = ordered[0]
+    for f in ordered[1:]:
+        if f - prev > int(fps):
+            segs.append({"start_s": round(start / fps, 2), "end_s": round(prev / fps, 2),
+                         "reason": "posible objeto incorrecto (drift de SAM2)"})
+            start = f
+        prev = f
+    segs.append({"start_s": round(start / fps, 2), "end_s": round(prev / fps, 2),
+                 "reason": "posible objeto incorrecto (drift de SAM2)"})
+    return segs[:20]
+
+
+def _tag_ball_sources(tracks: list[dict], source: list[str], label: str) -> None:
+    """After a ball stage, attribute frames newly given a ball to ``label`` (yolo/sam2/
+    sahi/kalman/interp) and clear frames that lost the ball. In-place on ``source``."""
+    for i in range(min(len(tracks), len(source))):
+        if 1 in tracks[i]:
+            if not source[i] and label:
+                source[i] = label
+        else:
+            source[i] = ""
 
 
 def run_pipeline(
@@ -387,6 +502,7 @@ def run_pipeline(
     court_kp_detector_path: str = COURT_KEYPOINT_DETECTOR_PATH,
     court_profile: CourtProfile | None = None,
     manual_landmarks: list[dict] | None = None,
+    team_exemplars: dict | None = None,
     camera_motion: str = "static",
     on_progress=None,
     chunk_size: int | None = None,
@@ -394,6 +510,14 @@ def run_pipeline(
     pose_player_filter: list[int] | None = None,
     ball_points: list[dict] | None = None,
     hoop_boxes: list[dict] | None = None,
+    team1_name: str | None = None,
+    team2_name: str | None = None,
+    analysis_start_s: float = 0.0,
+    analysis_end_s: float | None = None,
+    sam2_checkpoint: str | None = None,
+    sam2_config: str | None = None,
+    pose_model_path: str | None = None,
+    precomputed_ball_track: dict | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -457,7 +581,7 @@ def run_pipeline(
 
     player_tracker = PlayerTracker(_player_path)
     ball_tracker = BallTracker(_ball_path)
-    court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path)
+    court_keypoint_detector = CourtKeypointDetector(court_kp_detector_path or COURT_KEYPOINT_DETECTOR_PATH)
 
     _player_stub = os.path.join(stub_path, "player_track_stubs.pkl")
     _ball_stub = os.path.join(stub_path, "ball_track_stubs.pkl")
@@ -500,13 +624,61 @@ def run_pipeline(
         )
 
         _progress("ball_tracking", 30)
-        ball_tracks = read_stub(use_stubs, _ball_stub)
-        if ball_tracks is None:
-            sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
-            ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
-            del sv_ball
-            save_stub(_ball_stub, ball_tracks)
-        logger.info("Ball tracks done (%d frames)", len(ball_tracks))
+        if precomputed_ball_track is not None:
+            # Curated interactive-session track: skip YOLO / SAM2 / SAHI entirely.
+            _n_pre = len(player_tracks)
+            ball_tracks = [
+                {1: {"bbox": precomputed_ball_track[i]}} if i in precomputed_ball_track else {}
+                for i in range(_n_pre)
+            ]
+            ball_source = ["curated" if i in precomputed_ball_track else "" for i in range(_n_pre)]
+            _protected = set(precomputed_ball_track.keys())
+            logger.info(
+                "Using curated ball track: %d/%d frames detected (%.1f%%)",
+                len(_protected), _n_pre, 100.0 * len(_protected) / max(1, _n_pre),
+            )
+            # Export curated track as YOLO labels (same as SAM2 path) so the
+            # fine-tune corpus benefits from interactively-verified ground truth.
+            if getattr(_settings, "ball_export_dataset", False):
+                try:
+                    import uuid as _uuid
+                    from ball_sam2.export_dataset import export_yolo_dataset
+                    _written = export_yolo_dataset(
+                        input_video, ball_tracks, "/app/ball_dataset",
+                        game_id=_uuid.uuid4().hex[:8],
+                    )
+                    logger.info("Ball dataset export (curated): %d labeled frames", _written)
+                except Exception as _exc:
+                    logger.warning("Ball dataset export (curated) failed: %s", _exc)
+        else:
+            _tn_path = getattr(_settings, "ball_tracknet_path", "")
+            _det_src = "tracknet" if (_tn_path and os.path.exists(_tn_path)) else "yolo"
+            ball_tracks = read_stub(use_stubs, _ball_stub)
+            if ball_tracks is None:
+                _tn_conf = float(getattr(_settings, "ball_tracknet_conf", 0.5))
+                _tracknet_ok = False
+                if _tn_path and os.path.exists(_tn_path):
+                    try:
+                        from ball_tracknet import TrackNetDetector
+                        logger.info("TrackNetDetector primary detector: %s (conf=%.2f)", _tn_path, _tn_conf)
+                        _tn_det = TrackNetDetector(_tn_path, conf=_tn_conf)
+                        ball_tracks = _tn_det.detect_frames_streaming(input_video)
+                        logger.info("TrackNet ball detection done (%d frames)", len(ball_tracks))
+                        _tracknet_ok = True
+                    except Exception as _tn_exc:
+                        logger.warning("TrackNetDetector failed (%s), falling back to YOLO", _tn_exc)
+                        _det_src = "yolo"
+                if not _tracknet_ok:
+                    sv_ball = ball_tracker.detect_frames_streaming(input_video, _chunk_size)
+                    ball_tracks = ball_tracker.build_tracks_from_sv_detections(sv_ball)
+                    del sv_ball
+                # Gate runs on fresh detections only; stub already stores gated data.
+                ball_tracks, _gated = _gate_yolo_ball(ball_tracks, skip=(_det_src == "tracknet"))
+                if _gated:
+                    logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
+                save_stub(_ball_stub, ball_tracks)
+            logger.info("Ball tracks done (%d frames)", len(ball_tracks))
+            ball_source = [_det_src if (1 in bt) else "" for bt in ball_tracks]
 
         _progress("keypoint_detection", 45)
         court_keypoints_per_frame = read_stub(use_stubs, _court_stub)
@@ -517,64 +689,101 @@ def run_pipeline(
             save_stub(_court_stub, court_keypoints_per_frame)
         logger.info("Court keypoints done (%d frames)", len(court_keypoints_per_frame))
 
-        _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
-        _raw_detected = len(ball_tracks) - _missing_before_sahi
-        logger.info(
-            "Ball raw detection rate: %d/%d frames (%.1f%%) before SAHI",
-            _raw_detected, len(ball_tracks),
-            100.0 * _raw_detected / max(len(ball_tracks), 1),
-        )
+        if precomputed_ball_track is None:
+            _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
+            _raw_detected = len(ball_tracks) - _missing_before_sahi
+            logger.info(
+                "Ball raw detection rate: %d/%d frames (%.1f%%) before SAHI",
+                _raw_detected, len(ball_tracks),
+                100.0 * _raw_detected / max(len(ball_tracks), 1),
+            )
 
-        # ── SAM2 ball propagation (when manual ball points exist) ───────────
-        # Color-agnostic; fuse with YOLO: keep YOLO where it agrees/is precise,
-        # use SAM2 to fill gaps and resolve disagreements (anchored to clicks).
-        if ball_points and getattr(_settings, "ball_sam2", True):
-            try:
-                from ball_sam2 import Sam2BallTracker
-                sam2 = Sam2BallTracker(_settings.sam2_checkpoint, _settings.sam2_config)
-                sam2_tracks = sam2.track(
-                    input_video, ball_points, len(ball_tracks), actual_fps,
-                    src_scale=_manual_src_scale,
-                )
-                if sam2_tracks is not None:
-                    # Export SAM2 boxes as YOLO auto-labels for fine-tuning (purpose 2).
-                    if getattr(_settings, "ball_export_dataset", False):
-                        try:
-                            import uuid as _uuid
-                            from ball_sam2.export_dataset import export_yolo_dataset
-                            _nv = {
-                                int(round(float(p.get("frame_t", 0.0)) * actual_fps))
-                                for p in ball_points if not p.get("visible", True)
-                            }
-                            _written = export_yolo_dataset(
-                                input_video, sam2_tracks, "/app/ball_dataset",
-                                game_id=_uuid.uuid4().hex[:8], not_visible_frames=_nv,
-                            )
-                            logger.info("Ball dataset export: %d labeled frames", _written)
-                        except Exception as exc:
-                            logger.warning("Ball dataset export failed: %s", exc)
-                    ball_tracks = _fuse_ball_tracks(ball_tracks, sam2_tracks)
-                    _m = sum(1 for bt in ball_tracks if 1 not in bt)
-                    logger.info(
-                        "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
-                        len(ball_tracks) - _m, len(ball_tracks),
-                        100.0 * (len(ball_tracks) - _m) / max(len(ball_tracks), 1),
+            # ── SAM2 ball propagation (when manual ball points exist) ────────
+            if ball_points and getattr(_settings, "ball_sam2", True):
+                try:
+                    from ball_sam2 import Sam2BallTracker
+                    _sam2_ckpt = sam2_checkpoint or _settings.sam2_checkpoint
+                    _sam2_cfg = sam2_config or _settings.sam2_config
+                    logger.info("SAM2 ball tracker checkpoint: %s", _sam2_ckpt)
+                    _long_n = int(getattr(_settings, "sam2_long_frames", 0) or 0)
+                    _nframes = len(ball_tracks)
+                    _eff_stride = None
+                    if _long_n and _nframes > _long_n:
+                        _eff_stride = int(getattr(_settings, "sam2_stride_long", 2))
+                        logger.info(
+                            "SAM2 adaptive stride=%d (video %d frames > %d)",
+                            _eff_stride, _nframes, _long_n,
+                        )
+                    sam2 = Sam2BallTracker(_sam2_ckpt, _sam2_cfg, stride=_eff_stride)
+                    sam2_tracks = sam2.track(
+                        input_video, ball_points, len(ball_tracks), actual_fps,
+                        src_scale=_manual_src_scale,
                     )
-            except Exception as exc:
-                logger.warning("SAM2 ball fusion skipped: %s", exc)
+                    if sam2_tracks is not None:
+                        if getattr(_settings, "ball_export_dataset", False):
+                            try:
+                                import uuid as _uuid
+                                from ball_sam2.export_dataset import export_yolo_dataset
+                                _nv = {
+                                    int(round(float(p.get("frame_t", 0.0)) * actual_fps))
+                                    for p in ball_points if not p.get("visible", True)
+                                }
+                                _written = export_yolo_dataset(
+                                    input_video, sam2_tracks, "/app/ball_dataset",
+                                    game_id=_uuid.uuid4().hex[:8], not_visible_frames=_nv,
+                                )
+                                logger.info("Ball dataset export: %d labeled frames", _written)
+                            except Exception as exc:
+                                logger.warning("Ball dataset export failed: %s", exc)
+                        ball_tracks, ball_source = _fuse_ball_tracks(ball_tracks, sam2_tracks)
+                        _m = sum(1 for bt in ball_tracks if 1 not in bt)
+                        logger.info(
+                            "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
+                            len(ball_tracks) - _m, len(ball_tracks),
+                            100.0 * (len(ball_tracks) - _m) / max(len(ball_tracks), 1),
+                        )
+                except Exception as exc:
+                    logger.warning("SAM2 ball fusion skipped: %s", exc)
 
-        _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
-        if _missing_before_sahi > 0:
-            ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
-        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+            _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
+            if _missing_before_sahi > 0:
+                ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
+            _tag_ball_sources(ball_tracks, ball_source, "sahi")
+            _protected = {i for i, s in enumerate(ball_source) if s == "sam2"}
+
+        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks, protected=_protected)
+        _tag_ball_sources(ball_tracks, ball_source, "")
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "kalman")
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "interp")
+
+        from collections import Counter as _Counter
+        _bsrc = _Counter(s for s in ball_source if s)
+        logger.info(
+            "Ball sources: YOLO=%d, SAM2=%d, SAHI=%d, curated=%d, Kalman=%d, interp=%d (none=%d/%d)",
+            _bsrc.get("yolo", 0), _bsrc.get("sam2", 0), _bsrc.get("sahi", 0),
+            _bsrc.get("curated", 0), _bsrc.get("kalman", 0), _bsrc.get("interp", 0),
+            sum(1 for s in ball_source if not s), len(ball_source),
+        )
+        ball_flagged_segments = _flag_ball_segments(ball_tracks, ball_source, actual_fps)
+        if ball_flagged_segments:
+            logger.info(
+                "Ball review flags: %d suspect segment(s): %s",
+                len(ball_flagged_segments),
+                ", ".join(f"{s['start_s']:.0f}-{s['end_s']:.0f}s" for s in ball_flagged_segments),
+            )
 
         _progress("team_assignment", 55)
         team_assigner = TeamAssigner(
             team_1_class_name=team1_jersey,
             team_2_class_name=team2_jersey,
         )
+        if team_exemplars:
+            try:
+                team_assigner.compute_exemplar_embeddings(input_video, team_exemplars)
+            except Exception as exc:
+                logger.warning("Team exemplar embeddings failed (%s) — using text/HSV", exc)
         player_assignment = team_assigner.get_player_teams_streaming(
             input_video,
             player_tracks,
@@ -608,7 +817,7 @@ def run_pipeline(
             if pose_sequence is None:
                 try:
                     from pose_estimator import PoseEstimator
-                    _pe = PoseEstimator()
+                    _pe = PoseEstimator(model_path=pose_model_path)
                     logger.info("Running pose estimation (backend=%s)…", _pe._backend)
                     pose_sequence = _pe.estimate_sequence_streaming(
                         input_video, player_tracks, _chunk_size
@@ -642,12 +851,24 @@ def run_pipeline(
         logger.info("Player tracks done")
 
         _progress("ball_tracking", 30)
-        ball_tracks = ball_tracker.get_object_tracks(
-            video_frames,
-            read_from_stub=use_stubs,
-            stub_path=_ball_stub,
-        )
-        logger.info("Ball tracks done")
+        if precomputed_ball_track is not None:
+            _n_pre = len(video_frames)
+            ball_tracks = [
+                {1: {"bbox": precomputed_ball_track[i]}} if i in precomputed_ball_track else {}
+                for i in range(_n_pre)
+            ]
+            ball_source = ["curated" if i in precomputed_ball_track else "" for i in range(_n_pre)]
+            _legacy_protected: set = set(precomputed_ball_track.keys())
+            logger.info("Using curated ball track: %d/%d frames", len(_legacy_protected), _n_pre)
+        else:
+            ball_tracks = ball_tracker.get_object_tracks(
+                video_frames,
+                read_from_stub=use_stubs,
+                stub_path=_ball_stub,
+            )
+            logger.info("Ball tracks done")
+            ball_source = ["yolo" if (1 in bt) else "" for bt in ball_tracks]
+            _legacy_protected = set()
 
         _progress("keypoint_detection", 45)
         court_keypoints_per_frame = court_keypoint_detector.get_court_keypoints(
@@ -657,15 +878,25 @@ def run_pipeline(
         )
         logger.info("Court keypoints done")
 
-        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks)
+        ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks, protected=_legacy_protected)
+        _tag_ball_sources(ball_tracks, ball_source, "")
         ball_tracks = ball_tracker.apply_kalman_smoothing(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "kalman")
         ball_tracks = ball_tracker.interpolate_ball_positions(ball_tracks)
+        _tag_ball_sources(ball_tracks, ball_source, "interp")
+        from collections import Counter as _Counter
+        ball_flagged_segments: list[dict] = []
 
         _progress("team_assignment", 55)
         team_assigner = TeamAssigner(
             team_1_class_name=team1_jersey,
             team_2_class_name=team2_jersey,
         )
+        if team_exemplars:
+            try:
+                team_assigner.compute_exemplar_embeddings(input_video, team_exemplars)
+            except Exception as exc:
+                logger.warning("Team exemplar embeddings failed (%s) — using text/HSV", exc)
         player_assignment = team_assigner.get_player_teams_across_frames(
             video_frames,
             player_tracks,
@@ -681,7 +912,7 @@ def run_pipeline(
             if pose_sequence is None:
                 try:
                     from pose_estimator import PoseEstimator
-                    _pe = PoseEstimator()
+                    _pe = PoseEstimator(model_path=pose_model_path)
                     logger.info("Running pose estimation (backend=%s)…", _pe._backend)
                     pose_sequence = _pe.estimate_sequence(video_frames, player_tracks)
                     save_stub(_pose_stub, pose_sequence)
@@ -715,6 +946,11 @@ def run_pipeline(
         "Hoop detection done (%d frames, %d with hoop)",
         len(hoop_tracks), sum(1 for h in hoop_tracks if h is not None),
     )
+    # Snapshot the AUTOMATIC detector coverage BEFORE any manual override replaces
+    # hoop_tracks (manual boxes are propagated to ~all frames). This is the honest
+    # "aros detectados" signal; manual coverage is conveyed separately by the
+    # configured-hoops count.
+    _hoop_auto_present: list[bool] = [h is not None for h in hoop_tracks]
 
     # ── Manual hoop override (boxes are trusted over the YOLO hoop detector) ─────
     # Each rim box carries the frame it was annotated on (frame_t × fps) and a
@@ -807,7 +1043,7 @@ def run_pipeline(
                 pose_sequence, ball_tracks, player_tracks, rim_sequence=hoop_tracks
             )
             steal_events = StealTurnoverDetector().process_sequence(
-                pose_sequence, ball_tracks, player_assignment
+                pose_sequence, ball_tracks, player_assignment, rim_sequence=hoop_tracks
             )
             save_stub(_event_stub, {
                 "shot_events": shot_events,
@@ -845,16 +1081,18 @@ def run_pipeline(
     _progress("ball_acquisition", 65)
     ball_aquisition_detector = BallAquisitionDetector(frame_width=frame_width)
     ball_aquisition = ball_aquisition_detector.detect_ball_possession(
-        player_tracks, ball_tracks
+        player_tracks, ball_tracks, pose_sequence=pose_sequence
     )
 
     _progress("pass_detection", 68)
     pass_and_interception_detector = PassAndInterceptionDetector()
     passes = pass_and_interception_detector.detect_passes(
-        ball_aquisition, player_assignment
+        ball_aquisition, player_assignment,
+        ball_tracks=ball_tracks, rim_sequence=hoop_tracks, fps=actual_fps,
     )
     interceptions = pass_and_interception_detector.detect_interceptions(
-        ball_aquisition, player_assignment
+        ball_aquisition, player_assignment,
+        ball_tracks=ball_tracks, rim_sequence=hoop_tracks, fps=actual_fps,
     )
     logger.info("Passes/interceptions done")
 
@@ -912,6 +1150,37 @@ def run_pipeline(
         )
     logger.info("Speed/distance done")
 
+    # ── Game window: exclude warm-up / pre-game so metrics count only live play ──
+    # Mask per-frame possession/pass/interception and zero distance/speed outside
+    # [analysis_start_s, analysis_end_s]; filter CV events to the window. The video
+    # still shows everything; only the stats/overlay reflect the window.
+    _start_f = max(0, int(round(float(analysis_start_s or 0.0) * actual_fps)))
+    _end_f = (int(round(float(analysis_end_s) * actual_fps))
+              if analysis_end_s else total_frames - 1)
+    _end_f = min(total_frames - 1, _end_f)
+    if _start_f > 0 or _end_f < total_frames - 1:
+        def _in_win(i: int) -> bool:
+            return _start_f <= i <= _end_f
+        for i in range(total_frames):
+            if not _in_win(i):
+                if i < len(ball_aquisition):
+                    ball_aquisition[i] = -1
+                if i < len(passes):
+                    passes[i] = -1
+                if i < len(interceptions):
+                    interceptions[i] = -1
+                if i < len(player_distances_per_frame):
+                    player_distances_per_frame[i] = {}
+                if i < len(player_speed_per_frame):
+                    player_speed_per_frame[i] = {}
+        shot_events = [e for e in shot_events if _in_win(int(e.get("frame", -1)))]
+        rebound_events = [e for e in rebound_events if _in_win(int(e.get("frame", -1)))]
+        steal_events = [e for e in steal_events if _in_win(int(e.get("frame", -1)))]
+        logger.info(
+            "Game window: metrics restricted to frames %d–%d (%.0fs–%.0fs)",
+            _start_f, _end_f, _start_f / actual_fps, _end_f / actual_fps,
+        )
+
     _progress("drawing", 78)
     player_tracks_drawer      = PlayerTracksDrawer()
     pose_drawer               = PoseDrawer(player_filter=pose_player_filter)
@@ -920,9 +1189,9 @@ def run_pipeline(
         manual_src=tactical_view_converter._manual_src,
         manual_src_seq=tactical_view_converter._manual_src_seq,
     )
-    team_ball_control_drawer  = TeamBallControlDrawer()
+    team_ball_control_drawer  = TeamBallControlDrawer(team1_name, team2_name)
     frame_number_drawer       = FrameNumberDrawer()
-    pass_and_interceptions_drawer = PassInterceptionDrawer()
+    pass_and_interceptions_drawer = PassInterceptionDrawer(team1_name, team2_name)
     tactical_view_drawer      = TacticalViewDrawer()
     speed_and_distance_drawer = SpeedAndDistanceDrawer()
 
@@ -990,7 +1259,10 @@ def run_pipeline(
         )
         if show_poses:
             _frame = pose_drawer.draw_frame(_frame, _frame_idx, pose_sequence)
-        _frame = ball_tracks_drawer.draw_frame(_frame, _frame_idx, ball_tracks)
+        _frame = ball_tracks_drawer.draw_frame(
+            _frame, _frame_idx, ball_tracks, ball_source,
+            draw_predicted=bool(getattr(_settings, "ball_draw_predicted", False)),
+        )
         _frame = court_keypoint_drawer.draw_frame(_frame, _frame_idx, court_keypoints_per_frame)
         _frame = frame_number_drawer.draw_frame(_frame, _frame_idx)
         _frame = team_ball_control_drawer.draw_frame(_frame, _frame_idx, team_ball_control)
@@ -1016,24 +1288,62 @@ def run_pipeline(
     _writer.release()
     logger.info("Streaming draw complete: %d frames written", _frame_idx + 1)
 
-    # Re-encode to H.264 for browser compatibility
+    # Re-encode to H.264 for browser compatibility. Prefer GPU NVENC (the encode
+    # stage showed the GPU ~idle at ~8% / 16W) and fall back to CPU libx264 if NVENC
+    # is unavailable (no NVENC on the GPU/driver, or ffmpeg built without it). Both
+    # produce browser-friendly yuv420p H.264 + faststart → visually equivalent output.
     if _use_ffmpeg and _tmp_video and os.path.exists(_tmp_video):
-        _cmd = [
+        _nvenc = [
             "ffmpeg", "-y", "-i", _tmp_video,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-movflags", "+faststart",
+            "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             output_video,
         ]
-        _result = _subprocess.run(_cmd, capture_output=True)
+        _x264 = [
+            "ffmpeg", "-y", "-i", _tmp_video,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            output_video,
+        ]
+        _pref = str(getattr(_settings, "video_encoder", "nvenc")).lower()
+        _candidates = [_nvenc, _x264] if _pref != "libx264" else [_x264]
+        _ok = False
+        for _cmd in _candidates:
+            _result = _subprocess.run(_cmd, capture_output=True)
+            if _result.returncode == 0:
+                logger.info("Annotated video encoded with %s", _cmd[_cmd.index("-c:v") + 1])
+                _ok = True
+                break
+            logger.warning(
+                "ffmpeg encode with %s failed: %s",
+                _cmd[_cmd.index("-c:v") + 1], _result.stderr.decode()[-500:],
+            )
         try:
-            os.remove(_tmp_video)
+            if _ok and os.path.exists(_tmp_video):
+                os.remove(_tmp_video)
         except OSError:
             pass
-        if _result.returncode != 0:
-            logger.warning("ffmpeg re-encode failed: %s", _result.stderr.decode())
-            if os.path.exists(_tmp_video):
-                os.rename(_tmp_video, output_video)
+        if not _ok and os.path.exists(_tmp_video):
+            os.rename(_tmp_video, output_video)
     logger.info("Saved annotated video to %s", output_video)
+
+    # Optional ball-source debug dump (frame, bbox, source) next to the output video, for
+    # the TP/FP-by-source audit tool (tools/ball_source_audit.py). Enable with BA_BALL_DEBUG.
+    if os.environ.get("BA_BALL_DEBUG", "").lower() in ("1", "true", "yes"):
+        try:
+            import json as _json
+            _dbg = [
+                {"frame": _i, "bbox": ball_tracks[_i].get(1, {}).get("bbox"),
+                 "source": ball_source[_i] if _i < len(ball_source) else ""}
+                for _i in range(len(ball_tracks))
+                if 1 in ball_tracks[_i]
+            ]
+            _dbg_path = output_video + ".ball_debug.json"
+            with open(_dbg_path, "w") as _f:
+                _json.dump(_dbg, _f)
+            logger.info("Ball debug dump: %d detections → %s", len(_dbg), _dbg_path)
+        except Exception as _exc:
+            logger.warning("Ball debug dump failed: %s", _exc)
 
     # Build summary metrics
     team1_pos = 0
@@ -1104,6 +1414,10 @@ def run_pipeline(
         "steal_events": steal_events,
         # Per-frame hoop bbox (or None when not detected)
         "hoop_tracks": hoop_tracks,
+        "hoop_auto_present": _hoop_auto_present,   # YOLO auto-detection coverage (pre manual override)
+        "ball_source_counts": dict(_Counter(s for s in ball_source if s)),  # yolo/sam2/sahi/kalman/interp
+        "ball_total_frames": len(ball_source),
+        "ball_flagged_segments": ball_flagged_segments,   # SAM2 drift candidates for review
         # Per-frame referee bboxes (negative track IDs to avoid collision)
         "referee_tracks": referee_tracks,
         # High-action frame windows from ball movement analysis [(start, end), ...]

@@ -112,6 +112,70 @@ def iter_video_frames_selective(
         cap.release()
 
 
+def iter_video_frames_prefetch(
+    video_path: str,
+    max_height: int = 0,
+    queue_size: int = 8,
+) -> Generator[np.ndarray, None, None]:
+    """Like ``iter_video_frames`` but decodes on a background thread.
+
+    A single reader thread decodes (and optionally downscales) frames into a bounded
+    queue while the consumer runs GPU inference, so decode and compute overlap instead
+    of serializing. One reader → frame order is preserved exactly, and the output is
+    byte-for-byte identical to ``iter_video_frames`` (same frames, same ``max_height``
+    resize) → **quality unchanged**, only faster on decode-bound stages.
+
+    ``queue_size`` bounds memory: at most that many frames are buffered ahead.
+    """
+    import queue
+    import threading
+
+    q: "queue.Queue" = queue.Queue(maxsize=max(1, queue_size))
+    _SENTINEL = object()
+    _err: list[BaseException] = []
+
+    def _reader() -> None:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            _err.append(IOError(f"Cannot open video: {video_path}"))
+            q.put(_SENTINEL)
+            return
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if max_height > 0 and frame.shape[0] > max_height:
+                    scale = max_height / frame.shape[0]
+                    new_w = int(frame.shape[1] * scale)
+                    frame = cv2.resize(frame, (new_w, max_height), interpolation=cv2.INTER_AREA)
+                q.put(frame)
+        except BaseException as exc:  # propagate to consumer thread
+            _err.append(exc)
+        finally:
+            cap.release()
+            q.put(_SENTINEL)
+
+    t = threading.Thread(target=_reader, name="video-prefetch", daemon=True)
+    t.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _SENTINEL:
+                break
+            yield item
+    finally:
+        # Drain so the reader thread isn't blocked on a full queue if we stop early.
+        if t.is_alive():
+            try:
+                while q.get_nowait() is not _SENTINEL:
+                    pass
+            except Exception:
+                pass
+    if _err:
+        raise _err[0]
+
+
 def iter_video_chunks(
     video_path: str,
     chunk_size: int = 64,
