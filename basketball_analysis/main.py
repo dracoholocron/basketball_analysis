@@ -435,6 +435,8 @@ def _remove_static_detections(ball_tracks: list[dict], fps: float) -> tuple[list
     centers = [_ball_center(bt) for bt in ball_tracks]
     n = len(ball_tracks)
     removed = 0
+
+    # Pass 1 — consecutive run: a box pinned within `radius` for >= min_run frames in a row.
     i = 0
     while i < n:
         if centers[i] is None:
@@ -448,8 +450,29 @@ def _remove_static_detections(ball_tracks: list[dict], fps: float) -> tuple[list
         if j - i >= min_run:
             for k in range(i, j):
                 ball_tracks[k].pop(1, None)
+                centers[k] = None
             removed += j - i
         i = j
+
+    # Pass 2 — global hot-spot: a single tiny location holding an implausible share of the
+    # whole video is a structural FP even when its hits are intermittent (the consecutive
+    # pass misses those). A real ball never lands on the same cell that often.
+    frac = float(getattr(_settings, "ball_static_hot_frac", 0.01))
+    if frac > 0 and n > 0:
+        from collections import Counter
+        grid = max(1.0, radius)
+        counts: Counter = Counter()
+        for c in centers:
+            if c is not None:
+                counts[(int(c[0] // grid), int(c[1] // grid))] += 1
+        hot_thr = max(min_run * 2, int(n * frac))
+        hot_cells = {cell for cell, cnt in counts.items() if cnt >= hot_thr}
+        if hot_cells:
+            for k, c in enumerate(centers):
+                if c is not None and (int(c[0] // grid), int(c[1] // grid)) in hot_cells:
+                    ball_tracks[k].pop(1, None)
+                    centers[k] = None
+                    removed += 1
     return ball_tracks, removed
 
 

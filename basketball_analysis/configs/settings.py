@@ -230,6 +230,17 @@ class EngineSettings(BaseSettings):
         default=14.0,
         description="Radius (px @720p) within which consecutive ball boxes count as 'not moving' for the static-FP filter.",
     )
+    ball_static_hot_frac: float = Field(
+        default=0.01,
+        description=(
+            "Global hot-spot guard: drop ALL detector ball boxes in any grid cell "
+            "(side=ball_static_max_radius_px) that accumulates more than this fraction of "
+            "video frames — even when not consecutive. Catches an intermittent structural "
+            "false positive (e.g. TrackNet locking a fixed heatmap cell on a beam) that the "
+            "consecutive-run filter misses. Floor of ~2x the consecutive threshold protects "
+            "short clips. Set 0 to disable the global pass."
+        ),
+    )
     ball_visual_track: bool = Field(
         default=False,
         description=(
