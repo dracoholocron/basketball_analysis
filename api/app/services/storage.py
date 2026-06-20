@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 # Path-style addressing (bucket in the path, not the host) — required for MinIO and for
 # a public S3 domain (virtual-host style would become bucket.s3.domain, which breaks).
-_S3_CONFIG = Config(s3={"addressing_style": "path"})
+# signature_version=s3v4 is REQUIRED: without it botocore presigns S3 with SigV2, whose
+# PUT string-to-sign (Content-Type/MD5) MinIO validates differently → presigned multipart
+# part uploads fail with 403 SignatureDoesNotMatch (GET presigned happens to still work).
+_S3_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 
 
 class StorageService:
