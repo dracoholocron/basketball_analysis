@@ -217,6 +217,19 @@ class EngineSettings(BaseSettings):
             "ball and discarded true detections (then reconstructed by Kalman)."
         ),
     )
+    ball_static_min_seconds: float = Field(
+        default=2.5,
+        description=(
+            "Drop detector ball boxes pinned within ball_static_max_radius_px for longer "
+            "than this many seconds — a real ball is never motionless this long, but "
+            "structural false positives (a beam/logo the detector keeps firing on) are. "
+            "Set 0 to disable. Source-agnostic (catches TrackNet and YOLO FPs)."
+        ),
+    )
+    ball_static_max_radius_px: float = Field(
+        default=14.0,
+        description="Radius (px @720p) within which consecutive ball boxes count as 'not moving' for the static-FP filter.",
+    )
     ball_visual_track: bool = Field(
         default=False,
         description=(

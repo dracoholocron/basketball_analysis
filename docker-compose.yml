@@ -152,7 +152,9 @@ services:
       BA_POSE_TOPDOWN: "true"         # per-player crop pose → distant players keep skeletons
       BA_BALL_EXPORT_DATASET: "true"  # export SAM2 boxes as YOLO auto-labels (fine-tune corpus)
       BA_BALL_TRACKNET_PATH: "/app/engine/models/tracknet_ball__20260619-0555.pt"  # trained 2026-06-19 (val_loss 0.0029); TrackNet primary, YOLO fallback
-      BA_BALL_TRACKNET_CONF: "0.5"    # heatmap confidence threshold for TrackNet detector
+      BA_BALL_TRACKNET_CONF: "0.6"    # heatmap confidence threshold for TrackNet detector (raised 0.5→0.6 to cut structural false positives; static-FP filter is the main guard)
+      BA_BALL_STATIC_MIN_SECONDS: "2.5"   # drop ball boxes pinned in place > this (structural FP like a roof beam); 0 disables
+      BA_BALL_STATIC_MAX_RADIUS_PX: "14"  # px @720p within which consecutive boxes count as "not moving" for the static-FP filter
       BA_PLAYER_MAX_H: "1080"         # player detection at native res → recover distant players
       BA_PLAYER_IMGSZ: "1280"         # YOLO imgsz for players (with MAX_H) to keep distant detail
       BA_BALL_IMGSZ: "960"            # YOLO imgsz for the small/distant ball (more GPU, better recall)

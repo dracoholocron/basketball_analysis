@@ -346,33 +346,38 @@ def _rim_shot_events(ball_tracks: list[dict], rim_seqs: list[list],
     return events
 
 
-def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[dict]:
+def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict],
+                      det_src: str = "yolo") -> list[dict]:
     """
-    Fuse YOLO and SAM2 per-frame ball tracks.
+    Fuse detector (YOLO or TrackNet) and SAM2 per-frame ball tracks.
 
-    - both present & agree (centers within 50px) → keep YOLO (precise).
+    - both present & agree (centers within 50px) → keep detector (precise).
     - only one present → use it.
     - both present & disagree → use SAM2 (anchored to user clicks, trustworthy
       for off-domain balls).
+
+    *det_src* ("yolo" | "tracknet") is the label applied to detector-sourced frames so
+    audits distinguish which primary produced them (TrackNet output was previously
+    mislabeled "yolo").
     """
     from configs.settings import settings as _settings
     n = len(yolo_tracks)
     sam2_primary = bool(getattr(_settings, "ball_sam2_primary", True))
     out: list[dict] = []
-    src: list[str] = []   # per-frame ball source: yolo | sam2 | "" (none)
+    src: list[str] = []   # per-frame ball source: <det_src> | sam2 | "" (none)
     for i in range(n):
         y = yolo_tracks[i] if i < len(yolo_tracks) else {}
         s = sam2_tracks[i] if i < len(sam2_tracks) else {}
         yc, sc = _ball_center(y), _ball_center(s)
         if sam2_primary:
             # SAM2 is the trusted (temporal, prompt-anchored) signal: wherever it has the
-            # ball, use it. YOLO only FILLS gaps SAM2 didn't reach (and only if its box is
-            # plausible — already gated upstream). Kills YOLO false positives near/over the
-            # real ball that the old "agree→YOLO / disagree→SAM2" let through.
+            # ball, use it. The detector only FILLS gaps SAM2 didn't reach (and only if its
+            # box is plausible — already gated upstream). Kills detector false positives
+            # near/over the real ball that the old "agree→det / disagree→SAM2" let through.
             if sc:
                 out.append(s); src.append("sam2")
             elif yc:
-                out.append(y); src.append("yolo")
+                out.append(y); src.append(det_src)
             else:
                 out.append({}); src.append("")
         else:
@@ -380,11 +385,11 @@ def _fuse_ball_tracks(yolo_tracks: list[dict], sam2_tracks: list[dict]) -> list[
             if yc and sc:
                 d = math.hypot(yc[0] - sc[0], yc[1] - sc[1])
                 if d <= 50:
-                    out.append(y); src.append("yolo")
+                    out.append(y); src.append(det_src)
                 else:
                     out.append(s); src.append("sam2")
             elif yc:
-                out.append(y); src.append("yolo")
+                out.append(y); src.append(det_src)
             elif sc:
                 out.append(s); src.append("sam2")
             else:
@@ -413,6 +418,39 @@ def _gate_yolo_ball(ball_tracks: list[dict], skip: bool = False) -> tuple[list[d
             bt.pop(1, None)   # implausible → drop this YOLO detection
             dropped += 1
     return ball_tracks, dropped
+
+
+def _remove_static_detections(ball_tracks: list[dict], fps: float) -> tuple[list[dict], int]:
+    """Drop runs of detector ball boxes that stay pinned within a small radius for an
+    implausibly long time. A real ball is never motionless for seconds, but a structural
+    false positive (e.g. TrackNet/YOLO latching onto a roof beam or logo) sits on the same
+    pixels for minutes. Source-agnostic; runs on raw detector output before fusion so the
+    FP never seeds SAM2/SAHI/Kalman. Tunable via ball_static_* settings (0 disables)."""
+    from configs.settings import settings as _settings
+    min_sec = float(getattr(_settings, "ball_static_min_seconds", 2.5))
+    if min_sec <= 0 or not ball_tracks:
+        return ball_tracks, 0
+    radius = float(getattr(_settings, "ball_static_max_radius_px", 14.0))
+    min_run = max(2, int(round((fps or 30.0) * min_sec)))
+    centers = [_ball_center(bt) for bt in ball_tracks]
+    n = len(ball_tracks)
+    removed = 0
+    i = 0
+    while i < n:
+        if centers[i] is None:
+            i += 1
+            continue
+        ax, ay = centers[i]
+        j = i + 1
+        while j < n and centers[j] is not None and \
+                ((centers[j][0] - ax) ** 2 + (centers[j][1] - ay) ** 2) ** 0.5 <= radius:
+            j += 1
+        if j - i >= min_run:
+            for k in range(i, j):
+                ball_tracks[k].pop(1, None)
+            removed += j - i
+        i = j
+    return ball_tracks, removed
 
 
 def _flag_ball_segments(ball_tracks: list[dict], ball_source: list[str],
@@ -676,6 +714,10 @@ def run_pipeline(
                 ball_tracks, _gated = _gate_yolo_ball(ball_tracks, skip=(_det_src == "tracknet"))
                 if _gated:
                     logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
+                ball_tracks, _static = _remove_static_detections(ball_tracks, actual_fps)
+                if _static:
+                    logger.info("Static-FP filter: dropped %d %s boxes pinned in place (structural false positive)",
+                                _static, _det_src)
                 save_stub(_ball_stub, ball_tracks)
             logger.info("Ball tracks done (%d frames)", len(ball_tracks))
             ball_source = [_det_src if (1 in bt) else "" for bt in ball_tracks]
@@ -735,7 +777,7 @@ def run_pipeline(
                                 logger.info("Ball dataset export: %d labeled frames", _written)
                             except Exception as exc:
                                 logger.warning("Ball dataset export failed: %s", exc)
-                        ball_tracks, ball_source = _fuse_ball_tracks(ball_tracks, sam2_tracks)
+                        ball_tracks, ball_source = _fuse_ball_tracks(ball_tracks, sam2_tracks, det_src=_det_src)
                         _m = sum(1 for bt in ball_tracks if 1 not in bt)
                         logger.info(
                             "Ball after SAM2 fusion: %d/%d frames have ball (%.1f%%)",
@@ -761,8 +803,8 @@ def run_pipeline(
         from collections import Counter as _Counter
         _bsrc = _Counter(s for s in ball_source if s)
         logger.info(
-            "Ball sources: YOLO=%d, SAM2=%d, SAHI=%d, curated=%d, Kalman=%d, interp=%d (none=%d/%d)",
-            _bsrc.get("yolo", 0), _bsrc.get("sam2", 0), _bsrc.get("sahi", 0),
+            "Ball sources: TrackNet=%d, YOLO=%d, SAM2=%d, SAHI=%d, curated=%d, Kalman=%d, interp=%d (none=%d/%d)",
+            _bsrc.get("tracknet", 0), _bsrc.get("yolo", 0), _bsrc.get("sam2", 0), _bsrc.get("sahi", 0),
             _bsrc.get("curated", 0), _bsrc.get("kalman", 0), _bsrc.get("interp", 0),
             sum(1 for s in ball_source if not s), len(ball_source),
         )
