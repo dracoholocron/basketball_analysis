@@ -420,19 +420,23 @@ def _gate_yolo_ball(ball_tracks: list[dict], skip: bool = False) -> tuple[list[d
     return ball_tracks, dropped
 
 
-def _remove_static_detections(ball_tracks: list[dict], fps: float) -> tuple[list[dict], int]:
-    """Drop runs of detector ball boxes that stay pinned within a small radius for an
-    implausibly long time. A real ball is never motionless for seconds, but a structural
-    false positive (e.g. TrackNet/YOLO latching onto a roof beam or logo) sits on the same
-    pixels for minutes. Source-agnostic; runs on raw detector output before fusion so the
-    FP never seeds SAM2/SAHI/Kalman. Tunable via ball_static_* settings (0 disables)."""
+def _remove_static_detections(ball_tracks: list[dict], fps: float,
+                              protected: set | None = None) -> tuple[list[dict], int]:
+    """Drop runs of ball boxes that stay pinned within a small radius for an implausibly
+    long time. A real ball is never motionless for seconds, but a structural false positive
+    (TrackNet/YOLO latching a roof beam, or SAHI latching a bag by the bench) sits on the
+    same pixels for minutes. Source-agnostic. Runs on raw detector output before fusion AND
+    again after SAHI refill. *protected* frame indices (SAM2, user-anchored) are never
+    removed and break static runs. Tunable via ball_static_* settings (0 disables)."""
     from configs.settings import settings as _settings
     min_sec = float(getattr(_settings, "ball_static_min_seconds", 2.5))
     if min_sec <= 0 or not ball_tracks:
         return ball_tracks, 0
     radius = float(getattr(_settings, "ball_static_max_radius_px", 14.0))
     min_run = max(2, int(round((fps or 30.0) * min_sec)))
-    centers = [_ball_center(bt) for bt in ball_tracks]
+    protected = protected or set()
+    # Protected frames are treated as absent (None): they break runs and are never popped.
+    centers = [None if i in protected else _ball_center(bt) for i, bt in enumerate(ball_tracks)]
     n = len(ball_tracks)
     removed = 0
 
@@ -815,6 +819,14 @@ def run_pipeline(
                 ball_tracks = ball_tracker.refill_missing_with_sahi(input_video, ball_tracks)
             _tag_ball_sources(ball_tracks, ball_source, "sahi")
             _protected = {i for i, s in enumerate(ball_source) if s == "sam2"}
+            # Re-run the static-FP filter AFTER SAHI: tiled refill can latch onto a static
+            # background object (a bag/mark by the bench) that the pre-fusion pass never saw.
+            # Protect SAM2-sourced frames (user-anchored, trustworthy) from removal.
+            ball_tracks, _static_post = _remove_static_detections(
+                ball_tracks, actual_fps, protected=_protected)
+            if _static_post:
+                logger.info("Static-FP filter (post-SAHI): dropped %d boxes pinned in place", _static_post)
+                _tag_ball_sources(ball_tracks, ball_source, "")  # clear source of removed frames
 
         ball_tracks = ball_tracker.remove_wrong_detections(ball_tracks, protected=_protected)
         _tag_ball_sources(ball_tracks, ball_source, "")
