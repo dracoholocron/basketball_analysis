@@ -159,6 +159,21 @@ export interface AnalysisOptions {
   pose_player_filter?: number[];
   use_curated_ball?: boolean;
   ball_detector_mode?: "auto" | "tracknet" | "yolo";
+  emit_layers?: boolean;
+}
+
+export interface JobLayers {
+  raw_video_url: string;
+  layers_url: string;
+}
+/** Raw video + overlay-primitives JSON for the canvas layer player. null when unavailable. */
+export async function getJobLayers(jobId: string): Promise<JobLayers | null> {
+  try {
+    const { data } = await api.get(`/jobs/${jobId}/layers`);
+    return data as JobLayers;
+  } catch {
+    return null;
+  }
 }
 
 /** Start analysis of the already-uploaded video for a game. Returns a Job. */

@@ -60,6 +60,7 @@ class Job(Base):
     cv_events_json: Mapped[list | None] = mapped_column(JsonB, nullable=True)
     highlights_s3_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     highlights_manifest_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    layers_key: Mapped[str | None] = mapped_column(String(500), nullable=True)  # post-hoc overlay JSON (poses/ball)
     error_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -432,6 +432,7 @@ async def analyze_game(
             team2_jersey=game.away_team2_jersey,
             pose_player_filter=opts.pose_player_filter,
             use_curated_ball=opts.use_curated_ball,
+            emit_layers=opts.emit_layers,
         )
         job.celery_task_id = task.id
         await db.commit()

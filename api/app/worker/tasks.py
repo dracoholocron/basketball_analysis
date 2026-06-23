@@ -70,6 +70,7 @@ def run_analysis(
     show_poses: bool = True,
     pose_player_filter: list[int] | None = None,
     use_curated_ball: bool = False,
+    emit_layers: bool = False,
 ):
     """Run the full analysis pipeline for one game video."""
     engine = _sync_engine()
@@ -351,6 +352,7 @@ def run_analysis(
                 sam2_checkpoint=sam2_checkpoint,
                 sam2_config=sam2_config,
                 ball_tracknet_path=_ball_tracknet_path,
+                emit_layers=emit_layers,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -375,6 +377,23 @@ def run_analysis(
         # Save source video key so highlights generation can locate the original
         with Session(engine) as db:
             _update_job(db, job_id, source_video_s3_key=video_s3_key)
+
+        # ── 5a. Upload post-hoc layers JSON (poses/ball) for the canvas-overlay player ──
+        _layers = metrics.get("layers")
+        if _layers:
+            try:
+                import json as _json
+                layers_key = f"layers/{game_id}/{job_id}.layers.json"
+                storage.upload_bytes(
+                    _json.dumps(_layers).encode("utf-8"),
+                    api_settings.minio_bucket_outputs, layers_key,
+                    content_type="application/json",
+                )
+                with Session(engine) as db:
+                    _update_job(db, job_id, layers_key=layers_key)
+                logger.info("Uploaded layers JSON: %s", layers_key)
+            except Exception as _exc:
+                logger.warning("Layers upload skipped: %s", _exc)
 
         # ── 5b. Copy to host-mounted output directory (if available) ──────
         host_outputs = Path("/app/host_outputs")

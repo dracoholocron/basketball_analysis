@@ -67,3 +67,7 @@ class AnalysisOptions(BaseModel):
         default=None,
         description="Override the game's ball detector mode for this run: auto|tracknet|yolo.",
     )
+    emit_layers: bool = Field(
+        default=False,
+        description="Also export toggleable pose/ball overlay layers (canvas player). Adds a JSON output.",
+    )

@@ -106,6 +106,28 @@ async def delete_job(
     await db.commit()
 
 
+@router.get("/{job_id}/layers")
+async def get_job_layers(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """URLs for the post-hoc layer player: the raw (clean) video + the overlay-primitives
+    JSON (poses/ball). 404 when the job has no layers (analysis run without emit_layers)."""
+    job = await db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.layers_key or not job.source_video_s3_key:
+        raise HTTPException(status_code=404, detail="No layers for this job")
+    storage = get_storage()
+    return {
+        "raw_video_url": storage.get_presigned_url(
+            api_settings.minio_bucket_videos, job.source_video_s3_key, public=True),
+        "layers_url": storage.get_presigned_url(
+            api_settings.minio_bucket_outputs, job.layers_key, public=True),
+    }
+
+
 @router.get("/{job_id}/annotated-video")
 async def get_annotated_video(
     job_id: uuid.UUID,

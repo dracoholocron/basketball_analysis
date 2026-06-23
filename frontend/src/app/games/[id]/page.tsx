@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import VideoControls from "@/components/video/VideoControls";
+import LayeredPlayer from "@/components/video/LayeredPlayer";
 import {
   getGame,
   uploadVideo,
@@ -135,6 +136,8 @@ export default function GameDetailPage() {
   const [gameEndS, setGameEndS] = useState("");
   const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large" | "efficienttam">("base_plus");
   const [ballMode, setBallMode] = useState<"auto" | "tracknet" | "yolo">("auto");
+  const [emitLayers, setEmitLayers] = useState(false);
+  const [showLayers, setShowLayers] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const annotatedVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -296,7 +299,7 @@ export default function GameDetailPage() {
     setHasActiveJob(true);
     setAnnotatedVideoUrl(null);
     try {
-      const job = await analyzeGame(id, { pose_player_filter: posePlayerFilter, ball_detector_mode: ballMode });
+      const job = await analyzeGame(id, { pose_player_filter: posePlayerFilter, ball_detector_mode: ballMode, emit_layers: emitLayers });
       setJobStatus({ status: job.status, progress_pct: 0, current_stage: job.current_stage, id: job.id });
       await pollJobUntilDone(job.id, (j) => {
         setJobStatus({ ...j, id: job.id });
@@ -571,13 +574,21 @@ export default function GameDetailPage() {
                     <div className="mt-2">
                       <VideoControls videoRef={annotatedVideoRef} />
                     </div>
-                    <a
-                      href={annotatedVideoUrl}
-                      download
-                      className="mt-2 inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
-                    >
-                      <Film size={12} /> Descargar video anotado
-                    </a>
+                    <div className="mt-2 flex items-center gap-3">
+                      <a href={annotatedVideoUrl} download
+                        className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300">
+                        <Film size={12} /> Descargar video anotado
+                      </a>
+                      <button onClick={() => setShowLayers(v => !v)}
+                        className="inline-flex items-center gap-1 text-xs text-slate-300 hover:text-white">
+                        {showLayers ? "Ocultar capas" : "Ver capas (poses/balón)"}
+                      </button>
+                    </div>
+                    {showLayers && jobStatus?.id && (
+                      <div className="mt-3">
+                        <LayeredPlayer jobId={jobStatus.id} />
+                      </div>
+                    )}
                   </>
                 ) : (
                   <div className="flex items-center gap-2 text-sm text-slate-400 py-2">
@@ -830,6 +841,22 @@ export default function GameDetailPage() {
                   ))}
                 </div>
               </div>
+
+              {/* Post-hoc layers (canvas overlays toggleable in the player) */}
+              <label className="flex items-center justify-between gap-3 cursor-pointer">
+                <span>
+                  <span className="text-sm font-medium text-white">Capas de video (poses/balón)</span>
+                  <span className="block text-xs text-slate-400 mt-0.5">
+                    Exporta capas para activar/desactivar poses y balón en el reproductor (no altera el video anotado).
+                  </span>
+                </span>
+                <button type="button" onClick={() => setEmitLayers(v => !v)}
+                  className={clsx("shrink-0 w-11 h-6 rounded-full transition-colors relative",
+                    emitLayers ? "bg-blue-600" : "bg-slate-600")}>
+                  <span className={clsx("absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all",
+                    emitLayers ? "left-[22px]" : "left-0.5")} />
+                </button>
+              </label>
 
               {/* Pose skeleton toggle */}
               <div className="space-y-1.5">

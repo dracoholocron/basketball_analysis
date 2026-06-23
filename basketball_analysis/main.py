@@ -584,6 +584,7 @@ def run_pipeline(
     pose_model_path: str | None = None,
     precomputed_ball_track: dict | None = None,
     ball_tracknet_path: str | None = None,
+    emit_layers: bool = False,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -1517,6 +1518,39 @@ def run_pipeline(
         if samples
     }
 
+    # ── Post-hoc video layers (C1): export overlay primitives so the player can draw
+    # toggleable pose/ball layers on the RAW video in a canvas (no baked overlays needed). ──
+    layers_data = None
+    if emit_layers:
+        try:
+            _lh = min(720, int(_intrinsic_height or 720))
+            _lw = int(round(frame_width * _lh / float(_intrinsic_height or 720)))
+            _poses_l: dict[int, list] = {}
+            for fi, fr in enumerate(pose_sequence or []):
+                if not fr:
+                    continue
+                arr = []
+                for _tid, kp in fr.items():
+                    if kp is None:
+                        continue
+                    arr.append([[round(float(p[0]), 1), round(float(p[1]), 1), round(float(p[2]), 2)]
+                                for p in kp])
+                if arr:
+                    _poses_l[fi] = arr
+            _ball_l: dict[int, list] = {}
+            for fi, bt in enumerate(ball_tracks or []):
+                b = bt.get(1, {}).get("bbox") if isinstance(bt, dict) else None
+                if b and len(b) >= 4:
+                    _ball_l[fi] = [round(float(x), 1) for x in b[:4]]
+            layers_data = {
+                "fps": actual_fps, "width": _lw, "height": _lh,
+                "poses": _poses_l, "ball": _ball_l,
+            }
+            logger.info("Layers exported: %d pose frames, %d ball frames (%dx%d)",
+                        len(_poses_l), len(_ball_l), _lw, _lh)
+        except Exception as _exc:
+            logger.warning("Layer export skipped: %s", _exc)
+
     metrics = {
         # Summary scalars
         "total_frames": total_frames,
@@ -1553,6 +1587,8 @@ def run_pipeline(
         "ball_raw_detected": _raw_detected_count,         # frames with a direct detector hit
         "ball_static_fp_dropped": _ball_static_dropped,           # pre-fusion static-FP boxes removed
         "ball_static_fp_dropped_post_sahi": _ball_static_dropped_post,  # post-SAHI static-FP removed
+        # Post-hoc video layers (poses/ball primitives) when emit_layers is on
+        "layers": layers_data,
         # Per-frame referee bboxes (negative track IDs to avoid collision)
         "referee_tracks": referee_tracks,
         # High-action frame windows from ball movement analysis [(start, end), ...]
