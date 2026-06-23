@@ -62,6 +62,7 @@ class SimulationRead(BaseModel):
     score_range_opp_low: float | None
     score_range_opp_high: float | None
     base_log_odds: float | None = None
+    key_drivers: dict | None = None   # {drivers, data_sources, comparison}
     created_at: datetime
     keys: list[KeyToVictoryRead] = []
 

@@ -33,12 +33,20 @@ interface Key {
   priority_rank?: number; coefficient?: number; live_status?: string;
 }
 
+interface CompareMetric { box?: number | null; cv?: number | null; delta?: number | null }
 interface SimulationData {
   id: string;
   win_pct_own: number;
   avg_score_own: number | null;
   avg_score_opp: number | null;
   keys?: Key[];
+  key_drivers?: {
+    data_sources?: { own?: string; opp?: string };
+    comparison?: {
+      own?: { fg_pct?: CompareMetric; shots_pg?: CompareMetric; steals_pg?: CompareMetric } | null;
+      opp?: { fg_pct?: CompareMetric; shots_pg?: CompareMetric; steals_pg?: CompareMetric } | null;
+    };
+  };
 }
 
 type TabId = "overview" | "scouting" | "simulation" | "plays" | "tracker" | "notes";
@@ -404,6 +412,44 @@ function MatchupWorkspaceContent() {
                         </p>
                       </div>
                     </div>
+
+                    {simulation.key_drivers?.data_sources && (() => {
+                      const ds = simulation.key_drivers!.data_sources!;
+                      const cmp = simulation.key_drivers!.comparison ?? {};
+                      const label = (s?: string) => s === "both" ? "Box + Video (CV)" : s === "cv" ? "Video (CV)" : s === "box_score" ? "Box score" : "Sin datos";
+                      const sides: { role: string; ds?: string; c?: CompareMetric | undefined; cobj?: { fg_pct?: CompareMetric; shots_pg?: CompareMetric; steals_pg?: CompareMetric } | null }[] = [
+                        { role: "Nuestro equipo", ds: ds.own, cobj: cmp.own },
+                        { role: "Rival", ds: ds.opp, cobj: cmp.opp },
+                      ];
+                      return (
+                        <div className="card">
+                          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">
+                            Fuente de datos {/* transparency: box vs CV */}
+                          </p>
+                          <div className="space-y-3">
+                            {sides.map((s) => (
+                              <div key={s.role}>
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-sm font-medium text-slate-700">{s.role}</span>
+                                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">{label(s.ds)}</span>
+                                </div>
+                                {s.cobj?.fg_pct && (s.cobj.fg_pct.box != null || s.cobj.fg_pct.cv != null) && (
+                                  <table className="w-full text-xs text-slate-600">
+                                    <thead><tr className="text-slate-400"><th className="text-left font-normal">Métrica</th><th className="text-right font-normal">Box</th><th className="text-right font-normal">Video (CV)</th><th className="text-right font-normal">Δ</th></tr></thead>
+                                    <tbody>
+                                      <tr><td>FG%</td><td className="text-right">{s.cobj.fg_pct.box != null ? `${Math.round((s.cobj.fg_pct.box) * 100)}%` : "—"}</td><td className="text-right">{s.cobj.fg_pct.cv != null ? `${Math.round((s.cobj.fg_pct.cv) * 100)}%` : "—"}</td><td className="text-right">{s.cobj.fg_pct.delta != null ? `${s.cobj.fg_pct.delta > 0 ? "+" : ""}${Math.round(s.cobj.fg_pct.delta * 100)}%` : "—"}</td></tr>
+                                      {s.cobj.shots_pg && <tr><td>Tiros/juego</td><td className="text-right">{s.cobj.shots_pg.box ?? "—"}</td><td className="text-right">{s.cobj.shots_pg.cv ?? "—"}</td><td className="text-right">—</td></tr>}
+                                      {s.cobj.steals_pg && <tr><td>Robos/juego</td><td className="text-right">{s.cobj.steals_pg.box ?? "—"}</td><td className="text-right">{s.cobj.steals_pg.cv ?? "—"}</td><td className="text-right">—</td></tr>}
+                                    </tbody>
+                                  </table>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-2">Cuando hay ambas fuentes, el box score ancla el tiro y el video (CV) aporta ritmo/defensa y validación de precisión.</p>
+                        </div>
+                      );
+                    })()}
 
                     <div className="card">
                       <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Keys to Victory</p>
