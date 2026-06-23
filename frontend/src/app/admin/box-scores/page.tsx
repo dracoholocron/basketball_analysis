@@ -10,7 +10,7 @@ import { clsx } from "clsx";
 
 interface Season { id: string; name: string; year?: string; }
 interface Team { id: string; name: string; }
-interface Game { id: string; home_team_id?: string; away_team_id?: string; season_id?: string; court_level?: string; }
+interface Game { id: string; home_team_id?: string; away_team_id?: string; season_id?: string; court_level?: string; home_team_name?: string | null; away_team_name?: string | null; game_date?: string | null; }
 interface BoxScore { id: string; game_id: string; team_id: string; pts: number; fgm: number; fga: number; fg3m: number; fg3a: number; ftm: number; fta: number; oreb: number; dreb: number; ast: number; stl: number; blk: number; tov: number; pf: number; }
 interface TeamAverages { games_played: number; avg_pts: number; fg_pct: number; fg3_pct: number; ft_pct: number; avg_reb: number; avg_ast: number; avg_stl: number; avg_blk: number; avg_tov: number; }
 
@@ -53,9 +53,12 @@ export default function BoxScoresAdminPage() {
   }, []);
 
   useEffect(() => {
-    if (!selectedSeason) return;
-    listGames().then(gs => setGames(gs.filter((g: Game) => g.season_id === selectedSeason)));
-  }, [selectedSeason]);
+    if (!selectedSeason) { setGames([]); return; }
+    // Server-side filter by season (+team when chosen); listGames returns {items,total}.
+    listGames(0, 100, { season_id: selectedSeason, team_id: selectedTeam || undefined })
+      .then(d => setGames(d.items ?? d ?? []))
+      .catch(() => setGames([]));
+  }, [selectedSeason, selectedTeam]);
 
   useEffect(() => {
     if (!selectedGame || !selectedTeam) return;
@@ -134,9 +137,14 @@ export default function BoxScoresAdminPage() {
     }
   }
 
-  const filteredGames = selectedSeason
-    ? games.filter(g => g.season_id === selectedSeason || !g.season_id)
-    : games;
+  // Games are already season/team filtered server-side.
+  const filteredGames = games;
+  const gameLabel = (g: Game) => {
+    const teams = g.home_team_name && g.away_team_name
+      ? `${g.home_team_name} vs ${g.away_team_name}`
+      : (g.home_team_name || g.away_team_name || `Juego ${g.id.slice(0, 8)}`);
+    return g.game_date ? `${teams} — ${g.game_date}` : teams;
+  };
 
   return (
     <AppShell title="Box Score Management" subtitle="Manual entry & CSV import">
@@ -164,7 +172,10 @@ export default function BoxScoresAdminPage() {
               <label className="label">Game</label>
               <select className="select" value={selectedGame} onChange={e => setSelectedGame(e.target.value)}>
                 <option value="">— choose —</option>
-                {filteredGames.map(g => <option key={g.id} value={g.id}>Game {g.id.slice(0, 8)}… {g.court_level ? `(${g.court_level})` : ""}</option>)}
+                {filteredGames.length === 0 && selectedSeason && (
+                  <option value="" disabled>No hay juegos para esta temporada/equipo</option>
+                )}
+                {filteredGames.map(g => <option key={g.id} value={g.id}>{gameLabel(g)}</option>)}
               </select>
             </div>
           </div>

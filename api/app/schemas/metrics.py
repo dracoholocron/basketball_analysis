@@ -51,4 +51,5 @@ class GameMetrics(BaseModel):
     hoop_detected_frames: int = 0      # frames where the detector located a hoop/rim
     hoops_configured: int = 0          # distinct manually-annotated hoops (rim boxes)
     hoops_with_backboard: int = 0      # of those, how many also have a backboard box
+    hoops: list[dict] = []             # per-team configured hoops: {hoop_id, team_id, team_name, has_backboard}
     players: list[PlayerMetricRead]

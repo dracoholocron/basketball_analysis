@@ -49,14 +49,39 @@ router = APIRouter(prefix="/games", tags=["games"])
 async def list_games(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    season_id: Optional[uuid.UUID] = Query(None, description="Filter games by season"),
+    team_id: Optional[uuid.UUID] = Query(None, description="Filter games where team is home or away"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    total_result = await db.execute(select(func.count()).select_from(Game))
-    total = total_result.scalar_one()
-    result = await db.execute(select(Game).offset(skip).limit(limit).order_by(Game.created_at.desc()))
-    games = result.scalars().all()
-    return GameList(items=list(games), total=total)
+    base = select(Game)
+    if season_id is not None:
+        base = base.where(Game.season_id == season_id)
+    if team_id is not None:
+        base = base.where((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+
+    total = (await db.execute(
+        select(func.count()).select_from(base.subquery())
+    )).scalar_one()
+    result = await db.execute(
+        base.order_by(Game.created_at.desc()).offset(skip).limit(limit)
+    )
+    games = list(result.scalars().all())
+
+    # Enrich with team names so listings can show readable labels (e.g. box-score filter).
+    team_ids = {g.home_team_id for g in games if g.home_team_id} | \
+               {g.away_team_id for g in games if g.away_team_id}
+    names: dict = {}
+    if team_ids:
+        rows = (await db.execute(select(Team).where(Team.id.in_(team_ids)))).scalars().all()
+        names = {t.id: t.name for t in rows}
+    items = []
+    for g in games:
+        out = GameRead.model_validate(g)
+        out.home_team_name = names.get(g.home_team_id)
+        out.away_team_name = names.get(g.away_team_id)
+        items.append(out)
+    return GameList(items=items, total=total)
 
 
 @router.post("", response_model=GameRead, status_code=status.HTTP_201_CREATED)

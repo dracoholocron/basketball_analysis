@@ -58,6 +58,7 @@ function ScoutingPageContent() {
   const [report, setReport] = useState<ScoutingReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [videoInsights, setVideoInsights] = useState<VideoInsights | null>(null);
   const [coachNotes, setCoachNotes] = useState("");
@@ -103,11 +104,14 @@ function ScoutingPageContent() {
   async function handleGenerate() {
     if (!selectedMatchup) return;
     setGenerating(true);
+    setGenError(null);
     try {
       const r = await generateScoutingReport(selectedMatchup);
       setReport(r);
       setCoachNotes(r.coach_notes ?? "");
     } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setGenError(detail || "No se pudo generar el reporte. Intenta de nuevo más tarde.");
       console.error(err);
     } finally {
       setGenerating(false);
@@ -469,6 +473,11 @@ function ScoutingPageContent() {
                   <div>
                     <p className="font-display font-bold text-slate-900 mb-1">No Report Yet</p>
                     <p className="text-sm text-slate-500 mb-5">Generate an AI scouting report for {selectedMatchupData?.name}</p>
+                    {genError && (
+                      <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-4 max-w-md mx-auto">
+                        {genError}
+                      </p>
+                    )}
                     <button onClick={handleGenerate} className="btn-violet">
                       <Sparkles size={15} />
                       Generate Scouting Report

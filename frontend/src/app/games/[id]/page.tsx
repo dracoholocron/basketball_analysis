@@ -67,6 +67,7 @@ interface Metrics {
   hoop_detected_frames?: number;
   hoops_configured?: number;
   hoops_with_backboard?: number;
+  hoops?: { hoop_id: number; team_id: number | null; team_name: string | null; has_backboard: boolean }[];
   players: PlayerMetric[];
 }
 
@@ -987,6 +988,16 @@ export default function GameDetailPage() {
                   <p className="text-xs text-slate-400 mt-1">Canastas anotadas{bb > 0 ? ` (${bb} c/ tablero)` : ""}</p>
                 </div>
               </div>
+              {Array.isArray(metrics.hoops) && metrics.hoops.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {metrics.hoops.map((h) => (
+                    <span key={h.hoop_id} className="text-xs px-3 py-1.5 rounded-lg bg-slate-700/60 text-slate-200 border border-slate-600">
+                      Aro #{h.hoop_id} · <span className="text-white font-semibold">{h.team_name || (h.team_id === 1 ? "Local" : "Visitante")}</span>
+                      {h.has_backboard ? " · c/ tablero" : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
               <p className="text-xs text-slate-500 mt-3">
                 El % es la <strong>detección automática</strong> del aro (suele ser baja).{cfg > 0
                   ? " Tienes canastas anotadas a mano: se propagan a todo el video y son las que usan el conteo de tiros (no dependen de este %)."

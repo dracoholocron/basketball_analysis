@@ -219,6 +219,20 @@ function GameDayContent() {
               <div className="bg-slate-800 rounded-2xl p-6 flex items-center justify-between">
                 <div>
                   <h2 className="text-xl font-bold text-white">{prep.matchup_name}</h2>
+                  {(() => {
+                    const mm = matchups.find(x => x.id === selected);
+                    if (!mm) return null;
+                    const tn = (tid?: string | null) => teams.find(t => t.id === tid)?.name;
+                    const own = tn(mm.own_team_id);
+                    const opp = tn(mm.opponent_team_id);
+                    const date = mm.game_date ?? mm.scheduled_at?.slice(0, 10);
+                    return (
+                      <p className="text-sm text-slate-300 mt-1">
+                        {own && opp ? `${own} vs ${opp}` : (own || opp || "Equipos por definir")}
+                        {date ? ` · ${date}` : ""}
+                      </p>
+                    );
+                  })()}
                   <p className="text-sm text-slate-400 mt-1">
                     {completedSteps}/{totalSteps} pasos completados
                   </p>

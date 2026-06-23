@@ -38,16 +38,19 @@ interface HeatmapData {
 }
 
 function HeatCourtSVG({ grid }: { grid: number[][] }) {
-  const maxVal = Math.max(1, ...grid.flat());
-  const ROWS = grid.length;
-  const COLS = grid[0]?.length ?? 6;
+  const safeGrid = Array.isArray(grid) && grid.length && Array.isArray(grid[0])
+    ? grid
+    : Array.from({ length: 10 }, () => Array(6).fill(0));
+  const maxVal = Math.max(1, ...safeGrid.flat());
+  const ROWS = safeGrid.length;
+  const COLS = safeGrid[0]?.length ?? 6;
   const cellW = 500 / COLS;
   const cellH = 280 / ROWS;
 
   return (
     <svg viewBox="0 0 500 280" className="w-full border border-slate-200 rounded-xl">
       <rect width="500" height="280" fill="#c8a96e" rx="8" />
-      {grid.map((row, ri) =>
+      {safeGrid.map((row, ri) =>
         row.map((count, ci) => {
           const opacity = count === 0 ? 0 : 0.15 + (count / maxVal) * 0.75;
           return (
@@ -123,8 +126,11 @@ export default function EventHeatmapPage() {
             <div className="card">
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-3">Shot Heatmap</p>
               <HeatCourtSVG grid={heatmap?.heat_grid ?? emptyGrid} />
-              {!heatmap && (
-                <p className="text-center text-sm text-slate-400 mt-4">No shots logged yet for this matchup.</p>
+              {(!heatmap || (heatmap.event_count ?? 0) === 0) && (
+                <p className="text-center text-sm text-slate-400 mt-4">
+                  Aún no hay eventos de tiro registrados para este partido. Los puntos de calor
+                  aparecen al registrar tiros desde el Game Tracker en vivo.
+                </p>
               )}
             </div>
 

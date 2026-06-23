@@ -11,9 +11,21 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
+
 from app.core.database import Base, get_db
 from app.core.security import create_access_token, hash_password
 from app.main import app
+
+
+# SQLite (used for the in-memory test DB) has no JSONB type. Render JSONB columns as the
+# generic JSON type during create_all so models that use postgresql.JSONB (model_versions,
+# job_run_summary, game_event, plays, …) can be created under SQLite. Production uses
+# PostgreSQL where JSONB renders normally — this shim only affects the SQLite test engine.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_as_json_sqlite(element, compiler, **kw):  # noqa: ANN001
+    return "JSON"
 from app.models.user import User, UserRole
 from app.models.organization import Organization
 from app.models.season import Season

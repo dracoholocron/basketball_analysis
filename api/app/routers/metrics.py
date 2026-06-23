@@ -67,14 +67,19 @@ async def get_game_metrics(
     )).scalar_one()
     hoops_configured = 0
     hoops_with_backboard = 0
+    rim_entries: dict = {}   # hoop_id -> rim annotation entry
+    bb_ids: set = set()
     ha = (await db.execute(
         select(HoopAnnotation).where(HoopAnnotation.game_id == game_id)
     )).scalar_one_or_none()
     if ha is not None and ha.hoops:
-        rim_ids = {b.get("hoop_id", 0) for b in ha.hoops if b.get("kind", "rim") == "rim"}
-        bb_ids = {b.get("hoop_id", 0) for b in ha.hoops if b.get("kind") == "backboard"}
-        hoops_configured = len(rim_ids)
-        hoops_with_backboard = len(rim_ids & bb_ids)
+        for b in ha.hoops:
+            if b.get("kind", "rim") == "rim":
+                rim_entries.setdefault(b.get("hoop_id", 0), b)
+            elif b.get("kind") == "backboard":
+                bb_ids.add(b.get("hoop_id", 0))
+        hoops_configured = len(rim_entries)
+        hoops_with_backboard = len(set(rim_entries) & bb_ids)
 
     t1_poss = sum(p.possession_frames for p in player_metrics if p.team_id == 1)
     t2_poss = sum(p.possession_frames for p in player_metrics if p.team_id == 2)
@@ -93,6 +98,20 @@ async def get_game_metrics(
         if game.away_team_id:
             at = await db.get(Team, game.away_team_id)
             away_name = at.name if at else None
+
+    # Per-team hoop list: each configured rim mapped to a team (explicit team_id on the
+    # annotation entry, else heuristic hoop 0 = home/team1, 1 = away/team2).
+    hoops_list = []
+    for hid, b in sorted(rim_entries.items()):
+        tid = b.get("team_id")
+        if tid not in (1, 2):
+            tid = 1 if hid == 0 else 2
+        hoops_list.append({
+            "hoop_id": hid,
+            "team_id": tid,
+            "team_name": (home_name if tid == 1 else away_name),
+            "has_backboard": hid in bb_ids,
+        })
 
     return GameMetrics(
         game_id=game_id,
@@ -117,6 +136,7 @@ async def get_game_metrics(
         hoop_detected_frames=int(hoop_frames or 0),
         hoops_configured=hoops_configured,
         hoops_with_backboard=hoops_with_backboard,
+        hoops=hoops_list,
         players=[PlayerMetricRead.model_validate(p) for p in player_metrics],
     )
 

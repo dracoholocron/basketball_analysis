@@ -41,8 +41,15 @@ export async function getMe() {
 }
 
 // ── Games ─────────────────────────────────────────────────────────────────────
-export async function listGames(skip = 0, limit = 20) {
-  const { data } = await api.get("/games", { params: { skip, limit } });
+export async function listGames(
+  skip = 0,
+  limit = 20,
+  opts?: { season_id?: string; team_id?: string },
+) {
+  const { data } = await api.get("/games", {
+    params: { skip, limit, ...(opts?.season_id ? { season_id: opts.season_id } : {}),
+              ...(opts?.team_id ? { team_id: opts.team_id } : {}) },
+  });
   return data;
 }
 

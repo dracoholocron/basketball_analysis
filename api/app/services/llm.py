@@ -117,15 +117,11 @@ Return a JSON object with these exact keys (no markdown, pure JSON):
                 content = content[4:]
         return json.loads(content)
     except Exception as e:
-        logger.error(f"LLM generation failed: {e}")
-        return {
-            "team_identity": f"Scouting report generation failed: {e}",
-            "strengths": [],
-            "weaknesses": [],
-            "mvp_players": [],
-            "game_keys_offensive": [],
-            "game_keys_defensive": [],
-        }
+        # Surface the failure to the caller (the scouting endpoint converts it to a clear
+        # 502) instead of silently persisting an empty "failed" report. Other LLM helpers
+        # below keep their graceful fallbacks where a degraded result is acceptable.
+        logger.error(f"LLM scouting generation failed: {e}")
+        raise RuntimeError(str(e)) from e
 
 
 async def generate_keys_to_victory(

@@ -493,12 +493,22 @@ async def generate_scouting_report(
     stats_hash = hashlib.md5(json.dumps(opp_stats, sort_keys=True).encode()).hexdigest()
 
     from ..services.llm import generate_scouting_report as llm_generate
-    content = await llm_generate(
-        matchup_name=m.name,
-        own_team_name=own_team.name if own_team else "Our Team",
-        opponent_team_name=opp_team.name if opp_team else "Opponent",
-        opponent_stats=opp_stats,
-    )
+    try:
+        content = await llm_generate(
+            matchup_name=m.name,
+            own_team_name=own_team.name if own_team else "Our Team",
+            opponent_team_name=opp_team.name if opp_team else "Opponent",
+            opponent_stats=opp_stats,
+        )
+    except Exception as exc:
+        # The LLM (ollama/openai) is unreachable or returned invalid content.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "El servicio de IA para el reporte no está disponible "
+                f"({exc}). Verifica la configuración del LLM (LLM_BASE_URL / LLM_MODEL)."
+            ),
+        )
 
     report = ScoutingReport(
         matchup_id=matchup_id,
