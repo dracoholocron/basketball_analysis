@@ -2,6 +2,8 @@ import os
 import argparse
 import logging
 
+import numpy as np
+
 from utils import read_video, save_video, iter_video_frames, get_video_properties, CourtModeDetector
 from utils import read_stub, save_stub
 from trackers import PlayerTracker, BallTracker
