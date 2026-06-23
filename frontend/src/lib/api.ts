@@ -166,11 +166,36 @@ export interface JobLayers {
   raw_video_url: string;
   layers_url: string;
 }
+export type Kpt = [number, number, number];
+export interface LayersData {
+  fps: number;
+  width: number;
+  height: number;
+  /** frame -> { track_id -> [ [x,y,c] x17 ] } */
+  poses: Record<string, Record<string, Kpt[]>>;
+  /** frame -> [x1,y1,x2,y2] */
+  ball: Record<string, number[]>;
+  /** track_id -> presence index (first/last/count + a guaranteed-present median frame) */
+  tracks?: Record<string, { first: number; last: number; count: number; mid: number }>;
+}
 /** Raw video + overlay-primitives JSON for the canvas layer player. null when unavailable. */
 export async function getJobLayers(jobId: string): Promise<JobLayers | null> {
   try {
     const { data } = await api.get(`/jobs/${jobId}/layers`);
     return data as JobLayers;
+  } catch {
+    return null;
+  }
+}
+/** Fetch the raw video URL + the parsed layers JSON in one call. null when unavailable. */
+export async function fetchJobLayersData(
+  jobId: string,
+): Promise<{ raw: string; layers: LayersData } | null> {
+  const urls = await getJobLayers(jobId);
+  if (!urls) return null;
+  try {
+    const layers = (await fetch(urls.layers_url).then(r => r.json())) as LayersData;
+    return { raw: urls.raw_video_url, layers };
   } catch {
     return null;
   }

@@ -5,6 +5,7 @@ import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import VideoControls from "@/components/video/VideoControls";
 import LayeredPlayer from "@/components/video/LayeredPlayer";
+import PlayerIdentifyModal, { type IdentifyTrack } from "@/components/video/PlayerIdentifyModal";
 import {
   getGame,
   uploadVideo,
@@ -124,6 +125,7 @@ export default function GameDetailPage() {
   const [summary, setSummary] = useState<JobRunSummary | null>(null);
   const [shotHeat, setShotHeat] = useState<ShotHeatmap | null>(null);
   const [eventPopup, setEventPopup] = useState<CvEvent | null>(null);
+  const [identifyTrack, setIdentifyTrack] = useState<IdentifyTrack | null>(null);
   const [clipPad, setClipPad] = useState(2);  // seconds before/after the event (configurable)
   const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
   const [poseFilterInput, setPoseFilterInput] = useState("");
@@ -1217,8 +1219,8 @@ export default function GameDetailPage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-700 text-left text-xs text-slate-400">
-                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep.", "Tiros (FG)"].map(h => (
-                    <th key={h} className="px-4 py-3 font-medium">{h}</th>
+                  {["Jugador", "Equipo", "Min.", "Distancia (m)", "Vel. prom.", "Vel. máx.", "Posesión", "Pases", "Intercep.", "Tiros (FG)", ""].map((h, hi) => (
+                    <th key={h || `col-${hi}`} className="px-4 py-3 font-medium">{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -1259,6 +1261,19 @@ export default function GameDetailPage() {
                           ? `${p.shots_made ?? 0}/${p.shots_attempted} (${fgPct(p.shots_made ?? 0, p.shots_attempted ?? 0)}%)`
                           : "—"}
                       </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => jobStatus?.id && setIdentifyTrack({
+                            track_id: p.track_id, label,
+                            jersey_number: p.jersey_number, team_id: p.team_id, player_id: p.player_id,
+                          })}
+                          disabled={!jobStatus?.id}
+                          title={jobStatus?.id ? "Ver el jugador resaltado y corregir su dorsal/equipo" : "Análisis no disponible"}
+                          className="px-2.5 py-1 rounded-lg text-xs font-medium border border-amber-600/50 text-amber-300 hover:bg-amber-600/10 disabled:opacity-40 transition-colors whitespace-nowrap"
+                        >
+                          Identificar
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -1283,6 +1298,21 @@ export default function GameDetailPage() {
             setEventPopup(null);
           }}
           gameId={id}
+        />
+      )}
+
+      {identifyTrack && jobStatus?.id && (
+        <PlayerIdentifyModal
+          jobId={jobStatus.id}
+          gameId={id}
+          track={identifyTrack}
+          homeTeamName={metrics?.home_team_name}
+          awayTeamName={metrics?.away_team_name}
+          onClose={() => setIdentifyTrack(null)}
+          onSaved={() => {
+            getGameMetrics(id).then(setMetrics).catch(() => null);
+            setIdentifyTrack(null);
+          }}
         />
       )}
     </AppShell>

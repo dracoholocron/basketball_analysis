@@ -5,7 +5,7 @@ import { getJobLayers } from "@/lib/api";
 import { clsx } from "clsx";
 
 // COCO-17 skeleton edges (must match the engine's pose_drawer).
-const COCO_EDGES: [number, number][] = [
+export const COCO_EDGES: [number, number][] = [
   [0, 1], [0, 2], [1, 3], [2, 4],
   [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],
   [5, 11], [6, 12], [11, 12],
@@ -15,8 +15,16 @@ const COCO_EDGES: [number, number][] = [
 type Kpt = [number, number, number];
 interface Layers {
   fps: number; width: number; height: number;
-  poses: Record<string, Kpt[][]>;   // frame -> [perPlayer [ [x,y,c]*17 ]]
+  // frame -> poses. New format keys by track_id ({track_id: kp}); legacy is a flat array.
+  poses: Record<string, Record<string, Kpt[]> | Kpt[][]>;
   ball: Record<string, number[]>;    // frame -> [x1,y1,x2,y2]
+}
+
+/** Normalize a frame's poses to a flat list of skeletons across both layer formats. */
+function posesAt(poses: Layers["poses"] | undefined, frame: number): Kpt[][] {
+  const p = poses?.[String(frame)];
+  if (!p) return [];
+  return Array.isArray(p) ? (p as Kpt[][]) : (Object.values(p) as Kpt[][]);
 }
 
 /** Post-hoc layer player: plays the RAW video and draws toggleable pose/ball overlays on a
@@ -59,8 +67,8 @@ export default function LayeredPlayer({ jobId }: { jobId: string }) {
       const f = Math.round(v.currentTime * (layers.fps || 25));
 
       if (showPoses) {
-        const players = layers.poses?.[String(f)];
-        if (players) {
+        const players = posesAt(layers.poses, f);
+        if (players.length) {
           ctx.lineWidth = 2; ctx.strokeStyle = "rgba(0,255,255,0.9)"; ctx.fillStyle = "rgba(255,255,0,0.9)";
           for (const kp of players) {
             if (!kp || kp.length < 17) continue;

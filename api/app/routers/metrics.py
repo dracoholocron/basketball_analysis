@@ -244,6 +244,15 @@ async def put_player_mapping(
         pm = pm_by_track.get(item.track_id)
         if pm is None:
             continue
+        # Direct correction of the DETECTED identity (misread dorsal / wrong team) without
+        # needing a roster link — used by the player-identify popup.
+        if item.jersey_number is not None:
+            jn = item.jersey_number.strip()
+            pm.jersey_number = jn or None
+            pm.display_label = f"#{jn}" if jn else None
+        if item.team_id in (1, 2):
+            pm.team_id = item.team_id
+
         player_id = item.player_id
         if player_id is None and item.new_player_name:
             team_uuid = team_uuid_by_no.get(item.team_id or pm.team_id)
@@ -254,6 +263,9 @@ async def put_player_mapping(
             db.add(new_player)
             await db.flush()  # get id
             player_id = new_player.id
+        # The caller must pass the desired final link each time (existing player, new player,
+        # or None to unlink) — the identify popup forwards the current player_id when it is
+        # only correcting the dorsal/team so the link is preserved.
         pm.player_id = player_id  # may be None to unlink
     await db.commit()
 

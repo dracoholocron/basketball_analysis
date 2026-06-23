@@ -1527,18 +1527,32 @@ def run_pipeline(
         try:
             _lh = min(720, int(_intrinsic_height or 720))
             _lw = int(round(frame_width * _lh / float(_intrinsic_height or 720)))
-            _poses_l: dict[int, list] = {}
+            # Poses keyed by track_id (frame -> {track_id: kp}) so the UI can isolate and
+            # highlight a single player when identifying/reclassifying him.
+            _poses_l: dict[int, dict] = {}
+            _track_present: dict[int, list[int]] = {}   # track_id -> frames it appears in
             for fi, fr in enumerate(pose_sequence or []):
                 if not fr:
                     continue
-                arr = []
+                d: dict[int, list] = {}
                 for _tid, kp in fr.items():
                     if kp is None:
                         continue
-                    arr.append([[round(float(p[0]), 1), round(float(p[1]), 1), round(float(p[2]), 2)]
-                                for p in kp])
-                if arr:
-                    _poses_l[fi] = arr
+                    tid = int(_tid)
+                    d[tid] = [[round(float(p[0]), 1), round(float(p[1]), 1), round(float(p[2]), 2)]
+                              for p in kp]
+                    _track_present.setdefault(tid, []).append(fi)
+                if d:
+                    _poses_l[fi] = d
+            # Compact per-track presence index: lets the UI seek to a frame where the player
+            # is on-screen (first/last span + a guaranteed-present median frame).
+            _tracks_idx: dict[int, dict] = {}
+            for tid, frames in _track_present.items():
+                if frames:
+                    _tracks_idx[tid] = {
+                        "first": frames[0], "last": frames[-1],
+                        "count": len(frames), "mid": frames[len(frames) // 2],
+                    }
             _ball_l: dict[int, list] = {}
             for fi, bt in enumerate(ball_tracks or []):
                 b = bt.get(1, {}).get("bbox") if isinstance(bt, dict) else None
@@ -1546,10 +1560,10 @@ def run_pipeline(
                     _ball_l[fi] = [round(float(x), 1) for x in b[:4]]
             layers_data = {
                 "fps": actual_fps, "width": _lw, "height": _lh,
-                "poses": _poses_l, "ball": _ball_l,
+                "poses": _poses_l, "ball": _ball_l, "tracks": _tracks_idx,
             }
-            logger.info("Layers exported: %d pose frames, %d ball frames (%dx%d)",
-                        len(_poses_l), len(_ball_l), _lw, _lh)
+            logger.info("Layers exported: %d pose frames, %d ball frames, %d tracks (%dx%d)",
+                        len(_poses_l), len(_ball_l), len(_tracks_idx), _lw, _lh)
         except Exception as _exc:
             logger.warning("Layer export skipped: %s", _exc)
 
