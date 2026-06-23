@@ -13,6 +13,7 @@ from .routers import auth, games, jobs, metrics
 from .routers import organizations, seasons, teams, players, divisions
 from .routers import box_scores, game_events, matchups, plays, playbooks, training
 from .routers import annotations, ball_annotations, ball_sessions, hoop_annotations, lab, models as models_router
+from .routers import performance
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -61,6 +62,7 @@ app.include_router(ball_sessions.router, prefix=_prefix)
 app.include_router(hoop_annotations.router, prefix=_prefix)
 app.include_router(lab.router, prefix=_prefix)
 app.include_router(models_router.router, prefix=_prefix)
+app.include_router(performance.router, prefix=_prefix)
 
 
 @app.get("/health", tags=["health"])

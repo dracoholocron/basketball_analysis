@@ -151,6 +151,7 @@ async function uploadVideoMultipart(
 export interface AnalysisOptions {
   pose_player_filter?: number[];
   use_curated_ball?: boolean;
+  ball_detector_mode?: "auto" | "tracknet" | "yolo";
 }
 
 /** Start analysis of the already-uploaded video for a game. Returns a Job. */
@@ -173,6 +174,7 @@ export async function updateGameSettings(
     analysis_start_s?: number | null;
     analysis_end_s?: number | null;
     ball_tracking_quality?: string;
+    ball_detector_mode?: "auto" | "tracknet" | "yolo";
   }
 ) {
   const { data } = await api.patch(`/games/${gameId}`, payload);
@@ -489,6 +491,10 @@ export async function activateModelVersion(id: string) {
   const { data } = await api.post(`/models/${id}/activate`);
   return data;
 }
+export async function deactivateModelVersion(id: string) {
+  const { data } = await api.post(`/models/${id}/deactivate`);
+  return data;
+}
 export async function scanModels() {
   const { data } = await api.post("/models/scan");
   return data as { task_id: string; queued: boolean };
@@ -496,6 +502,27 @@ export async function scanModels() {
 export async function exportTensorrtEngine(role: string) {
   const { data } = await api.post(`/models/export-tensorrt/${role}`);
   return data as { task_id: string; queued: boolean; role: string };
+}
+
+// ── Performance dashboard ───────────────────────────────────────────────────────
+export interface PerfSeriesPoint {
+  period: string; runs: number;
+  avg_coverage_pct: number | null; avg_raw_detection_rate: number | null;
+  avg_total_seconds: number | null; avg_fps_processed: number | null;
+  avg_review_flags: number | null; total_static_fp_dropped: number;
+}
+export interface PerfDetector {
+  detector: string; runs: number;
+  avg_coverage_pct: number | null; avg_raw_detection_rate: number | null;
+  avg_total_seconds: number | null;
+}
+export interface PerformanceSummary {
+  period: string; total_runs: number;
+  series: PerfSeriesPoint[]; detectors: PerfDetector[];
+}
+export async function getPerformanceSummary(period: "daily" | "monthly" | "yearly" = "daily") {
+  const { data } = await api.get("/performance/summary", { params: { period } });
+  return data as PerformanceSummary;
 }
 
 // ── Seasons ───────────────────────────────────────────────────────────────────
@@ -607,6 +634,37 @@ export async function listJobs(skip = 0, limit = 30) {
 export async function getJob(jobId: string) {
   const { data } = await api.get(`/jobs/${jobId}`);
   return data;
+}
+
+export interface JobRunSummary {
+  job_id: string;
+  model_versions_used?: Record<string, string> | null;
+  ball_detector_source?: string | null;
+  ball_detector_mode?: string | null;
+  ball_raw_detection_rate?: number | null;
+  ball_coverage_pct?: number | null;
+  ball_source_counts?: Record<string, number> | null;
+  ball_static_fp_dropped?: number | null;
+  ball_static_fp_dropped_post_sahi?: number | null;
+  ball_review_flags?: number | null;
+  raw_tracks?: number | null;
+  consolidated_identities?: number | null;
+  identities_with_dorsal?: number | null;
+  total_frames?: number | null;
+  total_seconds?: number | null;
+  fps_processed?: number | null;
+  stage_timings?: Record<string, number> | null;
+  created_at?: string | null;
+}
+
+/** Per-run analysis summary (detection proxies + timings). null when not available. */
+export async function getJobSummary(jobId: string): Promise<JobRunSummary | null> {
+  try {
+    const { data } = await api.get(`/jobs/${jobId}/summary`);
+    return data as JobRunSummary;
+  } catch {
+    return null;
+  }
 }
 
 export async function getLatestDoneJobForGame(gameId: string) {

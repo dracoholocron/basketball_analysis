@@ -3,14 +3,18 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
-import { listModelVersions, activateModelVersion, scanModels, exportTensorrtEngine, type ModelVersion } from "@/lib/api";
+import { listModelVersions, activateModelVersion, deactivateModelVersion, scanModels, exportTensorrtEngine, type ModelVersion } from "@/lib/api";
 import { ChevronLeft, Loader2, RefreshCw, CheckCircle2, Circle, Boxes, Zap } from "lucide-react";
 import { clsx } from "clsx";
 
 const ROLE_LABELS: Record<string, string> = {
-  player: "Detector de jugadores", ball: "Detector de balón",
+  player: "Detector de jugadores", ball: "Detector de balón (YOLO finetune)",
   court: "Keypoints de cancha", pose: "Pose (esqueleto)",
+  tracknet_ball: "TrackNet balón (opcional — activar = primario global)",
 };
+// Roles where deactivating is allowed (no canonical fallback required). TrackNet is
+// optional: deactivating it makes the YOLO finetune the global primary ball detector.
+const DEACTIVATABLE = new Set(["tracknet_ball"]);
 
 export default function AdminModelsPage() {
   const [roles, setRoles] = useState<Record<string, ModelVersion[]>>({});
@@ -29,6 +33,12 @@ export default function AdminModelsPage() {
     setBusy(v.id); setMsg("");
     try { await activateModelVersion(v.id); await load(); setMsg(`Activado: ${v.filename}`); }
     catch (e: unknown) { setMsg(e instanceof Error ? e.message : "Error al activar"); }
+    finally { setBusy(null); }
+  };
+  const onDeactivate = async (v: ModelVersion) => {
+    setBusy(v.id); setMsg("");
+    try { await deactivateModelVersion(v.id); await load(); setMsg(`Desactivado: ${v.filename}`); }
+    catch (e: unknown) { setMsg(e instanceof Error ? e.message : "Error al desactivar"); }
     finally { setBusy(null); }
   };
   const onScan = async () => {
@@ -116,7 +126,15 @@ export default function AdminModelsPage() {
                           </div>
                         </div>
                         {v.is_active ? (
-                          <span className="text-xs px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">activo</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">activo</span>
+                            {DEACTIVATABLE.has(role) && (
+                              <button onClick={() => onDeactivate(v)} disabled={busy === v.id}
+                                className={clsx("text-xs px-3 py-1.5 rounded-lg border border-amber-600/40 text-amber-300 hover:bg-amber-500/10 disabled:opacity-50")}>
+                                {busy === v.id ? "…" : "Desactivar"}
+                              </button>
+                            )}
+                          </div>
                         ) : (
                           <button onClick={() => onActivate(v)} disabled={busy === v.id}
                             className={clsx("text-xs px-3 py-1.5 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-700 disabled:opacity-50")}>

@@ -51,6 +51,42 @@ async def get_job(
     return job
 
 
+@router.get("/{job_id}/summary")
+async def get_job_summary(
+    job_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Per-run analysis summary: detection-quality proxies, models used, stage timings.
+    Returns 404 with {available: false} semantics when no summary was persisted."""
+    from ..models.job_run_summary import JobRunSummary
+    row = (await db.execute(
+        select(JobRunSummary).where(JobRunSummary.job_id == job_id)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No summary for this job")
+    return {
+        "job_id": str(row.job_id),
+        "model_versions_used": row.model_versions_used,
+        "ball_detector_source": row.ball_detector_source,
+        "ball_detector_mode": row.ball_detector_mode,
+        "ball_raw_detection_rate": row.ball_raw_detection_rate,
+        "ball_coverage_pct": row.ball_coverage_pct,
+        "ball_source_counts": row.ball_source_counts,
+        "ball_static_fp_dropped": row.ball_static_fp_dropped,
+        "ball_static_fp_dropped_post_sahi": row.ball_static_fp_dropped_post_sahi,
+        "ball_review_flags": row.ball_review_flags,
+        "raw_tracks": row.raw_tracks,
+        "consolidated_identities": row.consolidated_identities,
+        "identities_with_dorsal": row.identities_with_dorsal,
+        "total_frames": row.total_frames,
+        "total_seconds": row.total_seconds,
+        "fps_processed": row.fps_processed,
+        "stage_timings": row.stage_timings,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
 @router.delete("/{job_id}", status_code=204)
 async def delete_job(
     job_id: uuid.UUID,

@@ -22,7 +22,7 @@ router = APIRouter(prefix="/models", tags=["models"])
 _staff = require_role("admin", "coach")
 _admin = require_role("admin")
 
-ROLES = ("player", "ball", "court", "pose")
+ROLES = ("player", "ball", "court", "pose", "tracknet_ball")
 
 
 class ModelVersionRead(BaseModel):
@@ -63,6 +63,20 @@ async def activate_model_version(
     mv.is_active = True
     await db.commit()
     return {"ok": True, "role": mv.role, "active": mv.filename}
+
+
+@router.post("/{version_id}/deactivate")
+async def deactivate_model_version(
+    version_id: uuid.UUID, db: AsyncSession = Depends(get_db), _=Depends(_admin),
+):
+    """Deactivate a version (leaves the role with no active model). Used to turn off the
+    optional TrackNet ball detector globally (role has no canonical fallback requirement)."""
+    mv = await db.get(ModelVersion, version_id)
+    if mv is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    mv.is_active = False
+    await db.commit()
+    return {"ok": True, "role": mv.role}
 
 
 @router.post("/scan")

@@ -16,6 +16,8 @@ import {
   getGameAnnotation,
   deleteJob,
   updateGameSettings,
+  getJobSummary,
+  type JobRunSummary,
   api,
 } from "@/lib/api";
 
@@ -110,6 +112,7 @@ export default function GameDetailPage() {
   const [annotationStatus, setAnnotationStatus] = useState<"none" | "partial" | "done">("none");
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [annotatedVideoUrl, setAnnotatedVideoUrl] = useState<string | null>(null);
+  const [summary, setSummary] = useState<JobRunSummary | null>(null);
   const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
   const [poseFilterInput, setPoseFilterInput] = useState("");
   const [updatingPoses, setUpdatingPoses] = useState(false);
@@ -120,6 +123,7 @@ export default function GameDetailPage() {
   const [gameStartS, setGameStartS] = useState("");
   const [gameEndS, setGameEndS] = useState("");
   const [ballQuality, setBallQuality] = useState<"small" | "base_plus" | "large" | "efficienttam">("base_plus");
+  const [ballMode, setBallMode] = useState<"auto" | "tracknet" | "yolo">("auto");
   const fileRef = useRef<HTMLInputElement>(null);
   const annotatedVideoRef = useRef<HTMLVideoElement>(null);
 
@@ -136,6 +140,7 @@ export default function GameDetailPage() {
       setGameStartS(g?.analysis_start_s != null ? String(g.analysis_start_s) : "");
       setGameEndS(g?.analysis_end_s != null ? String(g.analysis_end_s) : "");
       setBallQuality(((g?.ball_tracking_quality as "small"|"base_plus"|"large"|"efficienttam") ?? "base_plus"));
+      setBallMode(((g?.ball_detector_mode as "auto"|"tracknet"|"yolo") ?? "auto"));
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
@@ -160,6 +165,7 @@ export default function GameDetailPage() {
           api.get<{ url: string }>(`/jobs/${jobId}/annotated-video`)
             .then(r => setAnnotatedVideoUrl(r.data.url))
             .catch(() => null);
+          getJobSummary(jobId).then(setSummary).catch(() => null);
         }
       })
       .catch(() => null);
@@ -278,7 +284,7 @@ export default function GameDetailPage() {
     setHasActiveJob(true);
     setAnnotatedVideoUrl(null);
     try {
-      const job = await analyzeGame(id, { pose_player_filter: posePlayerFilter });
+      const job = await analyzeGame(id, { pose_player_filter: posePlayerFilter, ball_detector_mode: ballMode });
       setJobStatus({ status: job.status, progress_pct: 0, current_stage: job.current_stage, id: job.id });
       await pollJobUntilDone(job.id, (j) => {
         setJobStatus({ ...j, id: job.id });
@@ -292,6 +298,7 @@ export default function GameDetailPage() {
       ]);
       setMetrics(m);
       setCvEvents(events);
+      getJobSummary(job.id).then(setSummary).catch(() => null);
     } catch (err) {
       console.error(err);
     } finally {
@@ -567,6 +574,64 @@ export default function GameDetailPage() {
                 )}
               </div>
             )}
+
+            {/* Analysis detail: detection-quality proxies + stage timings (per run) */}
+            {jobStatus.status === "done" && summary && (
+              <div className="mt-4 border-t border-slate-700 pt-4 space-y-3">
+                <p className="text-sm font-semibold text-white">Detalle del análisis</p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                  {[
+                    ["Cobertura de balón", summary.ball_coverage_pct != null ? `${summary.ball_coverage_pct.toFixed(1)}%` : "—"],
+                    ["Detección directa", summary.ball_raw_detection_rate != null ? `${(summary.ball_raw_detection_rate * 100).toFixed(1)}%` : "—"],
+                    ["Detector", `${summary.ball_detector_source ?? "—"}${summary.ball_detector_mode ? ` (${summary.ball_detector_mode})` : ""}`],
+                    ["FP estáticos eliminados", String((summary.ball_static_fp_dropped ?? 0) + (summary.ball_static_fp_dropped_post_sahi ?? 0))],
+                    ["Tiempo total", summary.total_seconds != null ? `${Math.round(summary.total_seconds / 60)} min` : "—"],
+                    ["FPS procesados", summary.fps_processed != null ? summary.fps_processed.toFixed(1) : "—"],
+                    ["Identidades", `${summary.consolidated_identities ?? "—"} (${summary.identities_with_dorsal ?? 0} c/dorsal)`],
+                    ["Flags de revisión", String(summary.ball_review_flags ?? 0)],
+                  ].map(([label, value]) => (
+                    <div key={label} className="bg-slate-800/60 rounded-lg px-3 py-2">
+                      <div className="text-slate-400">{label}</div>
+                      <div className="text-white font-semibold mt-0.5">{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {summary.ball_source_counts && Object.keys(summary.ball_source_counts).length > 0 && (
+                  <div>
+                    <p className="text-xs text-slate-400 mb-1">Fuente de cada detección de balón</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(summary.ball_source_counts).sort((a, b) => b[1] - a[1]).map(([src, n]) => (
+                        <span key={src} className="text-xs px-2 py-1 rounded-md bg-slate-800 text-slate-300 border border-slate-700">
+                          {src}: <span className="text-white font-semibold">{n}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {summary.stage_timings && Object.keys(summary.stage_timings).length > 0 && (
+                  <div>
+                    <p className="text-xs text-slate-400 mb-1">Tiempo por etapa (s)</p>
+                    <div className="space-y-1">
+                      {(() => {
+                        const entries = Object.entries(summary.stage_timings!);
+                        const maxT = Math.max(...entries.map(([, s]) => s), 1);
+                        return entries.map(([stage, secs]) => (
+                          <div key={stage} className="flex items-center gap-2 text-xs">
+                            <span className="w-40 shrink-0 text-slate-400 truncate">{stage}</span>
+                            <div className="flex-1 bg-slate-800 rounded h-3 overflow-hidden">
+                              <div className="bg-blue-600 h-full" style={{ width: `${(secs / maxT) * 100}%` }} />
+                            </div>
+                            <span className="w-12 text-right text-slate-300">{secs.toFixed(0)}s</span>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -724,6 +789,30 @@ export default function GameDetailPage() {
                         ballQuality === q ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white",
                       )}>
                       {label} <span className="opacity-60">({q})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Ball detector mode (TrackNet vs YOLO finetune) */}
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-white">Detector de balón</p>
+                <p className="text-xs text-slate-400">
+                  Auto sigue el modelo activo global (Modelos → tracknet_ball). Forzar TrackNet o el
+                  finetune YOLO para probar con este video.
+                </p>
+                <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1 w-fit flex-wrap">
+                  {([
+                    ["auto", "Auto (global)"],
+                    ["tracknet", "TrackNet"],
+                    ["yolo", "YOLO finetune"],
+                  ] as const).map(([m, label]) => (
+                    <button key={m} onClick={() => setBallMode(m)}
+                      className={clsx(
+                        "px-3 py-1.5 text-xs rounded-md transition-colors",
+                        ballMode === m ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white",
+                      )}>
+                      {label}
                     </button>
                   ))}
                 </div>

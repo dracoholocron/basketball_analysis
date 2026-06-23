@@ -23,6 +23,7 @@ import {
   UserCircle2,
   Dumbbell,
   Swords,
+  Gauge,
 } from "lucide-react";
 import { useSelfScout } from "@/lib/selfScout";
 
@@ -44,6 +45,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/matchups", label: "Matchup Workspace", icon: <Swords size={18} />, group: "tools" },
   { href: "/admin/box-scores", label: "Box Scores", icon: <TableProperties size={18} />, group: "tools" },
   { href: "/jobs", label: "Analysis Jobs", icon: <Layers size={18} />, group: "tools" },
+  { href: "/performance", label: "Rendimiento", icon: <Gauge size={18} />, group: "tools" },
   { href: "/admin", label: "Settings", icon: <Settings size={18} />, group: "system" },
   { href: "/admin/organizations", label: "Organizations", icon: <Building2 size={18} />, group: "system" },
   { href: "/admin/seasons", label: "Seasons", icon: <Trophy size={18} />, group: "system" },

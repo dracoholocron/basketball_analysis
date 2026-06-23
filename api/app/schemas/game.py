@@ -18,6 +18,7 @@ class GameCreate(BaseModel):
     home_team1_jersey: str = "white shirt"
     away_team2_jersey: str = "dark blue shirt"
     show_poses: bool = True
+    ball_detector_mode: str = Field(default="auto", description="auto|tracknet|yolo")
 
 
 class GameRead(BaseModel):
@@ -39,6 +40,7 @@ class GameRead(BaseModel):
     analysis_start_s: Optional[float] = None
     analysis_end_s: Optional[float] = None
     ball_tracking_quality: Optional[str] = None
+    ball_detector_mode: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -60,4 +62,8 @@ class AnalysisOptions(BaseModel):
             "Use the curated ball track from the game's completed interactive "
             "ball-tracking session (skips the SAM2 propagation stage)."
         ),
+    )
+    ball_detector_mode: Optional[str] = Field(
+        default=None,
+        description="Override the game's ball detector mode for this run: auto|tracknet|yolo.",
     )

@@ -1,6 +1,12 @@
 from utils import measure_distance
 from configs.settings import settings
 
+try:
+    from scipy.signal import savgol_filter
+    _HAS_SAVGOL = True
+except Exception:  # pragma: no cover - scipy should be present in the engine image
+    _HAS_SAVGOL = False
+
 
 class SpeedAndDistanceCalculator:
     def __init__(
@@ -30,33 +36,68 @@ class SpeedAndDistanceCalculator:
         )
         self.deadband_m = getattr(settings, "speed_deadband_m", 0.08)
         self.smooth_alpha = getattr(settings, "speed_smooth_alpha", 0.4)
+        self.savgol_window = int(getattr(settings, "speed_savgol_window", 9))
+        self.instantaneous_max_kmh = float(getattr(settings, "speed_instantaneous_max_kmh", 32.0))
+
+    def _smooth_track(self, frames: list[int], xs: list[float], ys: list[float]):
+        """Savitzky-Golay smoothing of one player's tactical trajectory (x,y over its
+        sampled frames). Falls back to raw when scipy is missing or the track is too
+        short for the window. Removes high-frequency homography jitter with little lag."""
+        n = len(frames)
+        w = self.savgol_window
+        if not _HAS_SAVGOL or w < 3 or n < w:
+            return xs, ys
+        if w % 2 == 0:
+            w += 1
+        if w > n:
+            w = n if n % 2 == 1 else n - 1
+        if w < 3:
+            return xs, ys
+        poly = min(2, w - 1)
+        sx = savgol_filter(xs, w, poly)
+        sy = savgol_filter(ys, w, poly)
+        return list(sx), list(sy)
 
     def calculate_distance(self, tactical_player_positions: list) -> list:
-        previous_players_position: dict = {}
-        smoothed: dict = {}  # per-player EMA-smoothed position
-        output_distances: list = []
-        a = self.smooth_alpha
+        n_frames = len(tactical_player_positions)
+        output_distances: list = [dict() for _ in range(n_frames)]
+        if n_frames == 0:
+            return output_distances
 
-        for frame_number, tactical_player_position_frame in enumerate(
-            tactical_player_positions
-        ):
-            output_distances.append({})
-            for player_id, raw_pos in tactical_player_position_frame.items():
-                # EMA-smooth the tactical position to remove homography jitter.
-                if player_id in smoothed and a < 1.0:
-                    sx = a * raw_pos[0] + (1 - a) * smoothed[player_id][0]
-                    sy = a * raw_pos[1] + (1 - a) * smoothed[player_id][1]
-                    cur = [sx, sy]
-                else:
-                    cur = [raw_pos[0], raw_pos[1]]
-                smoothed[player_id] = cur
+        # 1) Collect each player's tactical-pixel trajectory over the frames it appears in.
+        series: dict = {}  # player_id -> (frames[], xs[], ys[])
+        for f, frame_pos in enumerate(tactical_player_positions):
+            for pid, pos in frame_pos.items():
+                fr, xs, ys = series.setdefault(pid, ([], [], []))
+                fr.append(f); xs.append(float(pos[0])); ys.append(float(pos[1]))
 
-                if player_id in previous_players_position:
-                    meter_distance = self._calculate_meter_distance(
-                        previous_players_position[player_id], cur
-                    )
-                    output_distances[frame_number][player_id] = meter_distance
-                previous_players_position[player_id] = cur
+        # 2) Smooth each trajectory (Savitzky-Golay) → per-player {frame: (x,y)}.
+        smoothed: dict = {}
+        for pid, (fr, xs, ys) in series.items():
+            sx, sy = self._smooth_track(fr, xs, ys)
+            smoothed[pid] = {fr[i]: (sx[i], sy[i]) for i in range(len(fr))}
+
+        # 3) Per-frame meter distance from the previous present frame, with a kinematic
+        #    gate that drops physically implausible jumps (jitter / tracking ID switches).
+        max_inst_m_per_frame = (self.instantaneous_max_kmh / 3.6) / max(self.fps, 1e-6)
+        previous_players_position: dict = {}  # pid -> (frame, x_m, y_m)
+        for f in range(n_frames):
+            for pid in tactical_player_positions[f].keys():
+                pt = smoothed.get(pid, {}).get(f)
+                if pt is None:
+                    continue
+                cur_m_x = pt[0] * self.width_in_meters / self.width_in_pixels
+                cur_m_y = pt[1] * self.height_in_meters / self.height_in_pixels
+                if pid in previous_players_position:
+                    pf, pmx, pmy = previous_players_position[pid]
+                    dist = measure_distance((cur_m_x, cur_m_y), (pmx, pmy)) * self.calibration_factor
+                    gap = max(1, f - pf)
+                    if (dist / gap) > max_inst_m_per_frame:
+                        dist = 0.0   # kinematic outlier → drop this step
+                    elif dist < self.deadband_m:
+                        dist = 0.0   # jitter deadband
+                    output_distances[f][pid] = dist
+                previous_players_position[pid] = (f, cur_m_x, cur_m_y)
 
         return output_distances
 

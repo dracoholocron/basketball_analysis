@@ -36,6 +36,9 @@ class Game(Base):
     analysis_end_s: Mapped[float | None] = mapped_column(Float)
     # SAM 2.1 ball-tracking checkpoint quality: 'small' | 'base_plus' | 'large'.
     ball_tracking_quality: Mapped[str] = mapped_column(String(20), nullable=False, default="base_plus")
+    # Ball detector mode: 'auto' (follow the global registry: TrackNet if a tracknet_ball
+    # version is active, else YOLO finetune) | 'tracknet' (force) | 'yolo' (force finetune).
+    ball_detector_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

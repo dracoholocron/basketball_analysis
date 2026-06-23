@@ -162,7 +162,10 @@ services:
       BA_POSE_BACKEND: "yolo"
       BA_POSE_CONF_THRESHOLD: "0.3"
       BA_EVENT_POSE_CONF_THRESHOLD: "0.3"
-      BA_SPEED_MAX_KMH: "25"
+      BA_SPEED_MAX_KMH: "18"              # realistic cap for school-level play (was 25)
+      BA_SPEED_INSTANTANEOUS_MAX_KMH: "32"  # kinematic gate: drop frame-to-frame jumps implying > this (jitter/ID switch)
+      BA_SPEED_SAVGOL_WINDOW: "9"         # Savitzky-Golay window (frames) to smooth tactical trajectory
+      BA_SPEED_MAX_PERCENTILE: "95"       # report p95 of per-frame speed as "max", not the absolute spike
       BA_TRACKER: "botsort"           # BoT-SORT + camera-motion compensation (GMC) for panning video
       BA_TRACKER_LOST_BUFFER: "120"   # ByteTrack fallback: keep lost tracks ~4s
       BA_TRACKER_MIN_MATCH: "0.85"

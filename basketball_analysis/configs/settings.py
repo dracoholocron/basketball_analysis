@@ -511,8 +511,31 @@ class EngineSettings(BaseSettings):
         description="Window size (frames) used to compute speed rolling average (~1s at 24fps)",
     )
     speed_max_kmh: float = Field(
-        default=40.0,
-        description="Hard cap on per-frame speed (km/h) to filter homography noise",
+        default=18.0,
+        description="Hard cap on reported speed (km/h). ~18 is realistic for school-level play.",
+    )
+    speed_instantaneous_max_kmh: float = Field(
+        default=32.0,
+        description=(
+            "Kinematic gate: a single frame-to-frame displacement implying a speed above this "
+            "is jitter / a tracking ID switch, not real motion → that step is dropped (0m) before "
+            "it pollutes the rolling window. ~32 km/h is well above any sustained school sprint."
+        ),
+    )
+    speed_savgol_window: int = Field(
+        default=9,
+        description=(
+            "Savitzky-Golay window (frames, odd) used to smooth each player's tactical trajectory "
+            "before measuring distance. Removes high-frequency homography jitter with less lag "
+            "than an aggressive EMA. <3 or longer than the track disables it (falls back to raw)."
+        ),
+    )
+    speed_max_percentile: float = Field(
+        default=95.0,
+        description=(
+            "Reported max speed uses this percentile of a player's per-frame speed samples instead "
+            "of the absolute max, so a single jitter spike does not become the headline 'max speed'."
+        ),
     )
     speed_deadband_m: float = Field(
         default=0.08,

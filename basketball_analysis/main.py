@@ -583,6 +583,7 @@ def run_pipeline(
     sam2_config: str | None = None,
     pose_model_path: str | None = None,
     precomputed_ball_track: dict | None = None,
+    ball_tracknet_path: str | None = None,
 ):
     """
     Run the full basketball analysis pipeline on a video file.
@@ -689,6 +690,11 @@ def run_pipeline(
         )
 
         _progress("ball_tracking", 30)
+        # Ball-stage diagnostics captured for the per-run summary (Fase 3).
+        _det_src_used = "curated"
+        _raw_detected_count = 0
+        _ball_static_dropped = 0
+        _ball_static_dropped_post = 0
         if precomputed_ball_track is not None:
             # Curated interactive-session track: skip YOLO / SAM2 / SAHI entirely.
             _n_pre = len(player_tracks)
@@ -698,6 +704,7 @@ def run_pipeline(
             ]
             ball_source = ["curated" if i in precomputed_ball_track else "" for i in range(_n_pre)]
             _protected = set(precomputed_ball_track.keys())
+            _raw_detected_count = len(_protected)
             logger.info(
                 "Using curated ball track: %d/%d frames detected (%.1f%%)",
                 len(_protected), _n_pre, 100.0 * len(_protected) / max(1, _n_pre),
@@ -716,8 +723,12 @@ def run_pipeline(
                 except Exception as _exc:
                     logger.warning("Ball dataset export (curated) failed: %s", _exc)
         else:
-            _tn_path = getattr(_settings, "ball_tracknet_path", "")
+            # ball_tracknet_path param (from the model registry + per-game mode) takes
+            # precedence; "" forces the YOLO finetune, None falls back to the env setting.
+            _tn_path = ball_tracknet_path if ball_tracknet_path is not None \
+                else getattr(_settings, "ball_tracknet_path", "")
             _det_src = "tracknet" if (_tn_path and os.path.exists(_tn_path)) else "yolo"
+            _det_src_used = _det_src
             ball_tracks = read_stub(use_stubs, _ball_stub)
             if ball_tracks is None:
                 _tn_conf = float(getattr(_settings, "ball_tracknet_conf", 0.5))
@@ -742,6 +753,7 @@ def run_pipeline(
                 if _gated:
                     logger.info("YOLO ball gating: dropped %d implausible boxes (size/aspect)", _gated)
                 ball_tracks, _static = _remove_static_detections(ball_tracks, actual_fps)
+                _ball_static_dropped = _static
                 if _static:
                     logger.info("Static-FP filter: dropped %d %s boxes pinned in place (structural false positive)",
                                 _static, _det_src)
@@ -761,6 +773,7 @@ def run_pipeline(
         if precomputed_ball_track is None:
             _missing_before_sahi = sum(1 for bt in ball_tracks if 1 not in bt)
             _raw_detected = len(ball_tracks) - _missing_before_sahi
+            _raw_detected_count = _raw_detected
             logger.info(
                 "Ball raw detection rate: %d/%d frames (%.1f%%) before SAHI",
                 _raw_detected, len(ball_tracks),
@@ -824,6 +837,7 @@ def run_pipeline(
             # Protect SAM2-sourced frames (user-anchored, trustworthy) from removal.
             ball_tracks, _static_post = _remove_static_detections(
                 ball_tracks, actual_fps, protected=_protected)
+            _ball_static_dropped_post = _static_post
             if _static_post:
                 logger.info("Static-FP filter (post-SAHI): dropped %d boxes pinned in place", _static_post)
                 _tag_ball_sources(ball_tracks, ball_source, "")  # clear source of removed frames
@@ -1458,8 +1472,11 @@ def run_pipeline(
         if samples
     }
 
+    # Report a high percentile, not the absolute max, so a single jitter spike does not
+    # become the headline "max speed" (a real player's peak is a sustained value).
+    _max_pct = float(getattr(_settings, "speed_max_percentile", 95.0))
     player_max_speed: dict[int, float] = {
-        pid: max(samples)
+        pid: float(np.percentile(samples, _max_pct))
         for pid, samples in player_speed_samples.items()
         if samples
     }
@@ -1495,6 +1512,11 @@ def run_pipeline(
         "ball_source_counts": dict(_Counter(s for s in ball_source if s)),  # yolo/sam2/sahi/kalman/interp
         "ball_total_frames": len(ball_source),
         "ball_flagged_segments": ball_flagged_segments,   # SAM2 drift candidates for review
+        # Per-run ball diagnostics for the analysis summary (Fase 3)
+        "ball_detector_source": _det_src_used,            # tracknet | yolo | curated
+        "ball_raw_detected": _raw_detected_count,         # frames with a direct detector hit
+        "ball_static_fp_dropped": _ball_static_dropped,           # pre-fusion static-FP boxes removed
+        "ball_static_fp_dropped_post_sahi": _ball_static_dropped_post,  # post-SAHI static-FP removed
         # Per-frame referee bboxes (negative track IDs to avoid collision)
         "referee_tracks": referee_tracks,
         # High-action frame windows from ball movement analysis [(start, end), ...]

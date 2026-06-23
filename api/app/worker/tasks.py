@@ -235,6 +235,7 @@ def run_analysis(
                         f"{analysis_end_s:.0f}s" if analysis_end_s else "end",
                     )
                 _ball_quality = getattr(_g, "ball_tracking_quality", None) or "base_plus"
+                _ball_mode = getattr(_g, "ball_detector_mode", None) or "auto"
 
         # Map SAM 2.1 quality → (checkpoint, config). None → pipeline uses settings default.
         # "efficienttam" = EfficientTAM pilot (Meta, ~1.6-2x faster, comparable quality);
@@ -279,8 +280,20 @@ def run_analysis(
             "drawing":           ("drawing",          78),
         }
 
+        # Stage timing log: record wall-clock seconds spent in each stage (the duration of a
+        # stage = time until the NEXT stage callback fires). Persisted in the run summary.
+        import time as _time
+        _stage_timings: dict[str, float] = {}
+        _stage_clock = {"name": None, "t": _time.time()}
+
         def _pipeline_progress(stage: str, pct: int) -> None:
             entry = _STAGE_LABELS.get(stage, (stage, pct))
+            now = _time.time()
+            if _stage_clock["name"] is not None:
+                _stage_timings[_stage_clock["name"]] = round(
+                    _stage_timings.get(_stage_clock["name"], 0.0) + (now - _stage_clock["t"]), 2)
+            _stage_clock["name"] = entry[0]
+            _stage_clock["t"] = now
             try:
                 with Session(engine) as db:
                     _update_job(db, job_id, current_stage=entry[0], progress_pct=entry[1])
@@ -292,6 +305,22 @@ def run_analysis(
         _active = _active_model_paths(engine)
         if _active:
             logger.info("Active model versions: %s", _active)
+
+        # ── Ball detector mode (TrackNet vs YOLO finetune) ────────────────────
+        # Global default: TrackNet runs only if a `tracknet_ball` version is ACTIVE in the
+        # registry. Per-game `ball_detector_mode` overrides: auto=follow global, tracknet=force
+        # TrackNet, yolo=force YOLO finetune. Passing "" to the pipeline forces YOLO.
+        _ball_mode = locals().get("_ball_mode", "auto")
+        _tracknet_active = _active.get("tracknet_ball", "")
+        if _ball_mode == "yolo":
+            _ball_tracknet_path = ""
+        elif _ball_mode == "tracknet":
+            _ball_tracknet_path = _tracknet_active
+            if not _ball_tracknet_path:
+                logger.warning("ball_detector_mode=tracknet but no active tracknet_ball model; using YOLO finetune")
+        else:  # auto
+            _ball_tracknet_path = _tracknet_active
+        logger.info("Ball detector mode=%s → tracknet_path=%r", _ball_mode, _ball_tracknet_path)
 
         try:
             metrics = run_pipeline(
@@ -321,6 +350,7 @@ def run_analysis(
                 analysis_end_s=analysis_end_s,
                 sam2_checkpoint=sam2_checkpoint,
                 sam2_config=sam2_config,
+                ball_tracknet_path=_ball_tracknet_path,
             )
         except Exception as exc:
             logger.exception("Pipeline failed for job %s", job_id)
@@ -365,6 +395,18 @@ def run_analysis(
 
         # ── 6. Persist metrics ─────────────────────────────────────────────
         _persist_metrics(engine, job_id, metrics)
+
+        # ── 6b. Persist per-run summary (detection proxies + timings) ──────
+        # Close the open stage clock so its duration is recorded.
+        try:
+            if _stage_clock["name"] is not None:
+                _stage_timings[_stage_clock["name"]] = round(
+                    _stage_timings.get(_stage_clock["name"], 0.0)
+                    + (_time.time() - _stage_clock["t"]), 2)
+        except Exception:
+            pass
+        _model_versions = {**_active, "ball_detector_mode": _ball_mode}
+        _persist_run_summary(engine, job_id, metrics, _model_versions, _stage_timings)
 
         # ── 7. Build CV events from pipeline metrics ───────────────────────
         cv_events = _build_cv_events(metrics)
@@ -420,6 +462,64 @@ def _build_roster_map(engine, job_uuid) -> dict[tuple[int, str], uuid.UUID]:
     except Exception as exc:
         logger.warning("Roster map unavailable: %s", exc)
     return out
+
+
+def _persist_run_summary(engine, job_id: str, metrics: dict,
+                         model_versions: dict, stage_timings: dict) -> None:
+    """Best-effort: write a JobRunSummary row with detection-quality proxies + timings.
+    Never raises into the job flow (a failed insert must not fail a completed analysis)."""
+    try:
+        from .. models.job_run_summary import JobRunSummary
+        from ..models.job import Job
+        from ..models.metrics import PlayerMetric
+
+        j_uuid = uuid.UUID(job_id)
+        total_frames = int(metrics.get("ball_total_frames") or metrics.get("total_frames") or 0)
+        src_counts = metrics.get("ball_source_counts") or {}
+        covered = sum(int(v) for v in src_counts.values())
+        coverage_pct = round(100.0 * covered / total_frames, 2) if total_frames else None
+        raw_detected = int(metrics.get("ball_raw_detected") or 0)
+        raw_rate = round(raw_detected / total_frames, 4) if total_frames else None
+        # raw_tracks = distinct track ids the tracker produced (pre-consolidation)
+        pa = metrics.get("player_assignment") or []
+        raw_tracks = len({tid for frame in pa for tid in (frame or {}).keys()}) or None
+
+        with Session(engine) as db:
+            job = db.get(Job, j_uuid)
+            total_seconds = None
+            if job is not None and job.started_at is not None:
+                total_seconds = round(
+                    (datetime.now(timezone.utc) - job.started_at).total_seconds(), 2)
+            pms = db.query(PlayerMetric).filter(PlayerMetric.job_id == j_uuid).all()
+            consolidated = len(pms) or None
+            with_dorsal = sum(1 for p in pms if (p.jersey_number or "").strip()) or None
+            fps_proc = round(total_frames / total_seconds, 2) if (total_frames and total_seconds) else None
+
+            existing = db.query(JobRunSummary).filter(JobRunSummary.job_id == j_uuid).one_or_none()
+            row = existing or JobRunSummary(job_id=j_uuid)
+            row.model_versions_used = {k: v for k, v in (model_versions or {}).items()}
+            row.ball_detector_source = metrics.get("ball_detector_source")
+            row.ball_detector_mode = (model_versions or {}).get("ball_detector_mode")
+            row.ball_raw_detection_rate = raw_rate
+            row.ball_coverage_pct = coverage_pct
+            row.ball_source_counts = src_counts
+            row.ball_static_fp_dropped = int(metrics.get("ball_static_fp_dropped") or 0)
+            row.ball_static_fp_dropped_post_sahi = int(metrics.get("ball_static_fp_dropped_post_sahi") or 0)
+            row.ball_review_flags = len(metrics.get("ball_flagged_segments") or [])
+            row.raw_tracks = raw_tracks
+            row.consolidated_identities = consolidated
+            row.identities_with_dorsal = with_dorsal
+            row.total_frames = total_frames or None
+            row.total_seconds = total_seconds
+            row.fps_processed = fps_proc
+            row.stage_timings = stage_timings or {}
+            if existing is None:
+                db.add(row)
+            db.commit()
+        logger.info("Run summary persisted for job %s (cov=%.1f%% raw=%.1f%% src=%s)",
+                    job_id, coverage_pct or 0.0, (raw_rate or 0.0) * 100, src_counts)
+    except Exception as exc:
+        logger.warning("Run summary persistence skipped for job %s: %s", job_id, exc)
 
 
 def _persist_metrics(engine, job_id: str, metrics: dict) -> None:

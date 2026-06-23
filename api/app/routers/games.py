@@ -114,6 +114,7 @@ class GameUpdate(BaseModel):
     analysis_start_s: Optional[float] = None  # live-play window start (seconds)
     analysis_end_s: Optional[float] = None    # live-play window end (seconds)
     ball_tracking_quality: Optional[str] = None  # 'small' | 'base_plus' | 'large'
+    ball_detector_mode: Optional[str] = None  # 'auto' | 'tracknet' | 'yolo'
 
 
 async def _find_or_create_team(db: AsyncSession, name: str, org_id) -> Team:
@@ -152,6 +153,9 @@ async def update_game(
     # Validate SAM 2.1 quality selector; ignore unknown values.
     if data.get("ball_tracking_quality") not in (None, "small", "base_plus", "large"):
         data.pop("ball_tracking_quality", None)
+    # Validate ball detector mode; ignore unknown values.
+    if data.get("ball_detector_mode") not in (None, "auto", "tracknet", "yolo"):
+        data.pop("ball_detector_mode", None)
 
     for field, value in data.items():
         setattr(game, field, value)
@@ -353,6 +357,11 @@ async def analyze_game(
     game = await db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")
+
+    # Per-run ball detector mode override → persist onto the game (run_analysis reads it).
+    if opts.ball_detector_mode in ("auto", "tracknet", "yolo"):
+        game.ball_detector_mode = opts.ball_detector_mode
+        await db.commit()
 
     # Find the latest video asset
     va_result = await db.execute(
