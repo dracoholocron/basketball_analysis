@@ -29,15 +29,25 @@ def _get_client():
 
     provider = os.getenv("LLM_PROVIDER", "ollama").lower()
 
+    # Fail fast: without a short timeout / no retries, an unreachable LLM (e.g. no ollama
+    # running) makes the request hang on the OpenAI client's default long timeout + retries,
+    # which surfaces as a Cloudflare "origin returned an invalid/incomplete response" page
+    # instead of our clean 502. Keep these small so the API responds quickly.
+    _timeout = float(os.getenv("LLM_TIMEOUT_S", "25"))
+
     if provider == "openai":
         return AsyncOpenAI(
             api_key=os.getenv("OPENAI_API_KEY", ""),
+            timeout=_timeout,
+            max_retries=0,
         )
     else:
         # Ollama (or any OpenAI-compatible local server)
         return AsyncOpenAI(
             base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
             api_key=os.getenv("LLM_API_KEY", "ollama"),
+            timeout=_timeout,
+            max_retries=0,
         )
 
 
