@@ -25,12 +25,19 @@ from ..services.storage import get_storage
 
 
 class CvEventOut(BaseModel):
+    idx: int = 0                       # index into the job's cv_events (for inline editing)
     event_type: str
     frame: int
     time_s: Optional[float] = None
     team_id: Optional[int] = None
     player_track_id: Optional[int] = None
     description: Optional[str] = None
+    edited: bool = False               # True when a correction overrides the original
+
+
+class CvEventCorrectionIn(BaseModel):
+    new_type: Optional[str] = None
+    new_player_track_id: Optional[int] = None
 
 
 class HighlightOut(BaseModel):
@@ -479,21 +486,82 @@ async def get_cv_events(
     if job is None:
         return []
     events = job.cv_events_json or []
+    # Overlay manual corrections (by event index) on the immutable analysis output.
+    from ..models.cv_event_correction import CvEventCorrection
+    corr_rows = (await db.execute(
+        select(CvEventCorrection).where(CvEventCorrection.job_id == job.id)
+    )).scalars().all()
+    corrections = {c.event_index: c for c in corr_rows}
     out = []
-    for e in events:
+    for i, e in enumerate(events):
         if not isinstance(e, dict):
             continue
-        # Support both old "type" key and new "event_type" key
         event_type = e.get("event_type") or e.get("type", "unknown")
+        track = e.get("player_track_id") or e.get("track_id")
+        c = corrections.get(i)
+        edited = False
+        if c is not None:
+            if c.new_type:
+                event_type = c.new_type; edited = True
+            if c.new_player_track_id is not None:
+                track = c.new_player_track_id; edited = True
         out.append(CvEventOut(
+            idx=i,
             event_type=event_type,
             frame=int(e.get("frame", 0)),
             time_s=e.get("time_s"),
             team_id=e.get("team_id"),
-            player_track_id=e.get("player_track_id") or e.get("track_id"),
+            player_track_id=track,
             description=e.get("description"),
+            edited=edited,
         ))
     return out
+
+
+@router.patch("/{game_id}/cv-events/{idx}", response_model=CvEventOut)
+async def correct_cv_event(
+    game_id: uuid.UUID,
+    idx: int,
+    payload: CvEventCorrectionIn,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "coach")),
+):
+    """Override an event's type and/or assigned player track (manual correction). Applied on
+    top of the immutable cv_events of the game's latest completed job."""
+    from ..models.cv_event_correction import CvEventCorrection
+    job = (await db.execute(
+        select(Job).where(Job.game_id == game_id, Job.status == JobStatus.DONE)
+        .order_by(Job.finished_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="No completed analysis for this game")
+    events = job.cv_events_json or []
+    if idx < 0 or idx >= len(events):
+        raise HTTPException(status_code=404, detail="Event index out of range")
+
+    corr = (await db.execute(
+        select(CvEventCorrection).where(
+            CvEventCorrection.job_id == job.id, CvEventCorrection.event_index == idx)
+    )).scalar_one_or_none()
+    if corr is None:
+        corr = CvEventCorrection(job_id=job.id, event_index=idx)
+        db.add(corr)
+    if payload.new_type is not None:
+        corr.new_type = payload.new_type or None
+    if payload.new_player_track_id is not None:
+        corr.new_player_track_id = payload.new_player_track_id
+    await db.commit()
+
+    e = events[idx]
+    return CvEventOut(
+        idx=idx,
+        event_type=corr.new_type or e.get("event_type") or e.get("type", "unknown"),
+        frame=int(e.get("frame", 0)), time_s=e.get("time_s"), team_id=e.get("team_id"),
+        player_track_id=(corr.new_player_track_id
+                         if corr.new_player_track_id is not None
+                         else (e.get("player_track_id") or e.get("track_id"))),
+        description=e.get("description"), edited=True,
+    )
 
 
 @router.get("/{game_id}/highlights", response_model=List[HighlightOut])

@@ -8,6 +8,7 @@ from .game import Game
 from .video_asset import VideoAsset
 from .job import Job, JobStatus, JobStage
 from .job_run_summary import JobRunSummary
+from .cv_event_correction import CvEventCorrection
 from .metrics import PlayerMetric, FrameMetric
 from .player_game_stats import PlayerGameStats
 from .model_version import ModelVersion
@@ -37,6 +38,7 @@ __all__ = [
     "JobStatus",
     "JobStage",
     "JobRunSummary",
+    "CvEventCorrection",
     "PlayerMetric",
     "FrameMetric",
     "PlayerGameStats",

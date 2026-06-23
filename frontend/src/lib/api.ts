@@ -192,6 +192,15 @@ export async function deleteJob(jobId: string): Promise<void> {
   await api.delete(`/jobs/${jobId}`);
 }
 
+/** Correct a CV event: change its type and/or reassign its player track (manual override). */
+export async function correctCvEvent(
+  gameId: string, idx: number,
+  payload: { new_type?: string; new_player_track_id?: number },
+) {
+  const { data } = await api.patch(`/games/${gameId}/cv-events/${idx}`, payload);
+  return data;
+}
+
 /** Check if a game has a video uploaded (non-throwing). */
 export async function hasGameVideo(gameId: string): Promise<boolean> {
   try {

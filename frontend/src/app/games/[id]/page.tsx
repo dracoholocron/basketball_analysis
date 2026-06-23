@@ -17,6 +17,7 @@ import {
   deleteJob,
   updateGameSettings,
   getJobSummary,
+  correctCvEvent,
   type JobRunSummary,
   api,
 } from "@/lib/api";
@@ -72,13 +73,17 @@ interface Metrics {
 }
 
 interface CvEvent {
+  idx?: number;
   event_type: string;
   frame: number;
   time_s?: number;
   team_id?: number;
   player_track_id?: number;
   description?: string;
+  edited?: boolean;
 }
+
+const CV_EVENT_TYPES = ["shot_attempt", "pass", "steal", "rebound", "shot_made", "shot_missed", "turnover", "block"];
 
 const TEAM_COLORS = ["#3b82f6", "#ef4444"];
 
@@ -114,6 +119,8 @@ export default function GameDetailPage() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [annotatedVideoUrl, setAnnotatedVideoUrl] = useState<string | null>(null);
   const [summary, setSummary] = useState<JobRunSummary | null>(null);
+  const [eventPopup, setEventPopup] = useState<CvEvent | null>(null);
+  const [clipPad, setClipPad] = useState(2);  // seconds before/after the event (configurable)
   const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
   const [poseFilterInput, setPoseFilterInput] = useState("");
   const [updatingPoses, setUpdatingPoses] = useState(false);
@@ -1090,12 +1097,18 @@ export default function GameDetailPage() {
               cvEvents.map((ev, i) => {
                 const cfg = CV_EVENT_CONFIG[ev.event_type];
                 return (
-                  <div key={i} className="flex items-center gap-3 bg-slate-800 rounded-lg px-4 py-3">
+                  <button key={i} onClick={() => annotatedVideoUrl && setEventPopup(ev)}
+                    disabled={!annotatedVideoUrl}
+                    title={annotatedVideoUrl ? "Ver el momento del evento" : "Video anotado no disponible"}
+                    className="w-full text-left flex items-center gap-3 bg-slate-800 hover:bg-slate-700/70 rounded-lg px-4 py-3 transition-colors disabled:cursor-default">
                     <span className={clsx("flex items-center justify-center w-7 h-7 rounded-full border text-xs", cfg?.bg ?? "bg-slate-700 border-slate-600", cfg?.color ?? "text-slate-400")}>
                       {cfg?.icon ?? <Activity size={14} />}
                     </span>
                     <div className="flex-1 min-w-0">
-                      <div className="text-white font-medium text-sm">{cfg?.label ?? ev.event_type.replace("_", " ")}</div>
+                      <div className="text-white font-medium text-sm">
+                        {cfg?.label ?? ev.event_type.replace("_", " ")}
+                        {ev.edited && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">editado</span>}
+                      </div>
                       {ev.description && <div className="text-xs text-slate-400 truncate">{ev.description}</div>}
                     </div>
                     {ev.player_track_id != null && (
@@ -1111,7 +1124,7 @@ export default function GameDetailPage() {
                     <span className="text-xs text-slate-500 ml-auto shrink-0">
                       {ev.time_s != null ? `${ev.time_s.toFixed(1)}s` : `f${ev.frame}`}
                     </span>
-                  </div>
+                  </button>
                 );
               })
             )}
@@ -1206,6 +1219,107 @@ export default function GameDetailPage() {
           );
         })()}
       </div>
+
+      {eventPopup && annotatedVideoUrl && (
+        <EventClipModal
+          event={eventPopup}
+          videoUrl={annotatedVideoUrl}
+          pad={clipPad}
+          setPad={setClipPad}
+          players={(metrics?.players ?? []).map(p => ({ track_id: p.track_id, label: p.display_label ?? (p.jersey_number ? `#${p.jersey_number}` : `#${p.track_id}`) }))}
+          onClose={() => setEventPopup(null)}
+          onSaved={(updated) => {
+            setCvEvents(prev => prev.map(e => e.idx === updated.idx ? { ...e, ...updated } : e));
+            setEventPopup(null);
+          }}
+          gameId={id}
+        />
+      )}
     </AppShell>
+  );
+}
+
+function EventClipModal({ event, videoUrl, pad, setPad, players, onClose, onSaved, gameId }: {
+  event: CvEvent; videoUrl: string; pad: number; setPad: (n: number) => void;
+  players: { track_id: number; label: string }[];
+  onClose: () => void; onSaved: (e: CvEvent) => void; gameId: string;
+}) {
+  const vRef = useRef<HTMLVideoElement>(null);
+  const [evType, setEvType] = useState(event.event_type);
+  const [trackId, setTrackId] = useState<number | undefined>(event.player_track_id);
+  const [saving, setSaving] = useState(false);
+  const t = event.time_s ?? 0;
+  const start = Math.max(0, t - pad);
+  const end = t + pad;
+
+  useEffect(() => {
+    const v = vRef.current;
+    if (!v) return;
+    const seek = () => { v.currentTime = start; v.play().catch(() => {}); };
+    const onTime = () => { if (v.currentTime >= end || v.currentTime < start - 0.5) v.currentTime = start; };
+    v.addEventListener("loadedmetadata", seek);
+    v.addEventListener("timeupdate", onTime);
+    if (v.readyState >= 1) seek();
+    return () => { v.removeEventListener("loadedmetadata", seek); v.removeEventListener("timeupdate", onTime); };
+  }, [start, end]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const payload: { new_type?: string; new_player_track_id?: number } = {};
+      if (evType !== event.event_type) payload.new_type = evType;
+      if (trackId != null && trackId !== event.player_track_id) payload.new_player_track_id = trackId;
+      if (Object.keys(payload).length === 0) { onClose(); return; }
+      const updated = await correctCvEvent(gameId, event.idx ?? 0, payload);
+      onSaved(updated);
+    } catch { /* ignore */ } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-2xl w-full shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-700">
+          <h3 className="font-semibold text-white text-sm">Momento del evento · {t.toFixed(1)}s</h3>
+          <button onClick={onClose}><X size={18} className="text-slate-400 hover:text-white" /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          <video ref={vRef} src={videoUrl} controls autoPlay muted loop className="w-full rounded-lg bg-black" />
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span>Ventana:</span>
+            {[1, 2, 3, 5].map(n => (
+              <button key={n} onClick={() => setPad(n)}
+                className={clsx("px-2 py-1 rounded", pad === n ? "bg-blue-600 text-white" : "bg-slate-700 text-slate-300")}>
+                ±{n}s
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-slate-400">Tipo de evento</label>
+              <select value={evType} onChange={e => setEvType(e.target.value)}
+                className="w-full mt-1 bg-slate-700 text-white text-sm rounded-lg px-3 py-2">
+                {CV_EVENT_TYPES.includes(evType) ? null : <option value={evType}>{evType}</option>}
+                {CV_EVENT_TYPES.map(tp => <option key={tp} value={tp}>{tp.replace("_", " ")}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-slate-400">Jugador</label>
+              <select value={trackId ?? ""} onChange={e => setTrackId(e.target.value ? Number(e.target.value) : undefined)}
+                className="w-full mt-1 bg-slate-700 text-white text-sm rounded-lg px-3 py-2">
+                <option value="">— sin asignar —</option>
+                {players.map(p => <option key={p.track_id} value={p.track_id}>{p.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button onClick={onClose} className="px-3 py-2 text-sm text-slate-300 hover:text-white">Cancelar</button>
+            <button onClick={save} disabled={saving}
+              className="px-4 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50">
+              {saving ? "Guardando…" : "Guardar corrección"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
