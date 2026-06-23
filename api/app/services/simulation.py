@@ -285,4 +285,14 @@ def run_monte_carlo(
         "key_drivers": key_drivers,
         "base_log_odds": base_log_odds,
         "runs_data": runs_data,
+        # Transparency: which data fed each team (box_score | cv | both | none) + box-vs-CV
+        # comparison when both exist (so the user can judge/improve precision).
+        "data_sources": {
+            "own": own_stats.get("data_sources", "none"),
+            "opp": opp_stats.get("data_sources", "none"),
+        },
+        "comparison": {
+            "own": own_stats.get("comparison"),
+            "opp": opp_stats.get("comparison"),
+        },
     }

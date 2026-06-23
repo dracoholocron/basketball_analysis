@@ -16,8 +16,11 @@ from sqlalchemy.orm import selectinload
 from ..core.database import get_db
 from ..core.deps import require_role, get_current_org_id
 from ..models.box_score import BoxScore
+from ..models.game import Game
 from ..models.game_event import GameEvent
+from ..models.job import Job, JobStatus
 from ..models.matchup import Matchup
+from ..models.metrics import PlayerMetric
 from ..models.play import Play
 from ..models.player_game_stats import PlayerGameStats
 from ..models.scouting_report import ScoutingReport
@@ -399,6 +402,108 @@ class PriorityKeyUpdate(BaseModel):
 
 # ── Helper: aggregate box scores for a team ───────────────────────────────────
 
+async def _cv_team_stats_from_metrics(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
+    """Aggregate CV per-team stats directly from player_metrics across the team's analyzed
+    games — WITHOUT needing roster mapping (which PlayerGameStats requires). CV team number
+    convention: 1 = home, 2 = away. Returns {} when the team has no analyzed games."""
+    games = (await db.execute(
+        select(Game.id, Game.home_team_id, Game.away_team_id)
+        .where((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+    )).all()
+    n_games = 0
+    fga = fgm = stl = 0
+    dist = 0.0
+    for gid, home, _away in games:
+        team_no = 1 if home == team_id else 2
+        job_id = (await db.execute(
+            select(Job.id).where(Job.game_id == gid, Job.status == JobStatus.DONE)
+            .order_by(Job.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+        if job_id is None:
+            continue
+        row = (await db.execute(
+            select(
+                func.coalesce(func.sum(PlayerMetric.shots_attempted), 0),
+                func.coalesce(func.sum(PlayerMetric.shots_made), 0),
+                func.coalesce(func.sum(PlayerMetric.steals_cv), 0),
+                func.coalesce(func.sum(PlayerMetric.total_distance_m), 0.0),
+            ).where(PlayerMetric.job_id == job_id, PlayerMetric.team_id == team_no)
+        )).one()
+        g_fga, g_fgm, g_stl, g_dist = int(row[0]), int(row[1]), int(row[2]), float(row[3])
+        if g_fga == 0 and g_stl == 0:
+            continue
+        n_games += 1
+        fga += g_fga; fgm += g_fgm; stl += g_stl; dist += g_dist
+    if n_games == 0:
+        return {}
+    return {
+        "cv_games": n_games,
+        "cv_shots_total": fga,
+        "cv_made_total": fgm,
+        "cv_steals_total": stl,
+        "cv_shots_pg": round(fga / n_games, 2),
+        "cv_steals_pg": round(stl / n_games, 2),
+        "cv_fg_pct": round(fgm / fga, 3) if fga > 0 else 0.0,
+        "cv_possessions": round(fga / n_games, 1),
+        "cv_def_pressure": round(min(0.06, (stl / n_games) / 200.0), 4),
+        "cv_distance_total_m": round(dist, 1),
+    }
+
+
+async def _cv_player_rows(db: AsyncSession, team_id: uuid.UUID) -> list[dict[str, Any]]:
+    """Per-player video metrics from player_metrics (consolidated by jersey number), so the
+    Video Intelligence table shows REAL analyzed-video players without roster mapping or box
+    scores. CV team number 1=home, 2=away. Returns [] when no analyzed video with dorsals."""
+    games = (await db.execute(
+        select(Game.id, Game.home_team_id, Game.away_team_id)
+        .where((Game.home_team_id == team_id) | (Game.away_team_id == team_id))
+    )).all()
+    acc: dict[str, dict[str, Any]] = {}
+    for gid, home, _away in games:
+        team_no = 1 if home == team_id else 2
+        job_id = (await db.execute(
+            select(Job.id).where(Job.game_id == gid, Job.status == JobStatus.DONE)
+            .order_by(Job.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+        if job_id is None:
+            continue
+        rows = (await db.execute(
+            select(PlayerMetric).where(
+                PlayerMetric.job_id == job_id, PlayerMetric.team_id == team_no,
+                PlayerMetric.jersey_number.isnot(None))
+        )).scalars().all()
+        for pm in rows:
+            jn = (pm.jersey_number or "").strip()
+            if not jn:
+                continue
+            a = acc.setdefault(jn, {
+                "jersey_number": jn, "player_name": pm.display_label or f"#{jn}",
+                "made": 0, "att": 0, "reb": 0, "stl": 0, "max_speed": 0.0,
+                "dist": 0.0, "games": set(),
+            })
+            a["made"] += pm.shots_made or 0
+            a["att"] += pm.shots_attempted or 0
+            a["reb"] += pm.rebounds or 0
+            a["stl"] += pm.steals_cv or 0
+            a["max_speed"] = max(a["max_speed"], pm.max_speed_kmh or 0.0)
+            a["dist"] += pm.total_distance_m or 0.0
+            a["games"].add(gid)
+    players = []
+    for a in acc.values():
+        g = max(1, len(a["games"]))
+        players.append({
+            "player_name": a["player_name"], "jersey_number": a["jersey_number"],
+            "avg_pts": round(2 * a["made"] / g, 1),   # CV detects rim shots → 2pt approx
+            "avg_ast": 0.0, "avg_blk": 0.0,
+            "avg_reb": round(a["reb"] / g, 1), "avg_stl": round(a["stl"] / g, 1),
+            "fg_pct": round(a["made"] / a["att"], 3) if a["att"] > 0 else 0.0,
+            "max_speed_kmh": round(a["max_speed"], 1),
+            "games": g,
+        })
+    players.sort(key=lambda x: x["avg_pts"], reverse=True)
+    return players
+
+
 async def _get_team_stats(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
     """Return team stats for simulation: box-score shooting rates (authoritative)
     MERGED with CV-derived tempo/defense from player_game_stats. ``data_sources``
@@ -421,11 +526,14 @@ async def _get_team_stats(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any
         avgs["avg_reb"] = round(avgs.get("avg_oreb", 0) + avgs.get("avg_dreb", 0), 2)
 
     # ── CV/tracking aggregates from analyzed games (tempo + defensive pressure) ──
+    # Prefer roster-mapped PlayerGameStats; if empty, fall back to a direct player_metrics
+    # aggregate (no roster mapping needed) so analyzed videos always surface CV stats.
     cv_res = await db.execute(
         select(PlayerGameStats).where(PlayerGameStats.team_id == team_id)
     )
     cv_rows = cv_res.scalars().all()
     cv_game_ids = {r.game_id for r in cv_rows}
+    has_cv = False
     if cv_game_ids:
         ng = len(cv_game_ids)
         team_steals = sum(r.steals_cv or 0 for r in cv_rows)
@@ -434,18 +542,34 @@ async def _get_team_stats(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any
         avgs["cv_games"] = ng
         avgs["cv_steals_pg"] = round(team_steals / ng, 2)
         avgs["cv_shots_pg"] = round(team_shots / ng, 2)
-        # Defensive pressure → extra turnover probability inflicted on the OPPONENT.
-        # Scaled & capped so CV defense nudges, not dominates, the box-score model.
         avgs["cv_def_pressure"] = round(min(0.06, (team_steals / ng) / 200.0), 4)
-        # CV shooting (rim makes/attempts) — only used as fallback when no box score.
         if team_shots > 0:
             avgs["cv_fg_pct"] = round(team_made / team_shots, 3)
-        # Pace proxy: shot attempts per game → possessions estimate when no box score.
         avgs["cv_possessions"] = round(team_shots / ng, 1) if ng else None
+        has_cv = True
+    else:
+        cv_m = await _cv_team_stats_from_metrics(db, team_id)
+        if cv_m:
+            avgs.update(cv_m)
+            has_cv = True
+
+    # ── Use BOTH when available + expose a box-vs-CV comparison (precision check) ──
+    # Box score stays the shooting anchor; CV adds tempo/defense and a cross-check. When
+    # both shooting %s exist, also provide a blended fg_pct the simulation can opt into.
+    if scores and has_cv:
+        box_fg = avgs.get("fg_pct")
+        cv_fg = avgs.get("cv_fg_pct")
+        comparison: dict[str, Any] = {}
+        if box_fg is not None and cv_fg is not None:
+            comparison["fg_pct"] = {"box": box_fg, "cv": cv_fg, "delta": round(cv_fg - box_fg, 3)}
+            avgs["fg_pct_blended"] = round((box_fg + cv_fg) / 2, 3)
+        comparison["shots_pg"] = {"box": avgs.get("avg_fga"), "cv": avgs.get("cv_shots_pg")}
+        comparison["steals_pg"] = {"box": avgs.get("avg_stl"), "cv": avgs.get("cv_steals_pg")}
+        avgs["comparison"] = comparison
 
     avgs["data_sources"] = (
-        "both" if (scores and cv_game_ids) else "box_score" if scores
-        else "cv" if cv_game_ids else "none"
+        "both" if (scores and has_cv) else "box_score" if scores
+        else "cv" if has_cv else "none"
     )
     return avgs
 
@@ -613,9 +737,20 @@ async def get_video_insights(
             })
         players.sort(key=lambda x: x["avg_pts"], reverse=True)
 
-        insights.append({"team_id": t["team_id"], "team_role": t["team_role"], "players": players})
+        # No per-player box scores → use REAL CV per-player metrics from analyzed video.
+        source = "box_score"
+        if not players:
+            players = await _cv_player_rows(db, team_id)
+            if players:
+                source = "cv"
 
-    return {"insights": insights, "note": "Derived from box score data"}
+        insights.append({"team_id": t["team_id"], "team_role": t["team_role"],
+                         "players": players, "source": source})
+
+    any_cv = any(i.get("source") == "cv" for i in insights)
+    note = ("Derived from analyzed video (CV per-player metrics)" if any_cv
+            else "Derived from box score data")
+    return {"insights": insights, "note": note}
 
 
 # ── Simulation endpoint ────────────────────────────────────────────────────────
@@ -671,7 +806,11 @@ async def run_simulation(
         score_range_own_high=sim_result["score_range_own_high"],
         score_range_opp_low=sim_result["score_range_opp_low"],
         score_range_opp_high=sim_result["score_range_opp_high"],
-        key_drivers={"drivers": sim_result.get("key_drivers", [])},
+        key_drivers={
+            "drivers": sim_result.get("key_drivers", []),
+            "data_sources": sim_result.get("data_sources"),
+            "comparison": sim_result.get("comparison"),
+        },
         base_log_odds=sim_result.get("base_log_odds"),
         runs_data=sim_result.get("runs_data", [])[:100],  # Store first 100 for space
     )
