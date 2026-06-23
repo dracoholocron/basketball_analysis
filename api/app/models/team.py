@@ -14,6 +14,7 @@ class Team(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     jersey_description: Mapped[str | None] = mapped_column(String(255))
     level: Mapped[str | None] = mapped_column(String(50))  # mini_basket|primaria|secundaria
+    logo_s3_key: Mapped[str | None] = mapped_column(String(512))  # team logo image (outputs bucket)
 
     organization: Mapped["Organization"] = relationship(back_populates="teams")
     players: Mapped[list["Player"]] = relationship(back_populates="team")

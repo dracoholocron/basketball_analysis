@@ -5,13 +5,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
-  listPlayers, createPlayer, updatePlayer, deletePlayer, listTeams,
+  listPlayers, createPlayer, updatePlayer, deletePlayer, uploadPlayerPhoto, listTeams,
   listTeamDivisions, listPlayerDivisions, assignPlayerToDivision,
   unassignPlayerFromDivision, type Division,
 } from "@/lib/api";
 import {
   UserCircle2, PlusCircle, Loader2, Pencil, Trash2, X, Check,
-  ChevronLeft, Layers,
+  ChevronLeft, Layers, ImagePlus,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -24,6 +24,7 @@ interface Player {
   team_id?: string;
   height_cm?: number;
   weight_kg?: number;
+  photo_url?: string | null;
 }
 
 const POSITIONS = ["PG", "SG", "SF", "PF", "C"];
@@ -112,6 +113,15 @@ function AdminPlayersContent() {
       weight_kg: player.weight_kg?.toString() ?? "",
     });
     setShowForm(true);
+  }
+
+  async function handlePhotoUpload(id: string, file: File) {
+    try {
+      const updated = await uploadPlayerPhoto(id, file);
+      setPlayers(prev => prev.map(p => p.id === id ? { ...p, ...updated } : p));
+    } catch {
+      /* ignore — backend validates content type */
+    }
   }
 
   async function handleDelete(id: string) {
@@ -243,7 +253,19 @@ function AdminPlayersContent() {
                   <tr key={p.id} className="hover:bg-slate-700/50 transition-colors">
                     <td className="px-4 py-3 font-mono font-bold text-slate-300">{p.jersey_number ?? "—"}</td>
                     <td className="px-4 py-3 font-medium">
-                      <Link href={`/players/${p.id}`} className="text-blue-400 hover:underline">{p.name}</Link>
+                      <div className="flex items-center gap-2">
+                        <label className="cursor-pointer inline-flex items-center justify-center h-8 w-8 rounded-lg bg-slate-700 hover:bg-slate-600 overflow-hidden shrink-0" title="Subir/cambiar foto">
+                          {p.photo_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={p.photo_url} alt={p.name} className="h-8 w-8 object-cover" />
+                          ) : (
+                            <ImagePlus size={13} className="text-slate-400" />
+                          )}
+                          <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                            onChange={(e) => { const f = e.target.files?.[0]; if (f) handlePhotoUpload(p.id, f); }} />
+                        </label>
+                        <Link href={`/players/${p.id}`} className="text-blue-400 hover:underline">{p.name}</Link>
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-slate-300">{p.position ?? "—"}</td>
                     <td className="px-4 py-3 text-slate-300">{teamName(p.team_id)}</td>

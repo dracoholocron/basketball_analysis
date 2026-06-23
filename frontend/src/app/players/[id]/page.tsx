@@ -22,6 +22,9 @@ interface GameRow {
 }
 interface PlayerStats {
   player_id: string; name: string; jersey_number?: string | null;
+  team_name?: string | null; position?: string | null;
+  height_cm?: number | null; weight_kg?: number | null; birth_date?: string | null;
+  photo_url?: string | null;
   seasons: string[]; aggregate: Agg; games: GameRow[];
 }
 
@@ -65,13 +68,28 @@ export default function PlayerProfilePage() {
         ) : (
           <>
             <div className="flex items-center justify-between flex-wrap gap-4">
-              <div className="flex items-center gap-3">
-                <UserCircle2 size={40} className="text-blue-400" />
+              <div className="flex items-center gap-4">
+                {data.photo_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={data.photo_url} alt={data.name}
+                    className="h-16 w-16 rounded-2xl object-cover border border-slate-600" />
+                ) : (
+                  <UserCircle2 size={56} className="text-blue-400" />
+                )}
                 <div>
                   <h1 className="text-2xl font-bold text-white">
                     {data.name} {data.jersey_number && <span className="text-slate-400">#{data.jersey_number}</span>}
                   </h1>
-                  <p className="text-sm text-slate-400">{a?.games ?? 0} juegos analizados</p>
+                  <p className="text-sm text-slate-300 mt-0.5">
+                    {[data.team_name, data.position].filter(Boolean).join(" · ") || "Sin equipo"}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {[
+                      data.height_cm ? `${data.height_cm} cm` : null,
+                      data.weight_kg ? `${data.weight_kg} kg` : null,
+                      `${a?.games ?? 0} juegos analizados`,
+                    ].filter(Boolean).join(" · ")}
+                  </p>
                 </div>
               </div>
               {data.seasons.length > 0 && (

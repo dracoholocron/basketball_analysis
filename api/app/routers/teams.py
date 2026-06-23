@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_db
 from ..core.deps import require_role, get_current_org_id
+from ..core.config import settings as api_settings
 from ..models.box_score import BoxScore
 from ..models.game import Game
 from ..models.player import Player
@@ -17,11 +18,27 @@ from ..models.season import Season
 from ..models.team import Team
 from ..schemas.box_score import TeamAverages
 from ..schemas.team import TeamCreate, TeamRead
+from ..services.storage import get_storage
 
 router = APIRouter(prefix="/teams", tags=["teams"])
 
 _admin = require_role("admin")
 _staff = require_role("admin", "coach")
+
+# Images (logos/photos) live in the outputs bucket (served publicly via Caddy /outputs/*).
+_IMG_CT = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp"}
+
+
+def _team_read(team: Team) -> TeamRead:
+    """TeamRead with a presigned logo_url when a logo has been uploaded."""
+    out = TeamRead.model_validate(team)
+    if getattr(team, "logo_s3_key", None):
+        try:
+            out.logo_url = get_storage().get_presigned_url(
+                api_settings.minio_bucket_outputs, team.logo_s3_key, public=True)
+        except Exception:
+            out.logo_url = None
+    return out
 
 
 @router.get("/{team_id}/stats")
@@ -100,7 +117,7 @@ async def list_teams(
     if org_id is not None:
         q = q.where(Team.organization_id == org_id)
     result = await db.execute(q)
-    return result.scalars().all()
+    return [_team_read(t) for t in result.scalars().all()]
 
 
 @router.get("/{team_id}", response_model=TeamRead)
@@ -113,7 +130,32 @@ async def get_team(
     team = await db.get(Team, team_id)
     if team is None or (org_id is not None and team.organization_id != org_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
-    return team
+    return _team_read(team)
+
+
+@router.post("/{team_id}/logo", response_model=TeamRead)
+async def upload_team_logo(
+    team_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_admin),
+    org_id: uuid.UUID | None = Depends(get_current_org_id),
+):
+    """Upload/replace a team logo image. Stored in the outputs bucket; served via presigned URL."""
+    team = await db.get(Team, team_id)
+    if team is None or (org_id is not None and team.organization_id != org_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    ext = _IMG_CT.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(status_code=422, detail="Logo must be a PNG/JPEG/WebP image")
+    key = f"assets/teams/{team_id}/logo.{ext}"
+    data = await file.read()
+    get_storage().upload_bytes(data, api_settings.minio_bucket_outputs, key,
+                               content_type=file.content_type)
+    team.logo_s3_key = key
+    await db.commit()
+    await db.refresh(team)
+    return _team_read(team)
 
 
 @router.post("", response_model=TeamRead, status_code=status.HTTP_201_CREATED)

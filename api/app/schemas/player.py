@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,9 @@ class PlayerCreate(BaseModel):
     jersey_number: str | None = Field(None, max_length=10)
     position: str | None = Field(None, max_length=10)
     track_id: int | None = None
+    height_cm: int | None = None
+    weight_kg: int | None = None
+    birth_date: date | None = None
 
 
 class PlayerUpdate(BaseModel):
@@ -19,6 +23,9 @@ class PlayerUpdate(BaseModel):
     jersey_number: str | None = Field(None, max_length=10)
     position: str | None = Field(None, max_length=10)
     track_id: int | None = None
+    height_cm: int | None = None
+    weight_kg: int | None = None
+    birth_date: date | None = None
 
 
 class PlayerRead(BaseModel):
@@ -28,5 +35,10 @@ class PlayerRead(BaseModel):
     jersey_number: str | None
     position: str | None
     track_id: int | None
+    height_cm: int | None = None
+    weight_kg: int | None = None
+    birth_date: date | None = None
+    photo_url: str | None = None   # presigned URL, populated from photo_s3_key
+    team_name: str | None = None   # convenience for the profile header
 
     model_config = {"from_attributes": True}

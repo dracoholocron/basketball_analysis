@@ -4,12 +4,12 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
-  listTeams, createTeam, listOrganizations, getMe,
+  listTeams, createTeam, uploadTeamLogo, listOrganizations, getMe,
   listTeamDivisions, createDivision, deleteDivision, type Division,
 } from "@/lib/api";
-import { PlusCircle, Users, ChevronLeft, AlertCircle, Building2, Layers, Trash2 } from "lucide-react";
+import { PlusCircle, Users, ChevronLeft, AlertCircle, Building2, Layers, Trash2, ImagePlus } from "lucide-react";
 
-interface Team { id: string; name: string; level?: string; jersey_description?: string; organization_id: string; }
+interface Team { id: string; name: string; level?: string; jersey_description?: string; organization_id: string; logo_url?: string | null; }
 interface Org { id: string; name: string; }
 
 const LEVELS = ["mini_basket", "primaria", "secundaria", "juvenil", "nba"];
@@ -21,6 +21,16 @@ export default function TeamsPage() {
   const [form, setForm] = useState({ name: "", jersey_description: "", level: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  async function handleLogoUpload(teamId: string, file: File) {
+    try {
+      await uploadTeamLogo(teamId, file);
+      const d = await listTeams();
+      setTeams(Array.isArray(d) ? d : (d.items ?? []));
+    } catch {
+      setError("No se pudo subir el logo (usa PNG/JPEG/WebP).");
+    }
+  }
 
   useEffect(() => {
     // Load current user's org name for display
@@ -91,6 +101,7 @@ export default function TeamsPage() {
             <table className="min-w-full text-sm mb-6">
               <thead>
                 <tr>
+                  <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Logo</th>
                   <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Name</th>
                   <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Level</th>
                   <th className="pb-2 pr-4 text-left text-xs font-semibold text-slate-400 uppercase">Jersey</th>
@@ -100,6 +111,18 @@ export default function TeamsPage() {
               <tbody className="divide-y divide-slate-50">
                 {teams.map((t) => (
                   <tr key={t.id} className="table-row">
+                    <td className="table-cell">
+                      <label className="cursor-pointer inline-flex items-center justify-center h-9 w-9 rounded-lg bg-slate-100 hover:bg-slate-200 overflow-hidden" title="Subir/cambiar logo">
+                        {t.logo_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={t.logo_url} alt={t.name} className="h-9 w-9 object-cover" />
+                        ) : (
+                          <ImagePlus size={15} className="text-slate-400" />
+                        )}
+                        <input type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+                          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleLogoUpload(t.id, f); }} />
+                      </label>
+                    </td>
                     <td className="table-cell font-medium">
                       <Link href={`/teams/${t.id}`} className="text-blue-600 hover:underline">{t.name}</Link>
                     </td>

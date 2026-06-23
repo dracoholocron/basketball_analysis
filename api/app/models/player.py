@@ -1,5 +1,6 @@
 import uuid
-from sqlalchemy import ForeignKey, Integer, String
+from datetime import date
+from sqlalchemy import Date, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..core.database import Base
 
@@ -15,6 +16,11 @@ class Player(Base):
     jersey_number: Mapped[str | None] = mapped_column(String(10))
     position: Mapped[str | None] = mapped_column(String(10))
     track_id: Mapped[int | None] = mapped_column(Integer, comment="YOLO tracker ID in video")
+    # General info (player profile)
+    photo_s3_key: Mapped[str | None] = mapped_column(String(512))  # player photo (outputs bucket)
+    height_cm: Mapped[int | None] = mapped_column(Integer)
+    weight_kg: Mapped[int | None] = mapped_column(Integer)
+    birth_date: Mapped[date | None] = mapped_column(Date)
 
     team: Mapped["Team"] = relationship(back_populates="players")
     metrics: Mapped[list["PlayerMetric"]] = relationship(back_populates="player")

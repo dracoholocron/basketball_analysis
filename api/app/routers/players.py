@@ -3,22 +3,44 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.database import get_db
 from ..core.deps import require_role, get_current_org_id
+from ..core.config import settings as api_settings
 from ..models.player import Player
 from ..models.team import Team
 from ..models.metrics import PlayerMetric
 from ..models.player_game_stats import PlayerGameStats
 from ..schemas.player import PlayerCreate, PlayerRead, PlayerUpdate
+from ..services.storage import get_storage
 
 router = APIRouter(prefix="/players", tags=["players"])
 
 _admin = require_role("admin")
 _staff = require_role("admin", "coach")
+_IMG_CT = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp"}
+
+
+def _photo_url(player: Player) -> str | None:
+    if not getattr(player, "photo_s3_key", None):
+        return None
+    try:
+        return get_storage().get_presigned_url(
+            api_settings.minio_bucket_outputs, player.photo_s3_key, public=True)
+    except Exception:
+        return None
+
+
+async def _player_read(db: AsyncSession, player: Player) -> PlayerRead:
+    out = PlayerRead.model_validate(player)
+    out.photo_url = _photo_url(player)
+    if player.team_id:
+        team = await db.get(Team, player.team_id)
+        out.team_name = team.name if team else None
+    return out
 
 
 @router.get("", response_model=list[PlayerRead])
@@ -47,7 +69,31 @@ async def get_player(
     player = await db.get(Player, player_id)
     if player is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Player not found")
-    return player
+    return await _player_read(db, player)
+
+
+@router.post("/{player_id}/photo", response_model=PlayerRead)
+async def upload_player_photo(
+    player_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_admin),
+):
+    """Upload/replace a player photo. Stored in the outputs bucket; served via presigned URL."""
+    player = await db.get(Player, player_id)
+    if player is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Player not found")
+    ext = _IMG_CT.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(status_code=422, detail="Photo must be a PNG/JPEG/WebP image")
+    key = f"assets/players/{player_id}/photo.{ext}"
+    data = await file.read()
+    get_storage().upload_bytes(data, api_settings.minio_bucket_outputs, key,
+                               content_type=file.content_type)
+    player.photo_s3_key = key
+    await db.commit()
+    await db.refresh(player)
+    return await _player_read(db, player)
 
 
 @router.get("/{player_id}/aggregate-metrics")
@@ -162,9 +208,18 @@ async def player_stats(
         }
         for r in rows
     ]
+    team_name = None
+    if player.team_id:
+        _t = await db.get(Team, player.team_id)
+        team_name = _t.name if _t else None
     return {
         "player_id": str(player_id), "name": player.name,
         "jersey_number": player.jersey_number, "team_id": str(player.team_id) if player.team_id else None,
+        # Profile/ficha fields
+        "team_name": team_name, "position": player.position,
+        "height_cm": player.height_cm, "weight_kg": player.weight_kg,
+        "birth_date": player.birth_date.isoformat() if player.birth_date else None,
+        "photo_url": _photo_url(player),
         "seasons": seasons,
         "aggregate": _aggregate_pgs(rows),
         "games": games,
@@ -183,11 +238,14 @@ async def create_player(
         jersey_number=payload.jersey_number,
         position=payload.position,
         track_id=payload.track_id,
+        height_cm=payload.height_cm,
+        weight_kg=payload.weight_kg,
+        birth_date=payload.birth_date,
     )
     db.add(player)
     await db.commit()
     await db.refresh(player)
-    return player
+    return await _player_read(db, player)
 
 
 @router.put("/{player_id}", response_model=PlayerRead)
@@ -204,7 +262,7 @@ async def update_player(
         setattr(player, field, value)
     await db.commit()
     await db.refresh(player)
-    return player
+    return await _player_read(db, player)
 
 
 @router.delete("/{player_id}", status_code=status.HTTP_204_NO_CONTENT)

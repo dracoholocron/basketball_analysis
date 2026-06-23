@@ -565,6 +565,16 @@ export async function createTeam(payload: Record<string, unknown>) {
   return data;
 }
 
+/** Upload/replace a team logo image. Returns the updated team (with logo_url). */
+export async function uploadTeamLogo(teamId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post(`/teams/${teamId}/logo`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data;
+}
+
 // ── Players ───────────────────────────────────────────────────────────────────
 export async function listPlayers(teamId?: string, skip = 0, limit = 100) {
   const { data } = await api.get("/players", { params: { team_id: teamId, skip, limit } });
@@ -578,6 +588,16 @@ export async function createPlayer(payload: Record<string, unknown>) {
 
 export async function updatePlayer(playerId: string, payload: Record<string, unknown>) {
   const { data } = await api.put(`/players/${playerId}`, payload);
+  return data;
+}
+
+/** Upload/replace a player photo. Returns the updated player (with photo_url). */
+export async function uploadPlayerPhoto(playerId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post(`/players/${playerId}/photo`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
   return data;
 }
 

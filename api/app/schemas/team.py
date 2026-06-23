@@ -18,5 +18,6 @@ class TeamRead(BaseModel):
     name: str
     jersey_description: str | None
     level: str | None
+    logo_url: str | None = None   # presigned URL, populated from logo_s3_key
 
     model_config = {"from_attributes": True}
