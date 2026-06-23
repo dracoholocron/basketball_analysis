@@ -1241,6 +1241,42 @@ def run_pipeline(
         )
     logger.info("Speed/distance done")
 
+    # ── CV shot heatmap: attach court-normalized origin (x_pct,y_pct) to each shot event ──
+    # Heuristic shooter = the player closest to the ball at the shot frame; use that player's
+    # tactical (court) position normalized to 0..1. Best-effort; skipped silently if missing.
+    try:
+        from utils.bbox_utils import get_foot_position as _foot
+        _tw = float(getattr(tactical_view_converter, "width", 0) or 1)
+        _th = float(getattr(tactical_view_converter, "height", 0) or 1)
+        for ev in shot_events:
+            fi = int(ev.get("frame", -1))
+            if fi < 0 or fi >= len(tactical_player_positions):
+                continue
+            frame_tac = tactical_player_positions[fi]
+            if not frame_tac:
+                continue
+            shooter = None
+            bc = _ball_center(ball_tracks[fi]) if fi < len(ball_tracks) else None
+            if bc is not None and fi < len(player_tracks):
+                best_d = 1e18
+                for tid, info in player_tracks[fi].items():
+                    bbox = info.get("bbox") if isinstance(info, dict) else None
+                    if not bbox or tid not in frame_tac:
+                        continue
+                    fp = _foot(bbox)
+                    d = (fp[0] - bc[0]) ** 2 + (fp[1] - bc[1]) ** 2
+                    if d < best_d:
+                        best_d = d; shooter = tid
+            if shooter is None:
+                shooter = next(iter(frame_tac.keys()), None)
+            if shooter is None or shooter not in frame_tac:
+                continue
+            tx, ty = frame_tac[shooter]
+            ev["x_pct"] = round(max(0.0, min(1.0, tx / _tw)), 4)
+            ev["y_pct"] = round(max(0.0, min(1.0, ty / _th)), 4)
+    except Exception as _exc:
+        logger.warning("Shot heatmap position enrichment skipped: %s", _exc)
+
     # ── Game window: exclude warm-up / pre-game so metrics count only live play ──
     # Mask per-frame possession/pass/interception and zero distance/speed outside
     # [analysis_start_s, analysis_end_s]; filter CV events to the window. The video

@@ -904,13 +904,19 @@ def _build_cv_events(metrics: dict) -> list[dict]:
     # Shot attempt events (pose-based: wrist elevated + ball near wrist)
     for ev in metrics.get("shot_events", []):
         _tid = int(ev.get("track_id", -1))
-        events.append({
-            "event_type": "shot_attempt",
+        _se = {
+            "event_type": "shot_made" if ev.get("made") else "shot_attempt",
             "frame": int(ev["frame"]),
             "time_s": frame_to_s(ev["frame"]),
             "player_track_id": _tid if _tid != -1 else None,
-            "description": "Intento de tiro" if _tid == -1 else f"Intento de tiro — jugador {_tid}",
-        })
+            "made": bool(ev.get("made", False)),
+            "description": ("Tiro anotado" if ev.get("made") else "Intento de tiro")
+                           + ("" if _tid == -1 else f" — jugador {_tid}"),
+        }
+        # Court-normalized shot origin for the CV shot heatmap (when available).
+        if ev.get("x_pct") is not None and ev.get("y_pct") is not None:
+            _se["x_pct"] = float(ev["x_pct"]); _se["y_pct"] = float(ev["y_pct"])
+        events.append(_se)
 
     # Rebound events (pose-based: ball descending then reversing + player proximity)
     for ev in metrics.get("rebound_events", []):

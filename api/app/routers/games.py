@@ -518,6 +518,47 @@ async def get_cv_events(
     return out
 
 
+@router.get("/{game_id}/shot-heatmap", response_model=dict)
+async def get_shot_heatmap(
+    game_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Shot heatmap (10x6 court grid) built from the analyzed video's CV shot events
+    (x_pct/y_pct origins). Empty grid when the latest analysis has no positioned shots."""
+    job = (await db.execute(
+        select(Job).where(Job.game_id == game_id, Job.status == JobStatus.DONE)
+        .order_by(Job.finished_at.desc()).limit(1)
+    )).scalar_one_or_none()
+    grid = [[0] * 6 for _ in range(10)]
+    total = made = positioned = 0
+    if job is not None:
+        for e in (job.cv_events_json or []):
+            if not isinstance(e, dict):
+                continue
+            et = e.get("event_type") or e.get("type", "")
+            if et not in ("shot_attempt", "shot_made", "shot_missed"):
+                continue
+            total += 1
+            if e.get("made") or et == "shot_made":
+                made += 1
+            x, y = e.get("x_pct"), e.get("y_pct")
+            if x is None or y is None:
+                continue
+            col = min(5, max(0, int(float(x) * 6)))
+            row = min(9, max(0, int(float(y) * 10)))
+            grid[row][col] += 1
+            positioned += 1
+    return {
+        "heat_grid": grid,
+        "total_shots": total,
+        "made_shots": made,
+        "positioned_shots": positioned,
+        "fg_pct": round(made / total, 3) if total else 0.0,
+        "source": "cv",
+    }
+
+
 @router.patch("/{game_id}/cv-events/{idx}", response_model=CvEventOut)
 async def correct_cv_event(
     game_id: uuid.UUID,

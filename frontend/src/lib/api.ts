@@ -192,6 +192,16 @@ export async function deleteJob(jobId: string): Promise<void> {
   await api.delete(`/jobs/${jobId}`);
 }
 
+export interface ShotHeatmap {
+  heat_grid: number[][]; total_shots: number; made_shots: number;
+  positioned_shots: number; fg_pct: number; source: string;
+}
+/** Shot heatmap built from the analyzed video's CV shot events. */
+export async function getShotHeatmap(gameId: string): Promise<ShotHeatmap> {
+  const { data } = await api.get(`/games/${gameId}/shot-heatmap`);
+  return data as ShotHeatmap;
+}
+
 /** Correct a CV event: change its type and/or reassign its player track (manual override). */
 export async function correctCvEvent(
   gameId: string, idx: number,

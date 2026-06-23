@@ -18,7 +18,9 @@ import {
   updateGameSettings,
   getJobSummary,
   correctCvEvent,
+  getShotHeatmap,
   type JobRunSummary,
+  type ShotHeatmap,
   api,
 } from "@/lib/api";
 
@@ -119,6 +121,7 @@ export default function GameDetailPage() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [annotatedVideoUrl, setAnnotatedVideoUrl] = useState<string | null>(null);
   const [summary, setSummary] = useState<JobRunSummary | null>(null);
+  const [shotHeat, setShotHeat] = useState<ShotHeatmap | null>(null);
   const [eventPopup, setEventPopup] = useState<CvEvent | null>(null);
   const [clipPad, setClipPad] = useState(2);  // seconds before/after the event (configurable)
   const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
@@ -152,6 +155,7 @@ export default function GameDetailPage() {
     });
     getGameMetrics(id).then(setMetrics).catch(() => null);
     api.get(`/games/${id}/cv-events`).then(r => setCvEvents(r.data ?? [])).catch(() => null);
+    getShotHeatmap(id).then(setShotHeat).catch(() => null);
   }, [id]);
 
   // Hydrate page state on load
@@ -307,6 +311,7 @@ export default function GameDetailPage() {
       setMetrics(m);
       setCvEvents(events);
       getJobSummary(job.id).then(setSummary).catch(() => null);
+      getShotHeatmap(id).then(setShotHeat).catch(() => null);
     } catch (err) {
       console.error(err);
     } finally {
@@ -1014,6 +1019,24 @@ export default function GameDetailPage() {
           );
         })()}
 
+        {/* CV shot heatmap (from analyzed video) */}
+        {shotHeat && shotHeat.total_shots > 0 && (
+          <div className="bg-slate-800 rounded-xl p-5">
+            <h2 className="text-base font-semibold text-white mb-1 flex items-center gap-2">
+              <Target size={16} className="text-rose-400" /> Mapa de tiros (video)
+            </h2>
+            <p className="text-xs text-slate-400 mb-3">
+              {shotHeat.total_shots} tiros · {shotHeat.made_shots} anotados · FG% {Math.round(shotHeat.fg_pct * 100)}%
+              {shotHeat.positioned_shots < shotHeat.total_shots
+                ? ` · ${shotHeat.positioned_shots} con posición` : ""}
+            </p>
+            <ShotHeatCourt grid={shotHeat.heat_grid} />
+            {shotHeat.positioned_shots === 0 && (
+              <p className="text-xs text-slate-500 mt-2">Sin posiciones de tiro (reanaliza el video con la versión actual para ubicarlos en la cancha).</p>
+            )}
+          </div>
+        )}
+
         {/* Tabs */}
         <div className="flex gap-1 bg-slate-800 p-1 rounded-lg w-fit">
           {(["stats", "events", "players"] as const).map(tab => (
@@ -1236,6 +1259,24 @@ export default function GameDetailPage() {
         />
       )}
     </AppShell>
+  );
+}
+
+function ShotHeatCourt({ grid }: { grid: number[][] }) {
+  const safe = Array.isArray(grid) && grid.length ? grid : Array.from({ length: 10 }, () => Array(6).fill(0));
+  const max = Math.max(1, ...safe.flat());
+  const rows = safe.length, cols = safe[0]?.length ?? 6;
+  const cw = 500 / cols, ch = 280 / rows;
+  return (
+    <svg viewBox="0 0 500 280" className="w-full max-w-xl rounded-xl border border-slate-700">
+      <rect width="500" height="280" fill="#c8a96e" rx="8" />
+      {safe.map((row, ri) => row.map((n, ci) => (
+        <rect key={`${ri}-${ci}`} x={ci * cw} y={ri * ch} width={cw} height={ch}
+          fill="#ef4444" fillOpacity={n === 0 ? 0 : 0.15 + (n / max) * 0.75} />
+      )))}
+      <line x1="250" y1="2" x2="250" y2="278" stroke="#f5f0e8" strokeWidth="1.5" />
+      <circle cx="250" cy="140" r="28" fill="none" stroke="#f5f0e8" strokeWidth="1.5" />
+    </svg>
   );
 }
 
