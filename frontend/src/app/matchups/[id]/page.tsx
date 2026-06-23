@@ -153,6 +153,8 @@ function MatchupWorkspaceContent() {
     try {
       await runSimulation(id);
       await loadSimulation();
+      // Simulation also generates suggested (diagrammed) plays → refresh the linked list.
+      listPlays(id, 0, 20).then((p: unknown[]) => setPlays(Array.isArray(p) ? p : [])).catch(() => {});
     } catch { /* ignore */ }
     finally { setSimRunning(false); }
   }
@@ -480,6 +482,19 @@ function MatchupWorkspaceContent() {
                           ))}
                         </ul>
                       )}
+                    </div>
+
+                    {/* Suggested plays generated from the key drivers */}
+                    <div className="card flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-700">Jugadas sugeridas</p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          La simulación generó jugadas diagramadas según los key drivers. Edítalas en Play Builder.
+                        </p>
+                      </div>
+                      <Link href={`/play-builder?matchup=${id}`} className="btn-secondary btn-sm shrink-0">
+                        <PenTool size={13} /> Ver jugadas sugeridas
+                      </Link>
                     </div>
                   </>
                 ) : (

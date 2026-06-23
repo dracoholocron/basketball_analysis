@@ -504,6 +504,66 @@ async def _cv_player_rows(db: AsyncSession, team_id: uuid.UUID) -> list[dict[str
     return players
 
 
+def _suggested_play_specs(drivers: list[dict], pace_fast: bool) -> list[tuple[str, str]]:
+    """Map simulation key-drivers → (template_name, why) suggestions. Reuses the procedural
+    play library; each driver picks a play archetype that targets it."""
+    # feature_name → (template, rationale)
+    table = {
+        "own_fg_pct": ("Pick & Roll", "Genera tiros de alta eficiencia cerca del aro"),
+        "own_fg3_pct": ("Floppy", "Libera tiradores para triples de catch-and-shoot"),
+        "own_oreb_rate": ("Hi-Lo Zone Series", "Juego interior y segundas oportunidades al rebote"),
+        "own_tov_rate": ("Horns", "Set estructurado que reduce pérdidas"),
+        "opp_fg_pct": ("Zone Attack", "Ataca espacios para forzar tiros difíciles del rival"),
+    }
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for d in (drivers or [])[:4]:
+        fn = d.get("feature_name") or ""
+        if fn in table and table[fn][0] not in seen:
+            out.append(table[fn]); seen.add(table[fn][0])
+    if pace_fast and "Press Break" not in seen:
+        out.append(("Press Break", "Ritmo alto: transición y contraataque"))
+        seen.add("Press Break")
+    if not out:
+        out.append(("Motion Offense", "Base de espaciamiento y lectura"))
+    return out[:4]
+
+
+async def _generate_suggested_plays(db: AsyncSession, matchup_id: uuid.UUID,
+                                    org_id, drivers: list[dict], pace_fast: bool) -> int:
+    """Create editable Play rows (category 'sim_suggested', linked to the matchup) from the
+    simulation's key drivers, diagrammed via the procedural play-library templates."""
+    from ..services.play_library import (
+        TEMPLATE_PLAYS, MASTER_2026_PLAYS, expand_play, validate_svg_data,
+    )
+    by_name = {p.name: p for p in (TEMPLATE_PLAYS + MASTER_2026_PLAYS)}
+    # Replace prior suggestions for this matchup (idempotent regeneration).
+    prior = (await db.execute(
+        select(Play).where(Play.linked_matchup_id == matchup_id, Play.category == "sim_suggested")
+    )).scalars().all()
+    for p in prior:
+        await db.delete(p)
+
+    created = 0
+    for tmpl_name, why in _suggested_play_specs(drivers, pace_fast):
+        defn = by_name.get(tmpl_name)
+        if defn is None:
+            continue
+        svg = expand_play(defn)
+        if validate_svg_data(svg):
+            continue
+        db.add(Play(
+            organization_id=org_id, linked_matchup_id=matchup_id,
+            name=f"Sugerida: {defn.name}", category="sim_suggested",
+            description=f"{why}. {defn.description}",
+            svg_data=svg, svg_data_version=2,
+            tags=(defn.tags or []) + ["sim_suggested"], pace=defn.pace, shared=False,
+        ))
+        created += 1
+    await db.commit()
+    return created
+
+
 async def _get_team_stats(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
     """Return team stats for simulation: box-score shooting rates (authoritative)
     MERGED with CV-derived tempo/defense from player_game_stats. ``data_sources``
@@ -867,6 +927,17 @@ async def run_simulation(
         db.add(key)
 
     await db.commit()
+
+    # Suggested plays (diagrammed) from the key drivers → editable in Play Builder.
+    try:
+        _pace_fast = (sim_result.get("avg_score_own", 0) + sim_result.get("avg_score_opp", 0)) > 140
+        await _generate_suggested_plays(
+            db, matchup_id, m.organization_id,
+            sim_result.get("key_drivers", []), _pace_fast,
+        )
+    except Exception as exc:  # best-effort; never fail the simulation
+        import logging as _lg
+        _lg.getLogger(__name__).warning("Suggested plays generation skipped: %s", exc)
 
     final = await db.execute(
         select(GameSimulation)
