@@ -905,7 +905,9 @@ def run_pipeline(
                 logger.warning("Jersey OCR skipped: %s", exc)
 
         _progress("pose_estimation", 62)
-        if show_poses:
+        # Poses are needed either to draw them on the baked video (show_poses) OR to export
+        # the per-player highlight layer (emit_layers), even when not drawn on the video.
+        if show_poses or emit_layers:
             _pose_stub = os.path.join(stub_path, "pose_sequence_stub.pkl")
             pose_sequence = read_stub(use_stubs, _pose_stub)
             if pose_sequence is None:
@@ -1000,7 +1002,9 @@ def run_pipeline(
         logger.info("Team assignment done")
 
         _progress("pose_estimation", 62)
-        if show_poses:
+        # Poses are needed either to draw them (show_poses) or to export the per-player
+        # highlight layer (emit_layers), even when not drawn on the baked video.
+        if show_poses or emit_layers:
             _pose_stub = os.path.join(stub_path, "pose_sequence_stub.pkl")
             pose_sequence = read_stub(use_stubs, _pose_stub)
             if pose_sequence is None:
